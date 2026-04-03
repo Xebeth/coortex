@@ -118,8 +118,10 @@ Generated files include:
 - `.coortex/runtime/snapshot.json`
 - `.coortex/runtime/telemetry.ndjson`
 - `.coortex/runtime/last-resume-envelope.json`
+- `.coortex/artifacts/results/*.txt` when envelope trimming persists large outputs
 - `.coortex/adapters/codex/kernel.md`
 - `.coortex/adapters/codex/profile.json`
+- `.codex/config.toml` with a Coortex-managed `model_instructions_file` block for project-local Codex integration
 
 ## Local usage
 
