@@ -103,11 +103,22 @@ The current repository now includes a working Milestone 1 vertical slice in Type
 - host-agnostic runtime models under `src/core`
 - append-only persistence and rebuildable snapshot/projection support under `src/persistence` and `src/projections`
 - recovery brief generation under `src/recovery`
-- a Codex profile manager under `src/codex/profile`
-- a static Codex kernel boundary under `src/codex/kernel`
-- a Codex reference adapter under `src/codex/adapter`
+- the shared adapter contract under `src/adapters`
+- a Codex profile manager under `src/hosts/codex/profile`
+- a static Codex kernel boundary under `src/hosts/codex/kernel`
+- a Codex reference adapter under `src/hosts/codex/adapter`
 - explicit placeholder boundaries under `src/workflows` and `src/backends`
 - minimal `ctx` CLI surfaces under `src/cli`
+
+The adapter contract now includes:
+
+- startup/resume integration
+- bounded envelope building
+- result normalization
+- decision normalization
+- telemetry normalization hooks
+
+Repository tests also enforce the Milestone 1 module map and guard key boundary rules so the documented architecture stays true as the code evolves.
 
 The durable runtime root is `.coortex/` in the current project.
 

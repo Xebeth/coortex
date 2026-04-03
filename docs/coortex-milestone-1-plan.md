@@ -214,6 +214,8 @@ Milestone 1 is complete when:
 8. tool-output trimming is active
 9. telemetry records lifecycle and envelope/trimming metadata
 10. basic CLI commands work against real persisted state
+11. the implementation matches the documented `adapters/` + `hosts/<reference-host>/` module map
+12. tests guard boundary regressions for the Milestone 1 slice
 
 ---
 
