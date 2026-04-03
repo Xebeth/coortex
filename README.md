@@ -99,11 +99,14 @@ The first milestone should deliver:
 
 The current repository now includes a working Milestone 1 vertical slice in TypeScript/Node:
 
+- config types and validation under `src/config`
 - host-agnostic runtime models under `src/core`
 - append-only persistence and rebuildable snapshot/projection support under `src/persistence` and `src/projections`
 - recovery brief generation under `src/recovery`
-- bounded envelope and trimming logic under `src/adapters`
-- a Codex reference adapter under `src/hosts/codex`
+- a Codex profile manager under `src/codex/profile`
+- a static Codex kernel boundary under `src/codex/kernel`
+- a Codex reference adapter under `src/codex/adapter`
+- explicit placeholder boundaries under `src/workflows` and `src/backends`
 - minimal `ctx` CLI surfaces under `src/cli`
 
 The durable runtime root is `.coortex/` in the current project.
