@@ -1,4 +1,4 @@
-import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
+import type { RecoveryBrief, RuntimeProjection } from "./types.js";
 import type { RuntimeStore } from "../persistence/store.js";
 
 export interface AdapterCapabilities {

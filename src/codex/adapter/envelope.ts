@@ -1,5 +1,5 @@
-import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
-import type { TaskEnvelope, TrimmedField } from "./types.js";
+import type { RecoveryBrief, RuntimeProjection } from "../../core/types.js";
+import type { TaskEnvelope, TrimmedField } from "../../core/host.js";
 
 export interface EnvelopeOptions {
   host: string;
@@ -24,7 +24,11 @@ export function buildTaskEnvelope(
 
   const trimmedFields: TrimmedField[] = [];
   const recentResults = brief.lastDurableResults.map((result) => {
-    const trimmed = trimText(result.summary, options.resultSummaryLimit ?? 400, `result:${result.resultId}`);
+    const trimmed = trimText(
+      result.summary,
+      options.resultSummaryLimit ?? 400,
+      `result:${result.resultId}`
+    );
     if (trimmed.trimmed) {
       trimmedFields.push({
         label: `result:${result.resultId}`,
@@ -66,12 +70,11 @@ export function buildTaskEnvelope(
 
   const maxChars = options.maxChars ?? 4_000;
   if (envelope.estimatedChars > maxChars) {
-    const compactBrief = {
+    envelope.recoveryBrief = {
       ...brief,
       lastDurableResults: [],
       unresolvedDecisions: brief.unresolvedDecisions.slice(0, 1)
     };
-    envelope.recoveryBrief = compactBrief;
     envelope.metadata = {
       ...envelope.metadata,
       compacted: true,
@@ -92,9 +95,8 @@ function trimText(value: string, limit: number, reference: string) {
       reference
     };
   }
-  const excerpt = `${value.slice(0, Math.max(0, limit - 19))}...[trimmed]`;
   return {
-    value: excerpt,
+    value: `${value.slice(0, Math.max(0, limit - 19))}...[trimmed]`,
     trimmed: true,
     originalChars: value.length,
     reference

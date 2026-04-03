@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildTaskEnvelope } from "../adapters/envelope.js";
+import { buildTaskEnvelope } from "../codex/adapter/envelope.js";
 import { createEmptyProjection } from "../projections/runtime-projection.js";
 import type { Assignment, RecoveryBrief, RuntimeStatus } from "../core/types.js";
 

@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { RuntimeStore, type RuntimeConfig } from "../persistence/store.js";
+import type { RuntimeConfig } from "../config/types.js";
+import { RuntimeStore } from "../persistence/store.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
 import type { RuntimeEvent } from "../core/events.js";

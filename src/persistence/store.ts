@@ -1,21 +1,14 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { validateRuntimeConfig } from "../config/schema.js";
+import type { RuntimeConfig } from "../config/types.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
 import { appendLine, ensureDir, readJsonFile, readLines, writeJsonAtomic } from "./files.js";
 import { parseJson, toPrettyJson } from "../utils/json.js";
 import { fromSnapshot, projectRuntimeState, toSnapshot } from "../projections/runtime-projection.js";
-
-export interface RuntimeConfig {
-  version: 1;
-  sessionId: string;
-  adapter: string;
-  host: string;
-  rootPath: string;
-  createdAt: string;
-}
 
 export class RuntimeStore {
   readonly rootDir: string;
@@ -49,7 +42,8 @@ export class RuntimeStore {
   }
 
   async loadConfig(): Promise<RuntimeConfig | undefined> {
-    return readJsonFile<RuntimeConfig>(this.configPath, "runtime config");
+    const config = await readJsonFile<unknown>(this.configPath, "runtime config");
+    return config ? validateRuntimeConfig(config) : undefined;
   }
 
   async appendEvent(event: RuntimeEvent): Promise<void> {

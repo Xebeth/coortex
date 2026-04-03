@@ -2,11 +2,13 @@
 import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
+import type { RuntimeConfig } from "../config/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
-import { RuntimeStore, type RuntimeConfig, toPrettyJson } from "../persistence/store.js";
+import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
-import { CodexAdapter } from "../hosts/codex/adapter.js";
+import { writeJsonAtomic } from "../persistence/files.js";
+import { CodexAdapter } from "../codex/adapter/index.js";
 import { recordTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 
@@ -154,7 +156,7 @@ async function resumeCommand(store: RuntimeStore, adapter: CodexAdapter): Promis
   const envelope = adapter.buildResumeEnvelope(projection, brief);
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(projection));
-  await (await import("../persistence/files.js")).writeJsonAtomic(envelopePath, envelope);
+  await writeJsonAtomic(envelopePath, envelope);
   await recordTelemetry({
     store,
     eventType: "resume.requested",
