@@ -85,3 +85,44 @@ test("ctx init reports codex config conflicts by path without echoing file conte
     }
   );
 });
+
+test("ctx init replaces an existing Coortex-managed block while preserving surrounding TOML", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-managed-replace-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      'model = "gpt-5"',
+      "",
+      "# BEGIN COORTEX CODEX PROFILE",
+      "# Coortex Codex reference adapter",
+      'model_instructions_file = "/tmp/old-kernel.md"',
+      "# END COORTEX CODEX PROFILE",
+      "",
+      "[tui]",
+      'status = "enabled"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(configPath, "utf8");
+  assert.match(codexConfig, /^model = "gpt-5"$/m);
+  assert.match(codexConfig, /^\[tui\]$/m);
+  assert.match(codexConfig, /^status = "enabled"$/m);
+  assert.match(
+    codexConfig,
+    /model_instructions_file = ".*\.coortex\/adapters\/codex\/kernel\.md"/
+  );
+  assert.doesNotMatch(codexConfig, /old-kernel\.md/);
+  assert.equal((codexConfig.match(/# BEGIN COORTEX CODEX PROFILE/g) ?? []).length, 1);
+  assert.equal((codexConfig.match(/# END COORTEX CODEX PROFILE/g) ?? []).length, 1);
+});
