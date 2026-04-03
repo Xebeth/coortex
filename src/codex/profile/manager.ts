@@ -1,15 +1,23 @@
-import { join } from "node:path";
+import { access, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 import type { RuntimeStore } from "../../persistence/store.js";
-import { readJsonFile, writeJsonAtomic } from "../../persistence/files.js";
+import { ensureDir, readJsonFile, writeJsonAtomic } from "../../persistence/files.js";
 import type { DoctorCheck } from "../../core/host.js";
-import type { CodexProfileConfig } from "./types.js";
+import type { CodexConfigInstallation, CodexProfileConfig } from "./types.js";
+
+const MANAGED_BLOCK_START = "# BEGIN COORTEX CODEX PROFILE";
+const MANAGED_BLOCK_END = "# END COORTEX CODEX PROFILE";
 
 export class CodexProfileManager {
   constructor(private readonly store: RuntimeStore) {}
 
-  profilePath(): string {
+  manifestPath(): string {
     return join(this.store.adaptersDir, "codex", "profile.json");
+  }
+
+  configPath(): string {
+    return join(dirname(this.store.rootDir), ".codex", "config.toml");
   }
 
   buildProfileConfig(kernelPath: string): CodexProfileConfig {
@@ -18,18 +26,34 @@ export class CodexProfileManager {
       host: "codex",
       modelInstructionsFile: kernelPath,
       notes:
-        "Coortex-managed Codex profile configuration for the reference Milestone 1 adapter."
+        "Coortex-managed Codex profile manifest. The real Codex integration is installed into project-local .codex/config.toml."
     };
   }
 
   async writeProfile(kernelPath: string): Promise<CodexProfileConfig> {
     const profile = this.buildProfileConfig(kernelPath);
-    await writeJsonAtomic(this.profilePath(), profile);
+    await writeJsonAtomic(this.manifestPath(), profile);
     return profile;
   }
 
+  async install(kernelPath: string): Promise<CodexConfigInstallation> {
+    const configPath = this.configPath();
+    const block = renderManagedBlock(kernelPath);
+    const existing = await readTextIfPresent(configPath);
+    const next = mergeManagedBlock(existing, block);
+
+    await ensureDir(dirname(configPath));
+    await writeFile(configPath, next, "utf8");
+    await this.writeProfile(kernelPath);
+
+    return {
+      configPath,
+      modelInstructionsFile: kernelPath
+    };
+  }
+
   async loadProfile(): Promise<CodexProfileConfig | undefined> {
-    const value = await readJsonFile<unknown>(this.profilePath(), "codex profile");
+    const value = await readJsonFile<unknown>(this.manifestPath(), "codex profile");
     if (!value) {
       return undefined;
     }
@@ -38,10 +62,15 @@ export class CodexProfileManager {
 
   async doctor(): Promise<DoctorCheck> {
     const profile = await this.loadProfile();
+    const config = await readTextIfPresent(this.configPath());
+    const configInstalled =
+      typeof config === "string" &&
+      config.includes(MANAGED_BLOCK_START) &&
+      config.includes(`model_instructions_file = "${escapeTomlBasicString(profile?.modelInstructionsFile ?? "")}"`);
     return {
       label: "codex-profile",
-      ok: !!profile && profile.host === "codex" && profile.name.length > 0,
-      detail: this.profilePath()
+      ok: !!profile && profile.host === "codex" && profile.name.length > 0 && configInstalled,
+      detail: this.configPath()
     };
   }
 }
@@ -74,4 +103,78 @@ function readString(value: Record<string, unknown>, key: string): string {
     throw new Error(`Invalid codex profile: ${key} must be a non-empty string.`);
   }
   return field;
+}
+
+function renderManagedBlock(kernelPath: string): string {
+  return [
+    MANAGED_BLOCK_START,
+    '# Coortex Codex reference adapter',
+    `model_instructions_file = "${escapeTomlBasicString(kernelPath)}"`,
+    MANAGED_BLOCK_END
+  ].join("\n");
+}
+
+function mergeManagedBlock(existing: string | undefined, block: string): string {
+  if (!existing || existing.trim().length === 0) {
+    return `${block}\n`;
+  }
+  if (existing.includes(MANAGED_BLOCK_START) && existing.includes(MANAGED_BLOCK_END)) {
+    return `${existing.replace(
+      new RegExp(`${escapeRegExp(MANAGED_BLOCK_START)}[\\s\\S]*?${escapeRegExp(MANAGED_BLOCK_END)}`),
+      block
+    )}\n`;
+  }
+  if (hasTopLevelTomlKey(existing, "model_instructions_file")) {
+    throw new Error(
+      `Cannot install Coortex Codex profile into ${existing}: unmanaged model_instructions_file already exists.`
+    );
+  }
+  return `${existing.trimEnd()}\n\n${block}\n`;
+}
+
+function hasTopLevelTomlKey(value: string, key: string): boolean {
+  const lines = value.split("\n");
+  let inMultiline = false;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!inMultiline && line.includes('"""')) {
+      const count = line.split('"""').length - 1;
+      if (count % 2 === 1) {
+        inMultiline = true;
+      }
+    } else if (inMultiline && line.includes('"""')) {
+      const count = line.split('"""').length - 1;
+      if (count % 2 === 1) {
+        inMultiline = false;
+      }
+      continue;
+    }
+    if (inMultiline || line.length === 0 || line.startsWith("#")) {
+      continue;
+    }
+    if (line.startsWith("[")) {
+      continue;
+    }
+    if (new RegExp(`^${escapeRegExp(key)}\\s*=`).test(line)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function escapeTomlBasicString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function readTextIfPresent(path: string): Promise<string | undefined> {
+  try {
+    await access(path);
+    return await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
 }

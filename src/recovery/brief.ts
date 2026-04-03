@@ -1,5 +1,4 @@
 import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
-import { nowIso } from "../utils/time.js";
 
 export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief {
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
@@ -37,7 +36,7 @@ export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief
     lastDurableResults: recentResults,
     unresolvedDecisions,
     nextRequiredAction: determineNextAction(activeAssignments, unresolvedDecisions),
-    generatedAt: nowIso()
+    generatedAt: deriveGeneratedAt(projection)
   };
 }
 
@@ -64,4 +63,20 @@ function determineNextAction(
     return `Start assignment ${queuedAssignment.id}: ${queuedAssignment.objective}`;
   }
   return "Inspect status and decide the next assignment.";
+}
+
+function deriveGeneratedAt(projection: RuntimeProjection): string {
+  const timestamps = [
+    projection.status.lastDurableOutputAt,
+    ...[...projection.assignments.values()].flatMap((assignment) => [
+      assignment.createdAt,
+      assignment.updatedAt
+    ]),
+    ...[...projection.results.values()].map((result) => result.createdAt),
+    ...[...projection.decisions.values()].flatMap((decision) =>
+      decision.resolvedAt ? [decision.createdAt, decision.resolvedAt] : [decision.createdAt]
+    )
+  ].filter((value) => value.length > 0);
+
+  return timestamps.sort().at(-1) ?? "";
 }

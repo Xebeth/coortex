@@ -69,12 +69,16 @@ export interface RecoveryBrief {
     summary: string;
     changedFiles: string[];
     createdAt: string;
+    trimmed?: boolean;
+    reference?: string;
   }>;
   unresolvedDecisions: Array<{
     decisionId: string;
     assignmentId: string;
     blockerSummary: string;
     recommendedOption: string;
+    trimmed?: boolean;
+    reference?: string;
   }>;
   nextRequiredAction: string;
   generatedAt: string;

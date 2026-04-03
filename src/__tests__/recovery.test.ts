@@ -87,3 +87,34 @@ test("recovery brief derives actionable state from durable runtime artifacts", a
   assert.equal(brief.unresolvedDecisions.length, 1);
   assert.match(brief.nextRequiredAction, /Resolve decision/);
 });
+
+test("recovery brief generation is deterministic for unchanged durable state", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-deterministic-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const first = buildRecoveryBrief(projection);
+  const second = buildRecoveryBrief(projection);
+
+  assert.deepEqual(second, first);
+});

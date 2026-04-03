@@ -49,7 +49,7 @@ export class CodexAdapter implements HostAdapter {
     await writeCodexKernel(paths.kernelPath);
 
     const profileManager = new CodexProfileManager(store);
-    await profileManager.writeProfile(paths.kernelPath);
+    await profileManager.install(paths.kernelPath);
     await writeJsonAtomic(paths.capabilitiesPath, this.getCapabilities());
 
     const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
@@ -61,7 +61,7 @@ export class CodexAdapter implements HostAdapter {
       nextRequiredAction: "Initialize through ctx resume when needed.",
       generatedAt: projection.status.lastDurableOutputAt
     };
-    await writeJsonAtomic(envelopePath, this.buildResumeEnvelope(projection, brief));
+    await writeJsonAtomic(envelopePath, await this.buildResumeEnvelope(store, projection, brief));
   }
 
   async doctor(store: RuntimeStore): Promise<DoctorCheck[]> {
@@ -78,12 +78,17 @@ export class CodexAdapter implements HostAdapter {
     ];
   }
 
-  buildResumeEnvelope(projection: RuntimeProjection, brief: RecoveryBrief): TaskEnvelope {
-    return buildTaskEnvelope(projection, brief, {
+  buildResumeEnvelope(
+    store: RuntimeStore,
+    projection: RuntimeProjection,
+    brief: RecoveryBrief
+  ): Promise<TaskEnvelope> {
+    return buildTaskEnvelope(store, projection, brief, {
       host: this.host,
       adapter: this.id,
       maxChars: 4_000,
-      resultSummaryLimit: 400
+      resultSummaryLimit: 400,
+      artifactDir: "artifacts/results"
     });
   }
 }

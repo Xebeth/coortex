@@ -4,3 +4,8 @@ export interface CodexProfileConfig {
   modelInstructionsFile: string;
   notes: string;
 }
+
+export interface CodexConfigInstallation {
+  configPath: string;
+  modelInstructionsFile: string;
+}

@@ -101,6 +101,11 @@ export class RuntimeStore {
     throw new Error(`No persisted runtime state found at ${this.rootDir}`);
   }
 
+  async hasEvents(): Promise<boolean> {
+    const events = await this.loadEvents();
+    return events.length > 0;
+  }
+
   async syncSnapshotFromEvents(): Promise<RuntimeProjection> {
     const projection = await this.rebuildProjection();
     await this.writeSnapshot(toSnapshot(projection));

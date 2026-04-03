@@ -52,5 +52,9 @@ export interface HostAdapter {
   getCapabilities(): AdapterCapabilities;
   initialize(store: RuntimeStore, projection: RuntimeProjection): Promise<void>;
   doctor(store: RuntimeStore): Promise<DoctorCheck[]>;
-  buildResumeEnvelope(projection: RuntimeProjection, brief: RecoveryBrief): TaskEnvelope;
+  buildResumeEnvelope(
+    store: RuntimeStore,
+    projection: RuntimeProjection,
+    brief: RecoveryBrief
+  ): Promise<TaskEnvelope>;
 }

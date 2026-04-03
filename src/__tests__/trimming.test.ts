@@ -1,11 +1,28 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { buildTaskEnvelope } from "../codex/adapter/envelope.js";
 import { createEmptyProjection } from "../projections/runtime-projection.js";
 import type { Assignment, RecoveryBrief, RuntimeStatus } from "../core/types.js";
+import { RuntimeStore } from "../persistence/store.js";
+import type { RuntimeConfig } from "../config/types.js";
 
-test("task envelope trims oversized result summaries and preserves references", () => {
+test("task envelope trims oversized result summaries, writes artifacts, and stays bounded", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-envelope-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId: "session-1",
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: "2026-04-03T00:00:00.000Z"
+  };
+  await store.initialize(config);
+
   const projection = createEmptyProjection("session-1", "/tmp/project", "codex");
   const assignment: Assignment = {
     id: "assignment-1",
@@ -58,15 +75,24 @@ test("task envelope trims oversized result summaries and preserves references", 
     generatedAt: "2026-04-03T00:00:00.000Z"
   };
 
-  const envelope = buildTaskEnvelope(projection, brief, {
+  const envelope = await buildTaskEnvelope(store, projection, brief, {
     host: "codex",
     adapter: "codex",
-    maxChars: 3_000,
+    maxChars: 1_500,
     resultSummaryLimit: 120
   });
 
   assert.equal(envelope.trimApplied, true);
   assert.equal(envelope.recentResults[0]?.trimmed, true);
-  assert.equal(envelope.recentResults[0]?.reference, "result:result-1");
-  assert.ok(envelope.estimatedChars <= 3_000);
+  assert.equal(
+    envelope.recentResults[0]?.reference,
+    ".coortex/artifacts/results/result-1.txt"
+  );
+  assert.ok(envelope.estimatedChars <= 1_500);
+
+  const artifact = await readFile(
+    join(projectRoot, ".coortex", "artifacts", "results", "result-1.txt"),
+    "utf8"
+  );
+  assert.equal(artifact.trim(), "x".repeat(1_000));
 });

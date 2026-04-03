@@ -99,7 +99,7 @@ async function doctorCommand(store: RuntimeStore, adapter: CodexAdapter): Promis
     return;
   }
 
-  const projection = await store.syncSnapshotFromEvents();
+  const projection = await loadOperatorProjection(store);
   const checks = [
     {
       label: "config",
@@ -129,7 +129,7 @@ async function statusCommand(store: RuntimeStore): Promise<void> {
     return;
   }
 
-  const projection = await store.syncSnapshotFromEvents();
+  const projection = await loadOperatorProjection(store);
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
@@ -151,9 +151,9 @@ async function resumeCommand(store: RuntimeStore, adapter: CodexAdapter): Promis
     return;
   }
 
-  const projection = await store.syncSnapshotFromEvents();
+  const projection = await loadOperatorProjection(store);
   const brief = buildRecoveryBrief(projection);
-  const envelope = adapter.buildResumeEnvelope(projection, brief);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(projection));
   await writeJsonAtomic(envelopePath, envelope);
@@ -177,6 +177,13 @@ async function resumeCommand(store: RuntimeStore, adapter: CodexAdapter): Promis
 
 function printUsage(): void {
   console.log("Usage: ctx <init|doctor|status|resume>");
+}
+
+async function loadOperatorProjection(store: RuntimeStore) {
+  if (await store.hasEvents()) {
+    return store.syncSnapshotFromEvents();
+  }
+  return store.loadProjection();
 }
 
 main().catch((error: unknown) => {
