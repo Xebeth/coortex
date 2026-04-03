@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import { writeFile } from "node:fs/promises";
 
 import type { CodexKernelDefinition } from "./types.js";
-import { ensureDir } from "../../persistence/files.js";
+import { ensureDir } from "../../../persistence/files.js";
 
 export function buildCodexKernel(): CodexKernelDefinition {
   return {

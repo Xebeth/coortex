@@ -27,3 +27,15 @@ export async function recordTelemetry(input: RecordTelemetryInput): Promise<Tele
   await input.store.appendTelemetry(event);
   return event;
 }
+
+export async function recordNormalizedTelemetry(
+  store: RuntimeStore,
+  event: Omit<TelemetryEvent, "timestamp">
+): Promise<TelemetryEvent> {
+  const normalized: TelemetryEvent = {
+    timestamp: nowIso(),
+    ...event
+  };
+  await store.appendTelemetry(normalized);
+  return normalized;
+}

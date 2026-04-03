@@ -1,6 +1,9 @@
-import type { RecoveryBrief, RuntimeProjection } from "../../core/types.js";
-import type { TaskEnvelope, TrimmedField } from "../../core/host.js";
-import type { RuntimeStore } from "../../persistence/store.js";
+import type { RecoveryBrief, RuntimeProjection } from "../../../core/types.js";
+import type {
+  RuntimeArtifactStore,
+  TaskEnvelope,
+  TrimmedField
+} from "../../../adapters/contract.js";
 
 export interface EnvelopeOptions {
   host: string;
@@ -11,7 +14,7 @@ export interface EnvelopeOptions {
 }
 
 export async function buildTaskEnvelope(
-  store: RuntimeStore,
+  store: RuntimeArtifactStore,
   projection: RuntimeProjection,
   brief: RecoveryBrief,
   options: EnvelopeOptions
@@ -62,10 +65,10 @@ export async function buildTaskEnvelope(
     brief.unresolvedDecisions.map(async (decision) => {
       const trimmed = await trimTextToArtifact(
         store,
-        `${options.artifactDir ?? "artifacts/decisions"}/${decision.decisionId}.txt`,
+        `artifacts/decisions/${decision.decisionId}.txt`,
         decision.blockerSummary,
         300,
-        `.coortex/${options.artifactDir ?? "artifacts/decisions"}/${decision.decisionId}.txt`
+        `.coortex/artifacts/decisions/${decision.decisionId}.txt`
       );
       if (trimmed.trimmed) {
         trimmedFields.push({
@@ -132,7 +135,7 @@ export async function buildTaskEnvelope(
 }
 
 async function trimTextToArtifact(
-  store: RuntimeStore,
+  store: RuntimeArtifactStore,
   artifactPath: string,
   value: string,
   limit: number,

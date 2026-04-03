@@ -1,16 +1,15 @@
 import { access, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { RuntimeStore } from "../../persistence/store.js";
-import { ensureDir, readJsonFile, writeJsonAtomic } from "../../persistence/files.js";
-import type { DoctorCheck } from "../../core/host.js";
+import type { DoctorCheck, RuntimeArtifactStore } from "../../../adapters/contract.js";
+import { ensureDir, readJsonFile, writeJsonAtomic } from "../../../persistence/files.js";
 import type { CodexConfigInstallation, CodexProfileConfig } from "./types.js";
 
 const MANAGED_BLOCK_START = "# BEGIN COORTEX CODEX PROFILE";
 const MANAGED_BLOCK_END = "# END COORTEX CODEX PROFILE";
 
 export class CodexProfileManager {
-  constructor(private readonly store: RuntimeStore) {}
+  constructor(private readonly store: RuntimeArtifactStore) {}
 
   manifestPath(): string {
     return join(this.store.adaptersDir, "codex", "profile.json");
@@ -66,7 +65,9 @@ export class CodexProfileManager {
     const configInstalled =
       typeof config === "string" &&
       config.includes(MANAGED_BLOCK_START) &&
-      config.includes(`model_instructions_file = "${escapeTomlBasicString(profile?.modelInstructionsFile ?? "")}"`);
+      config.includes(
+        `model_instructions_file = "${escapeTomlBasicString(profile?.modelInstructionsFile ?? "")}"`
+      );
     return {
       label: "codex-profile",
       ok: !!profile && profile.host === "codex" && profile.name.length > 0 && configInstalled,
@@ -108,7 +109,7 @@ function readString(value: Record<string, unknown>, key: string): string {
 function renderManagedBlock(kernelPath: string): string {
   return [
     MANAGED_BLOCK_START,
-    '# Coortex Codex reference adapter',
+    "# Coortex Codex reference adapter",
     `model_instructions_file = "${escapeTomlBasicString(kernelPath)}"`,
     MANAGED_BLOCK_END
   ].join("\n");

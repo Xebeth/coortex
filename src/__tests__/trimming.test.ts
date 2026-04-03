@@ -4,7 +4,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildTaskEnvelope } from "../codex/adapter/envelope.js";
+import { buildTaskEnvelope } from "../hosts/codex/adapter/envelope.js";
 import { createEmptyProjection } from "../projections/runtime-projection.js";
 import type { Assignment, RecoveryBrief, RuntimeStatus } from "../core/types.js";
 import { RuntimeStore } from "../persistence/store.js";

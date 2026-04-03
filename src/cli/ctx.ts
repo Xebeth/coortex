@@ -3,13 +3,14 @@ import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
+import type { HostAdapter } from "../adapters/contract.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
 import { writeJsonAtomic } from "../persistence/files.js";
-import { CodexAdapter } from "../codex/adapter/index.js";
-import { recordTelemetry } from "../telemetry/recorder.js";
+import { CodexAdapter } from "../hosts/codex/adapter/index.js";
+import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 
 async function main(): Promise<void> {
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
 async function initCommand(
   projectRoot: string,
   store: RuntimeStore,
-  adapter: CodexAdapter
+  adapter: HostAdapter
 ): Promise<void> {
   const existing = await store.loadConfig();
   if (existing) {
@@ -73,25 +74,25 @@ async function initCommand(
 
   const projection = await store.syncSnapshotFromEvents();
   await adapter.initialize(store, projection);
-  await recordTelemetry({
+  await recordNormalizedTelemetry(
     store,
-    eventType: "runtime.initialized",
-    taskId: sessionId,
-    assignmentId: bootstrap.initialAssignmentId,
-    host: adapter.host,
-    adapter: adapter.id,
-    metadata: {
-      projectRoot,
-      repoName: basename(projectRoot)
-    }
-  });
+    adapter.normalizeTelemetry({
+      eventType: "runtime.initialized",
+      taskId: sessionId,
+      assignmentId: bootstrap.initialAssignmentId,
+      metadata: {
+        projectRoot,
+        repoName: basename(projectRoot)
+      }
+    })
+  );
 
   console.log(`Initialized Coortex runtime at ${store.rootDir}`);
   console.log(`Session: ${sessionId}`);
   console.log(`Adapter: ${adapter.id}`);
 }
 
-async function doctorCommand(store: RuntimeStore, adapter: CodexAdapter): Promise<void> {
+async function doctorCommand(store: RuntimeStore, adapter: HostAdapter): Promise<void> {
   const config = await store.loadConfig();
   if (!config) {
     console.log(`Coortex is not initialized at ${store.rootDir}`);
@@ -143,7 +144,7 @@ async function statusCommand(store: RuntimeStore): Promise<void> {
   }
 }
 
-async function resumeCommand(store: RuntimeStore, adapter: CodexAdapter): Promise<void> {
+async function resumeCommand(store: RuntimeStore, adapter: HostAdapter): Promise<void> {
   const config = await store.loadConfig();
   if (!config) {
     console.log("Coortex is not initialized. Run `ctx init` first.");
@@ -157,18 +158,18 @@ async function resumeCommand(store: RuntimeStore, adapter: CodexAdapter): Promis
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(projection));
   await writeJsonAtomic(envelopePath, envelope);
-  await recordTelemetry({
+  await recordNormalizedTelemetry(
     store,
-    eventType: "resume.requested",
-    taskId: projection.sessionId,
-    host: adapter.host,
-    adapter: adapter.id,
-    metadata: {
-      envelopeChars: envelope.estimatedChars,
-      trimApplied: envelope.trimApplied,
-      trimmedFields: envelope.trimmedFields.length
-    }
-  });
+    adapter.normalizeTelemetry({
+      eventType: "resume.requested",
+      taskId: projection.sessionId,
+      metadata: {
+        envelopeChars: envelope.estimatedChars,
+        trimApplied: envelope.trimApplied,
+        trimmedFields: envelope.trimmedFields.length
+      }
+    })
+  );
 
   console.log(`Recovery brief generated for ${projection.status.currentObjective}`);
   console.log(`Envelope: ${resolve(envelopePath)}`);
