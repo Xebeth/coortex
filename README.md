@@ -164,5 +164,4 @@ npm test
 ```
 
 ## License
-
-TBD.
+MIT
