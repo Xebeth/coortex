@@ -8,7 +8,6 @@ import { createBootstrapRuntime } from "../core/runtime.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
-import { writeJsonAtomic } from "../persistence/files.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
@@ -157,7 +156,7 @@ async function resumeCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(projection));
-  await writeJsonAtomic(envelopePath, envelope);
+  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
   await recordNormalizedTelemetry(
     store,
     adapter.normalizeTelemetry({

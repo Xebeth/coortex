@@ -84,6 +84,34 @@ test("documented milestone dependency directions are enforced", async () => {
   await assertModuleImports("src/workflows", {
     allowedRoots: ["workflows", "core", "utils"]
   });
+  await assertModuleImports("src/cli", {
+    allowedRoots: [
+      "cli",
+      "adapters",
+      "backends",
+      "config",
+      "core",
+      "hosts",
+      "persistence",
+      "projections",
+      "recovery",
+      "telemetry",
+      "utils",
+      "workflows"
+    ]
+  });
+});
+
+test("cli uses public persistence surfaces rather than persistence internals", async () => {
+  const cliFiles = await listTsFiles(resolve(PROJECT_ROOT, "src/cli"));
+  for (const file of cliFiles) {
+    const source = await readFile(file, "utf8");
+    assert.doesNotMatch(
+      source,
+      /persistence\/files\.js/,
+      `${relative(PROJECT_ROOT, file)} must not import persistence/files.js`
+    );
+  }
 });
 
 async function listTsFiles(root: string): Promise<string[]> {
