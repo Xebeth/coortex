@@ -5,6 +5,55 @@ import { relative, resolve } from "node:path";
 import { readdir } from "node:fs/promises";
 
 const PROJECT_ROOT = process.cwd();
+const MODULE_POLICIES: Record<string, { allowedRoots: string[] }> = {
+  "src/adapters": {
+    allowedRoots: ["adapters", "core", "recovery", "telemetry", "utils"]
+  },
+  "src/hosts": {
+    allowedRoots: ["hosts", "adapters", "core", "telemetry", "utils"]
+  },
+  "src/projections": {
+    allowedRoots: ["projections", "core", "persistence", "utils"]
+  },
+  "src/recovery": {
+    allowedRoots: ["recovery", "core", "projections", "utils"]
+  },
+  "src/workflows": {
+    allowedRoots: ["workflows", "core", "utils"]
+  },
+  "src/cli": {
+    allowedRoots: [
+      "cli",
+      "adapters",
+      "backends",
+      "config",
+      "core",
+      "guidance",
+      "hooks",
+      "hosts",
+      "persistence",
+      "plugins",
+      "projections",
+      "recovery",
+      "telemetry",
+      "utils",
+      "verification",
+      "workflows"
+    ]
+  },
+  "src/guidance": {
+    allowedRoots: ["guidance", "core", "utils"]
+  },
+  "src/verification": {
+    allowedRoots: ["verification", "core", "utils"]
+  },
+  "src/hooks": {
+    allowedRoots: ["hooks", "core", "telemetry", "utils"]
+  },
+  "src/plugins": {
+    allowedRoots: ["plugins", "core", "utils"]
+  }
+};
 const REQUIRED_PATHS = [
   "src/core/runtime.ts",
   "src/core/types.ts",
@@ -69,37 +118,9 @@ test("hosts do not import persistence internals", async () => {
 });
 
 test("documented milestone dependency directions are enforced", async () => {
-  await assertModuleImports("src/adapters", {
-    allowedRoots: ["adapters", "core", "recovery", "telemetry", "utils"]
-  });
-  await assertModuleImports("src/hosts", {
-    allowedRoots: ["hosts", "adapters", "core", "telemetry", "utils"]
-  });
-  await assertModuleImports("src/projections", {
-    allowedRoots: ["projections", "core", "persistence", "utils"]
-  });
-  await assertModuleImports("src/recovery", {
-    allowedRoots: ["recovery", "core", "projections", "utils"]
-  });
-  await assertModuleImports("src/workflows", {
-    allowedRoots: ["workflows", "core", "utils"]
-  });
-  await assertModuleImports("src/cli", {
-    allowedRoots: [
-      "cli",
-      "adapters",
-      "backends",
-      "config",
-      "core",
-      "hosts",
-      "persistence",
-      "projections",
-      "recovery",
-      "telemetry",
-      "utils",
-      "workflows"
-    ]
-  });
+  for (const [moduleRoot, policy] of Object.entries(MODULE_POLICIES)) {
+    await assertModuleImports(moduleRoot, policy);
+  }
 });
 
 test("cli uses public persistence surfaces rather than persistence internals", async () => {
@@ -132,7 +153,8 @@ async function assertModuleImports(
   moduleRoot: string,
   options: { allowedRoots: string[] }
 ): Promise<void> {
-  const files = await listTsFiles(resolve(PROJECT_ROOT, moduleRoot));
+  const absoluteRoot = resolve(PROJECT_ROOT, moduleRoot);
+  const files = await listTsFilesIfPresent(absoluteRoot);
   for (const file of files) {
     const source = await readFile(file, "utf8");
     const imports = extractInternalImportRoots(source, file);
@@ -148,7 +170,11 @@ async function assertModuleImports(
 function extractInternalImportRoots(source: string, importingFile: string): string[] {
   const matches = [
     ...source.matchAll(/from\s+"([^"]+)"/g),
-    ...source.matchAll(/from\s+'([^']+)'/g)
+    ...source.matchAll(/from\s+'([^']+)'/g),
+    ...source.matchAll(/import\(\s*"([^"]+)"\s*\)/g),
+    ...source.matchAll(/import\(\s*'([^']+)'\s*\)/g),
+    ...source.matchAll(/require\(\s*"([^"]+)"\s*\)/g),
+    ...source.matchAll(/require\(\s*'([^']+)'\s*\)/g)
   ];
 
   const roots = new Set<string>();
@@ -171,4 +197,20 @@ function extractInternalImportRoots(source: string, importingFile: string): stri
   }
 
   return [...roots];
+}
+
+async function listTsFilesIfPresent(root: string): Promise<string[]> {
+  try {
+    return await listTsFiles(root);
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return [];
+    }
+    throw error;
+  }
 }
