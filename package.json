@@ -1,0 +1,21 @@
+{
+  "name": "coortex",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Host-agnostic runtime-first coordination layer for coding assistants.",
+  "type": "module",
+  "bin": {
+    "ctx": "dist/cli/ctx.js"
+  },
+  "scripts": {
+    "build": "node -e \"const fs=require('fs'); fs.rmSync('dist',{recursive:true,force:true});\" && tsc",
+    "test": "npm run build && node --test dist/__tests__/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.3"
+  }
+}
