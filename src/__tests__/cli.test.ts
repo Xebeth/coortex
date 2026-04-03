@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -62,4 +62,26 @@ test("ctx status and resume recover from snapshot when the event log is missing"
     cwd: projectRoot
   });
   assert.match(resume.stdout, /Recovery brief generated/);
+});
+
+test("ctx init reports codex config conflicts by path without echoing file contents", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-conflict-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(configPath, 'model_instructions_file = "user-value"\n', "utf8");
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "init"], {
+      cwd: projectRoot
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      assert.doesNotMatch(error.message, /user-value/);
+      return true;
+    }
+  );
 });

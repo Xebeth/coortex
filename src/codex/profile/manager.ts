@@ -40,7 +40,7 @@ export class CodexProfileManager {
     const configPath = this.configPath();
     const block = renderManagedBlock(kernelPath);
     const existing = await readTextIfPresent(configPath);
-    const next = mergeManagedBlock(existing, block);
+    const next = mergeManagedBlock(configPath, existing, block);
 
     await ensureDir(dirname(configPath));
     await writeFile(configPath, next, "utf8");
@@ -114,7 +114,7 @@ function renderManagedBlock(kernelPath: string): string {
   ].join("\n");
 }
 
-function mergeManagedBlock(existing: string | undefined, block: string): string {
+function mergeManagedBlock(configPath: string, existing: string | undefined, block: string): string {
   if (!existing || existing.trim().length === 0) {
     return `${block}\n`;
   }
@@ -126,7 +126,7 @@ function mergeManagedBlock(existing: string | undefined, block: string): string 
   }
   if (hasTopLevelTomlKey(existing, "model_instructions_file")) {
     throw new Error(
-      `Cannot install Coortex Codex profile into ${existing}: unmanaged model_instructions_file already exists.`
+      `Cannot install Coortex Codex profile into ${configPath}: unmanaged model_instructions_file already exists.`
     );
   }
   return `${existing.trimEnd()}\n\n${block}\n`;
