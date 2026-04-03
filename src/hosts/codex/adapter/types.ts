@@ -3,4 +3,7 @@ export interface CodexPaths {
   kernelPath: string;
   profilePath: string;
   capabilitiesPath: string;
+  runsDir: string;
+  lastRunPath: string;
+  outputSchemaPath: string;
 }

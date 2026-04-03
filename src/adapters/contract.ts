@@ -87,6 +87,25 @@ export interface HostTelemetryCapture {
   >;
 }
 
+export interface HostRunRecord {
+  assignmentId: string;
+  state: "running" | "completed";
+  hostRunId?: string;
+  startedAt: string;
+  completedAt?: string;
+  outcomeKind?: "result" | "decision";
+  resultStatus?: ResultPacket["status"];
+  summary?: string;
+}
+
+export interface HostExecutionOutcome {
+  outcome:
+    | { kind: "result"; capture: HostResultCapture }
+    | { kind: "decision"; capture: HostDecisionCapture };
+  run: HostRunRecord;
+  telemetry?: HostTelemetryCapture;
+}
+
 export interface HostAdapter {
   readonly id: string;
   readonly host: string;
@@ -99,6 +118,12 @@ export interface HostAdapter {
     projection: RuntimeProjection,
     brief: RecoveryBrief
   ): Promise<TaskEnvelope>;
+  executeAssignment(
+    store: RuntimeArtifactStore,
+    projection: RuntimeProjection,
+    envelope: TaskEnvelope
+  ): Promise<HostExecutionOutcome>;
+  inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined>;
   normalizeResult(capture: HostResultCapture): ResultPacket;
   normalizeDecision(capture: HostDecisionCapture): DecisionPacket;
   normalizeTelemetry(capture: HostTelemetryCapture): Omit<TelemetryEvent, "timestamp">;

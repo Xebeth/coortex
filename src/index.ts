@@ -12,6 +12,8 @@ export * from "./hosts/codex/kernel/static.js";
 export * from "./hosts/codex/profile/types.js";
 export * from "./hosts/codex/profile/manager.js";
 export * from "./hosts/codex/adapter/types.js";
+export * from "./hosts/codex/adapter/cli.js";
+export * from "./hosts/codex/adapter/prompt.js";
 export * from "./hosts/codex/adapter/envelope.js";
 export * from "./hosts/codex/adapter/index.js";
 export * from "./telemetry/types.js";

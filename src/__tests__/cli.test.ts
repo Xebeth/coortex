@@ -8,29 +8,88 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-test("ctx init, status, resume, and doctor work against persisted runtime state", async () => {
+test("ctx init, status, resume, run, inspect, and doctor work against persisted runtime state", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const fixturePath = join(projectRoot, "codex-exec-fixture.json");
+
+  await writeFile(
+    fixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [
+          { type: "thread.started", thread_id: "thread-cli-1" },
+          {
+            type: "turn.completed",
+            usage: {
+              input_tokens: 44,
+              cached_input_tokens: 10,
+              output_tokens: 12
+            }
+          }
+        ],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "completed",
+          resultSummary: "Completed the Milestone 2 execution slice.",
+          changedFiles: ["src/cli/ctx.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const env = {
+    ...process.env,
+    COORTEX_CODEX_EXEC_FIXTURE: fixturePath
+  };
 
   const init = await execFileAsync(process.execPath, [cliPath, "init"], {
-    cwd: projectRoot
+    cwd: projectRoot,
+    env
   });
   assert.match(init.stdout, /Initialized Coortex runtime/);
 
   const status = await execFileAsync(process.execPath, [cliPath, "status"], {
-    cwd: projectRoot
+    cwd: projectRoot,
+    env
   });
   assert.match(status.stdout, /Active assignments: 1/);
+  assert.match(status.stdout, /Results: 0/);
 
   const resume = await execFileAsync(process.execPath, [cliPath, "resume"], {
-    cwd: projectRoot
+    cwd: projectRoot,
+    env
   });
   assert.match(resume.stdout, /Recovery brief generated/);
 
+  const run = await execFileAsync(process.execPath, [cliPath, "run"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(run.stdout, /Executed assignment/);
+  assert.match(run.stdout, /Host run: thread-cli-1/);
+  assert.match(run.stdout, /Result \(completed\): Completed the Milestone 2 execution slice\./);
+
+  const inspect = await execFileAsync(process.execPath, [cliPath, "inspect"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(inspect.stdout, /"hostRunId": "thread-cli-1"/);
+  assert.match(inspect.stdout, /"outcomeKind": "result"/);
+
   const doctor = await execFileAsync(process.execPath, [cliPath, "doctor"], {
-    cwd: projectRoot
+    cwd: projectRoot,
+    env
   });
   assert.match(doctor.stdout, /OK codex-profile/);
+  assert.match(doctor.stdout, /OK codex-exec-schema/);
 
   const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
   assert.match(codexConfig, /model_instructions_file = "/);
@@ -40,6 +99,21 @@ test("ctx init, status, resume, and doctor work against persisted runtime state"
     "utf8"
   );
   assert.match(envelope, /"adapter": "codex"/);
+
+  const snapshot = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{ status: string; summary: string }>;
+    status: { activeAssignmentIds: string[] };
+  };
+  assert.equal(snapshot.results.length, 1);
+  assert.equal(snapshot.results[0]?.status, "completed");
+  assert.equal(snapshot.status.activeAssignmentIds.length, 0);
+
+  const telemetry = await readFile(join(projectRoot, ".coortex", "runtime", "telemetry.ndjson"), "utf8");
+  assert.match(telemetry, /"eventType":"host.run.started"/);
+  assert.match(telemetry, /"eventType":"host.run.completed"/);
+  assert.match(telemetry, /"inputTokens":44/);
 });
 
 test("ctx status and resume recover from snapshot when the event log is missing", async () => {
@@ -125,4 +199,97 @@ test("ctx init replaces an existing Coortex-managed block while preserving surro
   assert.doesNotMatch(codexConfig, /old-kernel\.md/);
   assert.equal((codexConfig.match(/# BEGIN COORTEX CODEX PROFILE/g) ?? []).length, 1);
   assert.equal((codexConfig.match(/# END COORTEX CODEX PROFILE/g) ?? []).length, 1);
+});
+
+test("ctx run refuses to rerun a blocked assignment with an unresolved decision", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-decision-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const fixturePath = join(projectRoot, "codex-decision-fixture.json");
+
+  await writeFile(
+    fixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [{ type: "thread.started", thread_id: "thread-decision-1" }],
+        lastMessage: {
+          outcomeType: "decision",
+          resultStatus: "",
+          resultSummary: "",
+          changedFiles: [],
+          blockerSummary: "Need operator guidance before proceeding.",
+          decisionOptions: [
+            { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+            { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+          ],
+          recommendedOption: "wait"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const env = {
+    ...process.env,
+    COORTEX_CODEX_EXEC_FIXTURE: fixturePath
+  };
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+
+  const firstRun = await execFileAsync(process.execPath, [cliPath, "run"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(firstRun.stdout, /Decision: Need operator guidance before proceeding\./);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "run"], {
+      cwd: projectRoot,
+      env
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /is blocked and cannot be run/);
+      return true;
+    }
+  );
+
+  const snapshot = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
+  ) as {
+    decisions: Array<{ blockerSummary: string }>;
+  };
+  assert.equal(snapshot.decisions.length, 1);
+});
+
+const liveCodexSmoke = process.env.COORTEX_LIVE_CODEX_SMOKE === "1" ? test : test.skip;
+
+liveCodexSmoke("ctx run completes a live Codex smoke path", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-live-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const gitignorePath = join(projectRoot, ".gitignore");
+
+  await writeFile(gitignorePath, ".coortex/\n.codex/\n", "utf8");
+  await execFileAsync("git", ["init", "-b", "main"], {
+    cwd: projectRoot
+  });
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const run = await execFileAsync(process.execPath, [cliPath, "run"], {
+    cwd: projectRoot
+  });
+  assert.match(run.stdout, /Executed assignment/);
+
+  const inspect = await execFileAsync(process.execPath, [cliPath, "inspect"], {
+    cwd: projectRoot
+  });
+  assert.match(inspect.stdout, /"state": "completed"/);
 });
