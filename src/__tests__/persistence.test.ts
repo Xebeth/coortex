@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
@@ -65,4 +65,28 @@ test("runtime store rebuilds projection from durable events and snapshots", asyn
   assert.equal(loaded.assignments.size, 1);
   assert.equal(loaded.results.size, 1);
   assert.equal(loaded.status.activeAdapter, "codex");
+});
+
+test("readJsonArtifact surfaces malformed JSON errors", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-json-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+
+  const artifactPath = join(store.rootDir, "adapters", "codex", "broken.json");
+  await mkdir(dirname(artifactPath), { recursive: true });
+  await writeFile(artifactPath, "{not-valid-json", "utf8");
+
+  await assert.rejects(
+    store.readJsonArtifact("adapters/codex/broken.json", "broken artifact"),
+    /Failed to parse broken artifact/
+  );
 });

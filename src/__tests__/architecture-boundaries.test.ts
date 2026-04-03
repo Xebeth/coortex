@@ -68,6 +68,24 @@ test("hosts do not import persistence internals", async () => {
   }
 });
 
+test("documented milestone dependency directions are enforced", async () => {
+  await assertModuleImports("src/adapters", {
+    allowedRoots: ["adapters", "core", "recovery", "telemetry", "utils"]
+  });
+  await assertModuleImports("src/hosts", {
+    allowedRoots: ["hosts", "adapters", "core", "telemetry", "utils"]
+  });
+  await assertModuleImports("src/projections", {
+    allowedRoots: ["projections", "core", "persistence", "utils"]
+  });
+  await assertModuleImports("src/recovery", {
+    allowedRoots: ["recovery", "core", "projections", "utils"]
+  });
+  await assertModuleImports("src/workflows", {
+    allowedRoots: ["workflows", "core", "utils"]
+  });
+});
+
 async function listTsFiles(root: string): Promise<string[]> {
   const entries = await readdir(root, { withFileTypes: true });
   const files = await Promise.all(
@@ -80,4 +98,49 @@ async function listTsFiles(root: string): Promise<string[]> {
     })
   );
   return files.flat();
+}
+
+async function assertModuleImports(
+  moduleRoot: string,
+  options: { allowedRoots: string[] }
+): Promise<void> {
+  const files = await listTsFiles(resolve(PROJECT_ROOT, moduleRoot));
+  for (const file of files) {
+    const source = await readFile(file, "utf8");
+    const imports = extractInternalImportRoots(source, file);
+    for (const importedRoot of imports) {
+      assert.ok(
+        options.allowedRoots.includes(importedRoot),
+        `${relative(PROJECT_ROOT, file)} must not depend on src/${importedRoot}/`
+      );
+    }
+  }
+}
+
+function extractInternalImportRoots(source: string, importingFile: string): string[] {
+  const matches = [
+    ...source.matchAll(/from\s+"([^"]+)"/g),
+    ...source.matchAll(/from\s+'([^']+)'/g)
+  ];
+
+  const roots = new Set<string>();
+  for (const match of matches) {
+    const specifier = match[1];
+    if (!specifier?.startsWith(".")) {
+      continue;
+    }
+
+    const resolved = resolve(importingFile, "..", specifier);
+    const relativeToSrc = relative(resolve(PROJECT_ROOT, "src"), resolved);
+    if (relativeToSrc.startsWith("..")) {
+      continue;
+    }
+
+    const [root] = relativeToSrc.split("/");
+    if (root) {
+      roots.add(root);
+    }
+  }
+
+  return [...roots];
 }
