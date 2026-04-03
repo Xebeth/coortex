@@ -95,6 +95,58 @@ The first milestone should deliver:
 - one reference host adapter
 - minimal CLI/status surfaces
 
+## Milestone 1 status
+
+The current repository now includes a working Milestone 1 vertical slice in TypeScript/Node:
+
+- host-agnostic runtime models under `src/core`
+- append-only persistence and rebuildable snapshot/projection support under `src/persistence` and `src/projections`
+- recovery brief generation under `src/recovery`
+- bounded envelope and trimming logic under `src/adapters`
+- a Codex reference adapter under `src/hosts/codex`
+- minimal `ctx` CLI surfaces under `src/cli`
+
+The durable runtime root is `.coortex/` in the current project.
+
+Generated files include:
+
+- `.coortex/config.json`
+- `.coortex/runtime/events.ndjson`
+- `.coortex/runtime/snapshot.json`
+- `.coortex/runtime/telemetry.ndjson`
+- `.coortex/runtime/last-resume-envelope.json`
+- `.coortex/adapters/codex/kernel.md`
+- `.coortex/adapters/codex/profile.json`
+
+## Local usage
+
+Install and build:
+
+```bash
+npm install
+npm run build
+```
+
+Initialize the local runtime:
+
+```bash
+node dist/cli/ctx.js init
+```
+
+Check status, doctor output, and a recovery envelope:
+
+```bash
+node dist/cli/ctx.js status
+node dist/cli/ctx.js doctor
+node dist/cli/ctx.js resume
+```
+
+Run the milestone test suite:
+
+```bash
+npm test
+```
+
 ## License
 
 TBD.
