@@ -1,0 +1,7 @@
+.idea/
+.omx/
+.codex
+dist/
+node_modules/
+coverage/
+.coortex/
