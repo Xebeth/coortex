@@ -1,8 +1,7 @@
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type { DoctorCheck, RuntimeArtifactStore } from "../../../adapters/contract.js";
-import { ensureDir, readJsonFile, writeJsonAtomic } from "../../../persistence/files.js";
 import type { CodexConfigInstallation, CodexProfileConfig } from "./types.js";
 
 const MANAGED_BLOCK_START = "# BEGIN COORTEX CODEX PROFILE";
@@ -31,7 +30,7 @@ export class CodexProfileManager {
 
   async writeProfile(kernelPath: string): Promise<CodexProfileConfig> {
     const profile = this.buildProfileConfig(kernelPath);
-    await writeJsonAtomic(this.manifestPath(), profile);
+    await this.store.writeJsonArtifact("adapters/codex/profile.json", profile);
     return profile;
   }
 
@@ -41,7 +40,7 @@ export class CodexProfileManager {
     const existing = await readTextIfPresent(configPath);
     const next = mergeManagedBlock(configPath, existing, block);
 
-    await ensureDir(dirname(configPath));
+    await mkdir(dirname(configPath), { recursive: true });
     await writeFile(configPath, next, "utf8");
     await this.writeProfile(kernelPath);
 
@@ -52,7 +51,7 @@ export class CodexProfileManager {
   }
 
   async loadProfile(): Promise<CodexProfileConfig | undefined> {
-    const value = await readJsonFile<unknown>(this.manifestPath(), "codex profile");
+    const value = await this.store.readJsonArtifact<unknown>("adapters/codex/profile.json", "codex profile");
     if (!value) {
       return undefined;
     }

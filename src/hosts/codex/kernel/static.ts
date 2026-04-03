@@ -1,8 +1,7 @@
+import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { writeFile } from "node:fs/promises";
 
 import type { CodexKernelDefinition } from "./types.js";
-import { ensureDir } from "../../../persistence/files.js";
 
 export function buildCodexKernel(): CodexKernelDefinition {
   return {
@@ -20,7 +19,7 @@ export function buildCodexKernel(): CodexKernelDefinition {
 
 export async function writeCodexKernel(path: string): Promise<CodexKernelDefinition> {
   const kernel = buildCodexKernel();
-  await ensureDir(dirname(path));
+  await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${kernel.body}\n`, "utf8");
   return kernel;
 }

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
+import { readdir } from "node:fs/promises";
 
 const PROJECT_ROOT = process.cwd();
 const REQUIRED_PATHS = [
@@ -43,6 +44,8 @@ test("the adapter contract stays outside core and owns normalization hooks", asy
   assert.match(contractSource, /normalizeResult\(/);
   assert.match(contractSource, /normalizeDecision\(/);
   assert.match(contractSource, /normalizeTelemetry\(/);
+  assert.match(contractSource, /writeJsonArtifact\(/);
+  assert.match(contractSource, /readJsonArtifact</);
 
   const coreIndex = await readFile(resolve(PROJECT_ROOT, "src/index.ts"), "utf8");
   assert.doesNotMatch(coreIndex, /\.\/core\/host\.js/);
@@ -52,3 +55,29 @@ test("the pre-realignment codex tree is gone", async () => {
   await assert.rejects(readFile(resolve(PROJECT_ROOT, "src/core/host.ts"), "utf8"));
   await assert.rejects(readFile(resolve(PROJECT_ROOT, "src/codex/adapter/index.ts"), "utf8"));
 });
+
+test("hosts do not import persistence internals", async () => {
+  const hostFiles = await listTsFiles(resolve(PROJECT_ROOT, "src/hosts"));
+  for (const file of hostFiles) {
+    const source = await readFile(file, "utf8");
+    assert.doesNotMatch(
+      source,
+      /persistence\//,
+      `${relative(PROJECT_ROOT, file)} must not import persistence modules`
+    );
+  }
+});
+
+async function listTsFiles(root: string): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true });
+  const files = await Promise.all(
+    entries.map(async (entry) => {
+      const fullPath = resolve(root, entry.name);
+      if (entry.isDirectory()) {
+        return listTsFiles(fullPath);
+      }
+      return fullPath.endsWith(".ts") ? [fullPath] : [];
+    })
+  );
+  return files.flat();
+}

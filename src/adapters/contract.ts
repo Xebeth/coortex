@@ -6,6 +6,8 @@ export interface RuntimeArtifactStore {
   readonly rootDir: string;
   readonly runtimeDir: string;
   readonly adaptersDir: string;
+  readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined>;
+  writeJsonArtifact(relativePath: string, value: unknown): Promise<string>;
   writeTextArtifact(relativePath: string, content: string): Promise<string>;
 }
 

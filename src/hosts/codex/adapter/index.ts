@@ -13,7 +13,6 @@ import type {
   TaskEnvelope
 } from "../../../adapters/contract.js";
 import type { DecisionPacket, RecoveryBrief, ResultPacket, RuntimeProjection } from "../../../core/types.js";
-import { ensureDir, writeJsonAtomic } from "../../../persistence/files.js";
 import { nowIso } from "../../../utils/time.js";
 import { buildTaskEnvelope } from "./envelope.js";
 import type { CodexPaths } from "./types.js";
@@ -50,14 +49,12 @@ export class CodexAdapter implements HostAdapter {
 
   async initialize(store: RuntimeArtifactStore, projection: RuntimeProjection): Promise<void> {
     const paths = this.paths(store);
-    await ensureDir(paths.rootDir);
     await writeCodexKernel(paths.kernelPath);
 
     const profileManager = new CodexProfileManager(store);
     await profileManager.install(paths.kernelPath);
-    await writeJsonAtomic(paths.capabilitiesPath, this.getCapabilities());
+    await store.writeJsonArtifact(`adapters/${this.id}/capabilities.json`, this.getCapabilities());
 
-    const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
     const brief: RecoveryBrief = {
       activeObjective: projection.status.currentObjective,
       activeAssignments: [],
@@ -66,7 +63,10 @@ export class CodexAdapter implements HostAdapter {
       nextRequiredAction: "Initialize through ctx resume when needed.",
       generatedAt: projection.status.lastDurableOutputAt
     };
-    await writeJsonAtomic(envelopePath, await this.buildResumeEnvelope(store, projection, brief));
+    await store.writeJsonArtifact(
+      "runtime/last-resume-envelope.json",
+      await this.buildResumeEnvelope(store, projection, brief)
+    );
   }
 
   async doctor(store: RuntimeArtifactStore): Promise<DoctorCheck[]> {

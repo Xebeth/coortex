@@ -112,6 +112,16 @@ export class RuntimeStore {
     return projection;
   }
 
+  async readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined> {
+    return readJsonFile<T>(join(this.rootDir, relativePath), label);
+  }
+
+  async writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {
+    const fullPath = join(this.rootDir, relativePath);
+    await writeJsonAtomic(fullPath, value);
+    return fullPath;
+  }
+
   async writeTextArtifact(relativePath: string, content: string): Promise<string> {
     const fullPath = join(this.rootDir, relativePath);
     await ensureDir(dirname(fullPath));
