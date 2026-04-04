@@ -1,17 +1,10 @@
 #!/usr/bin/env node
-import { basename, join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
 
-import type { RuntimeConfig } from "../config/types.js";
 import type { HostAdapter } from "../adapters/contract.js";
-import type { RuntimeEvent } from "../core/events.js";
-import { createBootstrapRuntime } from "../core/runtime.js";
-import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
-import { toSnapshot } from "../projections/runtime-projection.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
-import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
-import { nowIso } from "../utils/time.js";
+import { initRuntime, inspectRuntimeRun, loadOperatorProjection, resumeRuntime, runRuntime } from "./commands.js";
 
 async function main(): Promise<void> {
   const [command, assignmentIdArg] = process.argv.slice(2);
@@ -49,54 +42,15 @@ async function initCommand(
   store: RuntimeStore,
   adapter: HostAdapter
 ): Promise<void> {
-  const existing = await store.loadConfig();
-  if (existing) {
+  const initialized = await initRuntime(projectRoot, store, adapter);
+  if (!initialized) {
     console.log(`Coortex already initialized at ${store.rootDir}`);
     return;
   }
 
-  const createdAt = nowIso();
-  const sessionId = randomUUID();
-  const config: RuntimeConfig = {
-    version: 1,
-    sessionId,
-    adapter: adapter.id,
-    host: adapter.host,
-    rootPath: projectRoot,
-    createdAt
-  };
-
-  await store.initialize(config);
-  const bootstrap = createBootstrapRuntime({
-    rootPath: projectRoot,
-    sessionId,
-    adapter: adapter.id,
-    host: adapter.host,
-    workflow: "milestone-2"
-  });
-
-  for (const event of bootstrap.events) {
-    await store.appendEvent(event);
-  }
-
-  const projection = await store.syncSnapshotFromEvents();
-  await adapter.initialize(store, projection);
-  await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry({
-      eventType: "runtime.initialized",
-      taskId: sessionId,
-      assignmentId: bootstrap.initialAssignmentId,
-      metadata: {
-        projectRoot,
-        repoName: basename(projectRoot)
-      }
-    })
-  );
-
   console.log(`Initialized Coortex runtime at ${store.rootDir}`);
-  console.log(`Session: ${sessionId}`);
-  console.log(`Adapter: ${adapter.id}`);
+  console.log(`Session: ${initialized.sessionId}`);
+  console.log(`Adapter: ${initialized.adapterId}`);
 }
 
 async function doctorCommand(store: RuntimeStore, adapter: HostAdapter): Promise<void> {
@@ -164,24 +118,7 @@ async function resumeCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     return;
   }
 
-  const projection = await loadOperatorProjection(store);
-  const brief = buildRecoveryBrief(projection);
-  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
-  const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
-  await store.writeSnapshot(toSnapshot(projection));
-  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
-  await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry({
-      eventType: "resume.requested",
-      taskId: projection.sessionId,
-      metadata: {
-        envelopeChars: envelope.estimatedChars,
-        trimApplied: envelope.trimApplied,
-        trimmedFields: envelope.trimmedFields.length
-      }
-    })
-  );
+  const { projection, envelope, envelopePath } = await resumeRuntime(store, adapter);
 
   console.log(`Recovery brief generated for ${projection.status.currentObjective}`);
   console.log(`Envelope: ${resolve(envelopePath)}`);
@@ -196,35 +133,7 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
     return;
   }
 
-  const projection = await loadOperatorProjection(store);
-  const assignment = getRunnableAssignment(projection);
-  const brief = buildRecoveryBrief(projection);
-  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
-
-  await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry({
-      eventType: "host.run.started",
-      taskId: projection.sessionId,
-      assignmentId: assignment.id,
-      metadata: {
-        envelopeChars: envelope.estimatedChars,
-        trimApplied: envelope.trimApplied,
-        trimmedFields: envelope.trimmedFields.length
-      }
-    })
-  );
-
-  const execution = await adapter.executeAssignment(store, projection, envelope);
-  const events = buildOutcomeEvents(projection, execution, adapter);
-  for (const event of events) {
-    await store.appendEvent(event);
-  }
-  await store.syncSnapshotFromEvents();
-
-  if (execution.telemetry) {
-    await recordNormalizedTelemetry(store, adapter.normalizeTelemetry(execution.telemetry));
-  }
+  const { assignment, execution } = await runRuntime(store, adapter);
 
   console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
   if (execution.run.hostRunId) {
@@ -250,7 +159,7 @@ async function inspectCommand(
     return;
   }
 
-  const record = await adapter.inspectRun(store, assignmentId);
+  const record = await inspectRuntimeRun(store, adapter, assignmentId);
   if (!record) {
     console.log("No recorded host run found.");
     process.exitCode = 1;
@@ -260,130 +169,8 @@ async function inspectCommand(
   console.log(toPrettyJson(record).trimEnd());
 }
 
-function buildOutcomeEvents(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>,
-  adapter: HostAdapter
-): RuntimeEvent[] {
-  const timestamp = nowIso();
-  const assignmentId = execution.run.assignmentId;
-  const status = nextRuntimeStatus(projection, execution);
-  const events: RuntimeEvent[] = [];
-
-  if (execution.outcome.kind === "decision") {
-    const decision = adapter.normalizeDecision(execution.outcome.capture);
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "decision.created",
-      payload: { decision }
-    });
-  } else {
-    const result = adapter.normalizeResult(execution.outcome.capture);
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "result.submitted",
-      payload: { result }
-    });
-  }
-
-  events.push({
-    eventId: randomUUID(),
-    sessionId: projection.sessionId,
-    timestamp,
-    type: "assignment.updated",
-    payload: {
-      assignmentId,
-      patch: {
-        state: nextAssignmentState(execution),
-        updatedAt: timestamp
-      }
-    }
-  });
-  events.push({
-    eventId: randomUUID(),
-    sessionId: projection.sessionId,
-    timestamp,
-    type: "status.updated",
-    payload: { status }
-  });
-
-  return events;
-}
-
-function nextAssignmentState(execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>) {
-  if (execution.outcome.kind === "decision") {
-    return "blocked" as const;
-  }
-  switch (execution.outcome.capture.status) {
-    case "completed":
-      return "completed" as const;
-    case "failed":
-      return "failed" as const;
-    default:
-      return "in_progress" as const;
-  }
-}
-
-function nextRuntimeStatus(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>
-) {
-  const assignmentId = execution.run.assignmentId;
-  const terminal =
-    execution.outcome.kind === "result" &&
-    (execution.outcome.capture.status === "completed" || execution.outcome.capture.status === "failed");
-  const activeAssignmentIds = terminal
-    ? projection.status.activeAssignmentIds.filter((id) => id !== assignmentId)
-    : projection.status.activeAssignmentIds;
-
-  return {
-    ...projection.status,
-    activeMode: activeAssignmentIds.length === 0 ? "idle" : projection.status.activeMode,
-    currentObjective:
-      activeAssignmentIds.length === 0
-        ? execution.outcome.kind === "result" && execution.outcome.capture.status === "failed"
-          ? `Review failed assignment ${assignmentId}.`
-          : "Await the next assignment."
-        : projection.status.currentObjective,
-    activeAssignmentIds,
-    lastDurableOutputAt: nowIso(),
-    resumeReady: true
-  };
-}
-
-function getRunnableAssignment(projection: Awaited<ReturnType<typeof loadOperatorProjection>>) {
-  const activeAssignment = [...projection.assignments.values()].find((assignment) =>
-    projection.status.activeAssignmentIds.includes(assignment.id)
-  );
-  if (!activeAssignment) {
-    throw new Error("No active assignment is available to run.");
-  }
-  const unresolvedDecisions = [...projection.decisions.values()].filter(
-    (decision) => decision.assignmentId === activeAssignment.id && decision.state === "open"
-  );
-  if (activeAssignment.state === "blocked" || unresolvedDecisions.length > 0) {
-    const suffix =
-      unresolvedDecisions.length > 0
-        ? ` Resolve decision ${unresolvedDecisions[0]!.decisionId} first.`
-        : "";
-    throw new Error(`Assignment ${activeAssignment.id} is blocked and cannot be run.${suffix}`);
-  }
-  return activeAssignment;
-}
-
 function printUsage(): void {
   console.log("Usage: ctx <init|doctor|status|resume|run|inspect> [assignment-id]");
-}
-
-async function loadOperatorProjection(store: RuntimeStore) {
-  if (await store.hasEvents()) {
-    return store.syncSnapshotFromEvents();
-  }
-  return store.loadProjection();
 }
 
 main().catch((error: unknown) => {

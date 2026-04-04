@@ -18,5 +18,6 @@ export * from "./hosts/codex/adapter/envelope.js";
 export * from "./hosts/codex/adapter/index.js";
 export * from "./telemetry/types.js";
 export * from "./telemetry/recorder.js";
+export * from "./cli/commands.js";
 export * from "./workflows/index.js";
 export * from "./backends/index.js";
