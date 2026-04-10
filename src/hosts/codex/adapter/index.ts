@@ -1,4 +1,4 @@
-import { access, link, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { access, link, mkdir, open, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
@@ -20,7 +20,7 @@ import type {
   ResultPacket,
   RuntimeProjection
 } from "../../../core/types.js";
-import { selectAuthoritativeRunRecord } from "../../../core/run-state.js";
+import { getNativeRunId, selectAuthoritativeRunRecord } from "../../../core/run-state.js";
 import { nowIso } from "../../../utils/time.js";
 import { buildTaskEnvelope } from "./envelope.js";
 import type { CodexPaths } from "./types.js";
@@ -33,13 +33,23 @@ import {
 } from "./cli.js";
 import {
   buildCodexExecutionPrompt,
-  codexExecutionOutputSchema,
-  validateCodexStructuredOutcome,
-  type CodexStructuredOutcome
+  codexExecutionOutputSchema
 } from "./prompt.js";
-import { parseJson } from "../../../utils/json.js";
-
-type CodexExecutionWithoutArtifacts = Pick<HostExecutionOutcome, "outcome">;
+import {
+  buildRunRecord,
+  createRunningRecord,
+  parseExecJsonl,
+  readLeaseRecord,
+  withNativeRunId
+} from "./run-records.js";
+import {
+  buildFailedOutcome,
+  deriveExecutionOutcome,
+  fileExists,
+  readPositiveIntEnv,
+  stopRunningExec,
+  summarizeExecutionError
+} from "./execution.js";
 
 export interface CodexAdapterOptions {
   dangerouslyBypassApprovalsAndSandbox?: boolean;
@@ -89,7 +99,7 @@ export class CodexAdapter implements HostAdapter {
     };
   }
 
-  async initialize(store: RuntimeArtifactStore, projection: RuntimeProjection): Promise<void> {
+  async initialize(store: RuntimeArtifactStore, _projection: RuntimeProjection): Promise<void> {
     const paths = this.paths(store);
     await writeCodexKernel(paths.kernelPath);
 
@@ -97,19 +107,6 @@ export class CodexAdapter implements HostAdapter {
     await profileManager.install(paths.kernelPath);
     await store.writeJsonArtifact(`adapters/${this.id}/capabilities.json`, this.getCapabilities());
     await store.writeJsonArtifact(`adapters/${this.id}/exec-output-schema.json`, codexExecutionOutputSchema());
-
-    const brief: RecoveryBrief = {
-      activeObjective: projection.status.currentObjective,
-      activeAssignments: [],
-      lastDurableResults: [],
-      unresolvedDecisions: [],
-      nextRequiredAction: "Initialize through ctx resume when needed.",
-      generatedAt: projection.status.lastDurableOutputAt
-    };
-    await store.writeJsonArtifact(
-      "runtime/last-resume-envelope.json",
-      await this.buildResumeEnvelope(store, projection, brief)
-    );
   }
 
   async doctor(store: RuntimeArtifactStore): Promise<DoctorCheck[]> {
@@ -181,7 +178,13 @@ export class CodexAdapter implements HostAdapter {
         completedAt,
         `Codex run failed before launch: ${error instanceof Error ? error.message : String(error)}`
       );
-      const runRecord = buildRunRecord(outcome, assignmentId, startedAt, completedAt, runningRecord.hostRunId);
+      const runRecord = buildRunRecord(
+        outcome,
+        assignmentId,
+        startedAt,
+        completedAt,
+        getNativeRunId(runningRecord)
+      );
       const warning = await this.persistRunRecordWarning(store, runRecord);
       return {
         ...outcome,
@@ -192,7 +195,7 @@ export class CodexAdapter implements HostAdapter {
           taskId: projection.sessionId,
           assignmentId,
           metadata: {
-            hostRunId: runningRecord.hostRunId ?? "",
+            nativeRunId: getNativeRunId(runningRecord) ?? "",
             exitCode: -1,
             outcomeKind: outcome.outcome.kind
           }
@@ -256,11 +259,8 @@ export class CodexAdapter implements HostAdapter {
               event.type === "thread.started" && typeof event.thread_id === "string"
                 ? event.thread_id
                 : undefined;
-            if (hostRunId && runningRecord.hostRunId !== hostRunId) {
-              runningRecord = {
-                ...runningRecord,
-                hostRunId
-              };
+            if (hostRunId && getNativeRunId(runningRecord) !== hostRunId) {
+              runningRecord = withNativeRunId(runningRecord, hostRunId);
               try {
                 await this.writeRunRecord(store, runningRecord);
               } catch (error) {
@@ -296,7 +296,7 @@ export class CodexAdapter implements HostAdapter {
           assignmentId,
           startedAt,
           completedAt,
-          runningRecord.hostRunId
+          getNativeRunId(runningRecord)
         );
         const warning = collectWarnings(await this.persistRunRecordWarning(store, runRecord));
         return {
@@ -304,11 +304,11 @@ export class CodexAdapter implements HostAdapter {
           run: runRecord,
           ...(warning ? { warning } : {}),
           telemetry: {
-            eventType: "host.run.completed",
-            taskId: projection.sessionId,
-            assignmentId,
-            metadata: {
-              hostRunId: runningRecord.hostRunId ?? "",
+          eventType: "host.run.completed",
+          taskId: projection.sessionId,
+          assignmentId,
+          metadata: {
+              nativeRunId: getNativeRunId(runningRecord) ?? "",
               exitCode: -1,
               outcomeKind: outcome.outcome.kind
             }
@@ -323,7 +323,7 @@ export class CodexAdapter implements HostAdapter {
 
       const completedAt = nowIso();
       const transcript = parseExecJsonl(execution.stdout);
-      const hostRunId = runningRecord.hostRunId ?? transcript.threadId;
+      const nativeRunId = getNativeRunId(runningRecord) ?? transcript.threadId;
 
       const outcome = await deriveExecutionOutcome(
         assignmentId,
@@ -333,7 +333,7 @@ export class CodexAdapter implements HostAdapter {
         transcript.errorMessage
       );
 
-      const runRecord = buildRunRecord(outcome, assignmentId, startedAt, completedAt, hostRunId);
+      const runRecord = buildRunRecord(outcome, assignmentId, startedAt, completedAt, nativeRunId);
       const warning = collectWarnings(await this.persistRunRecordWarning(store, runRecord));
 
       return {
@@ -345,7 +345,7 @@ export class CodexAdapter implements HostAdapter {
           taskId: projection.sessionId,
           assignmentId,
           metadata: {
-            hostRunId: hostRunId ?? "",
+            nativeRunId: nativeRunId ?? "",
             exitCode: execution.exitCode,
             outcomeKind: outcome.outcome.kind
           },
@@ -513,37 +513,12 @@ export class CodexAdapter implements HostAdapter {
     store: RuntimeArtifactStore,
     assignmentId: string
   ): Promise<HostRunRecord | undefined> {
-    const relativePath = `adapters/${this.id}/runs/${assignmentId}.lease.json`;
-    try {
-      return await store.readJsonArtifact<HostRunRecord>(relativePath, "codex run lease");
-    } catch {
-      const content = await this.readLeaseContentOrUndefined(this.runLeasePath(store, assignmentId));
-      if (content === undefined) {
-        return undefined;
-      }
-      try {
-        return parseJson<HostRunRecord>(content, "codex run lease");
-      } catch {
-        await store.deleteArtifact(relativePath);
-        return {
-          assignmentId,
-          state: "running",
-          startedAt: nowIso(),
-          staleReason: "malformed lease file"
-        };
-      }
-    }
-  }
-
-  private async readLeaseContentOrUndefined(path: string): Promise<string | undefined> {
-    try {
-      return await readFile(path, "utf8");
-    } catch (error) {
-      if (isMissing(error)) {
-        return undefined;
-      }
-      throw error;
-    }
+    return readLeaseRecord(
+      store,
+      `adapters/${this.id}/runs/${assignmentId}.lease.json`,
+      this.runLeasePath(store, assignmentId),
+      assignmentId
+    );
   }
 }
 
@@ -555,306 +530,6 @@ function readEnvelopeAssignmentId(envelope: TaskEnvelope): string {
   return assignmentId;
 }
 
-function normalizeStructuredOutcome(
-  assignmentId: string,
-  completedAt: string,
-  outcome: CodexStructuredOutcome
-): CodexExecutionWithoutArtifacts {
-  if (outcome.outcomeType === "decision") {
-    const options = outcome.decisionOptions.filter(
-      (option) => option.id.length > 0 && option.label.length > 0 && option.summary.length > 0
-    );
-    if (options.length === 0) {
-      return buildFailedOutcome(
-        assignmentId,
-        completedAt,
-        "Codex returned a decision outcome without any decision options."
-      );
-    }
-    const recommended =
-      options.find((option) => option.id === outcome.recommendedOption)?.id ?? options[0]!.id;
-    return {
-      outcome: {
-        kind: "decision",
-        capture: {
-          assignmentId,
-          requesterId: "codex",
-          blockerSummary: preferNonEmpty(outcome.blockerSummary, outcome.resultSummary),
-          options,
-          recommendedOption: recommended,
-          createdAt: completedAt
-        }
-      }
-    };
-  }
-
-  return {
-    outcome: {
-      kind: "result",
-      capture: {
-        assignmentId,
-        producerId: "codex",
-        status: outcome.resultStatus === "" ? "partial" : outcome.resultStatus,
-        summary: preferNonEmpty(outcome.resultSummary, "Codex run completed without a summary."),
-        changedFiles: uniqueChangedFiles(outcome.changedFiles),
-        createdAt: completedAt
-      }
-    }
-  };
-}
-
-function buildFailedOutcome(
-  assignmentId: string,
-  completedAt: string,
-  summary: string
-): CodexExecutionWithoutArtifacts {
-  return {
-    outcome: {
-      kind: "result",
-      capture: {
-        assignmentId,
-        producerId: "codex",
-        status: "failed",
-        summary,
-        changedFiles: [],
-        createdAt: completedAt
-      }
-    }
-  };
-}
-
-function buildRunRecord(
-  outcome: CodexExecutionWithoutArtifacts,
-  assignmentId: string,
-  startedAt: string,
-  completedAt: string,
-  threadId?: string
-): HostRunRecord {
-  if (outcome.outcome.kind === "decision") {
-    return {
-      assignmentId,
-      state: "completed",
-      ...(threadId ? { hostRunId: threadId } : {}),
-      startedAt,
-      completedAt,
-      outcomeKind: "decision",
-      summary: outcome.outcome.capture.blockerSummary
-    };
-  }
-
-  return {
-    assignmentId,
-    state: "completed",
-    ...(threadId ? { hostRunId: threadId } : {}),
-    startedAt,
-    completedAt,
-    outcomeKind: "result",
-    resultStatus: outcome.outcome.capture.status,
-    summary: outcome.outcome.capture.summary
-  };
-}
-
-async function readStructuredOutcome(path: string): Promise<CodexStructuredOutcome | undefined> {
-  try {
-    const raw = await readFile(path, "utf8");
-    return validateCodexStructuredOutcome(JSON.parse(raw));
-  } catch {
-    return undefined;
-  }
-}
-
-function parseExecJsonl(stdout: string): {
-  threadId?: string;
-  errorMessage?: string;
-  usage?: HostTelemetryCapture["usage"];
-} {
-  let threadId: string | undefined;
-  let errorMessage: string | undefined;
-  let usage: HostTelemetryCapture["usage"];
-
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      continue;
-    }
-    try {
-      const event = JSON.parse(trimmed) as Record<string, unknown>;
-      if (event.type === "thread.started" && typeof event.thread_id === "string") {
-        threadId = event.thread_id;
-      }
-      if (event.type === "error" && typeof event.message === "string") {
-        errorMessage = event.message;
-      }
-      if (
-        event.type === "turn.completed" &&
-        event.usage &&
-        typeof event.usage === "object" &&
-        !Array.isArray(event.usage)
-      ) {
-        const value = event.usage as Record<string, unknown>;
-        usage = {
-          ...(typeof value.input_tokens === "number" ? { inputTokens: value.input_tokens } : {}),
-          ...(typeof value.output_tokens === "number"
-            ? { outputTokens: value.output_tokens }
-            : {}),
-          ...(typeof value.cached_input_tokens === "number"
-            ? { cachedTokens: value.cached_input_tokens }
-            : {}),
-          ...(typeof value.reasoning_tokens === "number"
-            ? { reasoningTokens: value.reasoning_tokens }
-            : {}),
-          ...(typeof value.input_tokens === "number" && typeof value.output_tokens === "number"
-            ? { totalTokens: value.input_tokens + value.output_tokens }
-            : {})
-        };
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return {
-    ...(threadId ? { threadId } : {}),
-    ...(errorMessage ? { errorMessage } : {}),
-    ...(usage ? { usage } : {})
-  };
-}
-
-function summarizeCodexFailure(
-  execution: { exitCode: number; stderr: string },
-  errorMessage?: string
-): string {
-  const detail = [errorMessage, execution.stderr.trim()].find(
-    (value): value is string => typeof value === "string" && value.length > 0
-  );
-  return detail
-    ? `Codex run failed (exit ${execution.exitCode}): ${detail}`
-    : `Codex run failed with exit code ${execution.exitCode}.`;
-}
-
-function preferNonEmpty(value: string, fallback: string): string {
-  return value.trim().length > 0 ? value : fallback;
-}
-
-function uniqueChangedFiles(files: string[]): string[] {
-  return [...new Set(files.filter((file) => file.trim().length > 0))];
-}
-
-function createRunningRecord(
-  assignmentId: string,
-  startedAt: string,
-  leaseMs: number,
-  hostRunId?: string
-): HostRunRecord {
-  return {
-    assignmentId,
-    state: "running",
-    ...(hostRunId ? { hostRunId } : {}),
-    startedAt,
-    heartbeatAt: startedAt,
-    leaseExpiresAt: new Date(Date.parse(startedAt) + leaseMs).toISOString()
-  };
-}
-
-function readPositiveIntEnv(name: string, fallback: number): number {
-  const raw = Number(process.env[name]);
-  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
-}
-
 function isAlreadyExists(error: unknown): boolean {
   return !!error && typeof error === "object" && "code" in error && error.code === "EEXIST";
-}
-
-function isMissing(error: unknown): boolean {
-  return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
-}
-
-async function deriveExecutionOutcome(
-  assignmentId: string,
-  completedAt: string,
-  execution: { exitCode: number; stderr: string },
-  outputPath: string,
-  errorMessage?: string
-): Promise<CodexExecutionWithoutArtifacts> {
-  if (execution.exitCode !== 0) {
-    return buildFailedOutcome(
-      assignmentId,
-      completedAt,
-      summarizeCodexFailure(execution, errorMessage)
-    );
-  }
-
-  try {
-    const lastMessage = await loadValidatedStructuredOutcome(outputPath);
-    return normalizeStructuredOutcome(assignmentId, completedAt, lastMessage);
-  } catch (error) {
-    return buildFailedOutcome(
-      assignmentId,
-      completedAt,
-      summarizeStructuredOutputFailure(error)
-    );
-  }
-}
-
-async function loadValidatedStructuredOutcome(path: string): Promise<CodexStructuredOutcome> {
-  const raw = await readFile(path, "utf8");
-  return validateCodexStructuredOutcome(JSON.parse(raw));
-}
-
-function summarizeStructuredOutputFailure(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return `Codex run returned invalid structured output: ${detail}`;
-}
-
-function summarizeExecutionError(error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return `Codex run failed before completion: ${detail}`;
-}
-
-async function fileExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function stopRunningExec(running: RunningExec): Promise<void> {
-  const settledResult = running.result.catch(() => undefined);
-  try {
-    await running.terminate("graceful");
-  } catch {
-    // Ignore and continue to exit wait/force escalation.
-  }
-
-  const gracefulExit = await waitForRunningExit(running, 5_000);
-  if (gracefulExit) {
-    return;
-  }
-
-  try {
-    await running.terminate("force");
-  } catch {
-    await settledResult;
-    return;
-  }
-  await waitForRunningExit(running, 5_000).catch(() => undefined);
-  await settledResult;
-}
-
-async function waitForRunningExit(running: RunningExec, timeoutMs: number): Promise<boolean> {
-  try {
-    await Promise.race([
-      running.waitForExit(timeoutMs),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error(`Timed out after ${timeoutMs}ms.`));
-        }, timeoutMs);
-      })
-    ]);
-    return true;
-  } catch {
-    return false;
-  }
 }

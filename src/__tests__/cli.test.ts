@@ -85,7 +85,7 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     cwd: projectRoot,
     env
   });
-  assert.match(inspect.stdout, /"hostRunId": "thread-cli-1"/);
+  assert.match(inspect.stdout, /"nativeRunId": "thread-cli-1"/);
   assert.match(inspect.stdout, /"outcomeKind": "result"/);
 
   const doctor = await execFileAsync(process.execPath, [cliPath, "doctor"], {
@@ -162,7 +162,9 @@ test("ctx status reconciles stale host run leases before reporting active work",
   const staleRecord = {
     assignmentId,
     state: "running",
-    hostRunId: "thread-cli-stale-status",
+    adapterData: {
+      nativeRunId: "thread-cli-stale-status"
+    },
     startedAt: staleAt,
     heartbeatAt: staleAt,
     leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()

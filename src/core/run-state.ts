@@ -1,10 +1,18 @@
 import type { HostRunRecord } from "./types.js";
 
+export function getNativeRunId(record: HostRunRecord | undefined): string | undefined {
+  const nativeRunId = record?.adapterData?.nativeRunId;
+  return typeof nativeRunId === "string" && nativeRunId.length > 0 ? nativeRunId : undefined;
+}
+
 export function selectAuthoritativeRunRecord(
   runRecord: HostRunRecord | undefined,
   leaseRecord: HostRunRecord | undefined
 ): HostRunRecord | undefined {
-  if (runRecord?.state === "completed" && leaseRecord?.staleReason === "malformed lease file") {
+  if (
+    runRecord?.state === "completed" &&
+    leaseRecord?.staleReasonCode === "malformed_lease_artifact"
+  ) {
     return runRecord;
   }
   if (leaseRecord?.state === "running") {

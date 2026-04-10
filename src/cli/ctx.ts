@@ -2,6 +2,7 @@
 import { join, resolve } from "node:path";
 
 import type { HostAdapter } from "../adapters/contract.js";
+import { getNativeRunId } from "../core/run-state.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { RuntimeConfig } from "../config/types.js";
@@ -179,10 +180,11 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
     const runPromise = runRuntime(store, adapter);
     runSettled = runPromise.then(() => undefined, () => undefined);
     const { assignment, execution, diagnostics } = await runPromise;
+    const nativeRunId = getNativeRunId(execution.run);
 
     console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
-    if (execution.run.hostRunId) {
-      console.log(`Host run: ${execution.run.hostRunId}`);
+    if (nativeRunId) {
+      console.log(`Host run: ${nativeRunId}`);
     }
     if (execution.outcome.kind === "decision") {
       console.log(`Decision: ${execution.outcome.capture.blockerSummary}`);

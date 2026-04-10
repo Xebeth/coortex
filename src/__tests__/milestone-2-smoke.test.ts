@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { CodexCommandRunner } from "../hosts/codex/adapter/cli.js";
 import type { RuntimeConfig } from "../config/types.js";
+import { getNativeRunId } from "../core/run-state.js";
 import type { HostRunRecord } from "../core/types.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { RuntimeStore } from "../persistence/store.js";
@@ -60,7 +61,7 @@ test("milestone-2 smoke: happy-path execution persists result, status, and telem
   assert.equal(snapshot?.results[0]?.status, "completed");
   assert.equal(snapshot?.status.activeAssignmentIds.length, 0);
   assert.equal(snapshot?.status.currentObjective, "Await the next assignment.");
-  assert.equal(runRecord?.hostRunId, "smoke-thread-1");
+  assert.equal(getNativeRunId(runRecord), "smoke-thread-1");
   assert.equal(runRecord?.state, "completed");
   assert.equal(telemetry.at(-1)?.inputTokens, 15);
   assert.equal(telemetry.at(-1)?.cachedTokens, 5);
@@ -158,10 +159,12 @@ test("milestone-2 smoke: resume rebuilds partial progress from snapshot-backed i
   const runningRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-interrupted",
     startedAt: nowIso(),
     heartbeatAt: nowIso(),
-    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    adapterData: {
+      nativeRunId: "smoke-thread-interrupted"
+    }
   };
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
   await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
@@ -181,7 +184,7 @@ test("milestone-2 smoke: resume rebuilds partial progress from snapshot-backed i
   assert.equal(resumed.envelope.metadata.activeAssignmentId, setup.assignmentId);
   assert.equal(resumed.envelope.recoveryBrief.lastDurableResults.length, 1);
   assert.equal(inspected?.state, "running");
-  assert.equal(inspected?.hostRunId, "smoke-thread-interrupted");
+  assert.equal(getNativeRunId(inspected), "smoke-thread-interrupted");
 });
 
 test("milestone-2 smoke: profile and kernel artifacts are generated as small static files", async () => {
@@ -479,7 +482,7 @@ test("milestone-2 smoke: resume reconciles a stale running host lease into a que
   const expiredRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-stale",
+    adapterData: { nativeRunId: "smoke-thread-stale" },
     startedAt: staleAt,
     heartbeatAt: staleAt,
     leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
@@ -552,7 +555,7 @@ test("milestone-2 smoke: resume uses the latest projection across multiple stale
   const firstExpiredRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-stale-first",
+    adapterData: { nativeRunId: "smoke-thread-stale-first" },
     startedAt: staleAt,
     heartbeatAt: staleAt,
     leaseExpiresAt: expiredAt
@@ -560,7 +563,7 @@ test("milestone-2 smoke: resume uses the latest projection across multiple stale
   const secondExpiredRecord: HostRunRecord = {
     assignmentId: secondAssignmentId,
     state: "running",
-    hostRunId: "smoke-thread-stale-second",
+    adapterData: { nativeRunId: "smoke-thread-stale-second" },
     startedAt: staleAt,
     heartbeatAt: staleAt,
     leaseExpiresAt: expiredAt
@@ -592,7 +595,7 @@ test("milestone-2 smoke: run refuses to start while an active host lease is stil
   const runningRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-active",
+    adapterData: { nativeRunId: "smoke-thread-active" },
     startedAt: now.toISOString(),
     heartbeatAt: now.toISOString(),
     leaseExpiresAt: new Date(now.getTime() + 60_000).toISOString()
@@ -724,7 +727,7 @@ test("milestone-2 smoke: resume reconciles a running host record without a lease
   const leaseLessRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-missing-lease",
+    adapterData: { nativeRunId: "smoke-thread-missing-lease" },
     startedAt,
     heartbeatAt: startedAt
   };
@@ -762,7 +765,7 @@ test("milestone-2 smoke: stale lease-only runs are reconciled and cleared for re
   const expiredLeaseOnlyRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-lease-only-stale",
+    adapterData: { nativeRunId: "smoke-thread-lease-only-stale" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
     leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
@@ -835,7 +838,7 @@ test("milestone-2 smoke: leftover running lease overrides a completed run record
   const completedRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "completed",
-    hostRunId: "smoke-thread-completed",
+    adapterData: { nativeRunId: "smoke-thread-completed" },
     startedAt: new Date(Date.now() - 120_000).toISOString(),
     completedAt: new Date(Date.now() - 110_000).toISOString(),
     outcomeKind: "result",
@@ -845,7 +848,7 @@ test("milestone-2 smoke: leftover running lease overrides a completed run record
   const staleLease: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-stale-lease",
+    adapterData: { nativeRunId: "smoke-thread-stale-lease" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
     leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
@@ -877,7 +880,7 @@ test("milestone-2 smoke: stale reconciliation is idempotent after the first reco
   const staleRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-stale-repeat",
+    adapterData: { nativeRunId: "smoke-thread-stale-repeat" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
     leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
@@ -925,7 +928,7 @@ test("milestone-2 smoke: stale retries move back to in-progress before the repla
   const expiredRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    hostRunId: "smoke-thread-old-stale",
+    adapterData: { nativeRunId: "smoke-thread-old-stale" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
     leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
@@ -1104,7 +1107,7 @@ function normalizeRunArtifacts(
     execution: {
       outcomeKind: run.execution.outcome.kind,
       runState: run.execution.run.state,
-      hostRunId: run.execution.run.hostRunId,
+      nativeRunId: getNativeRunId(run.execution.run),
       result:
         run.execution.outcome.kind === "result"
           ? {

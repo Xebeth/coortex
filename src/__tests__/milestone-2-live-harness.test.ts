@@ -184,7 +184,7 @@ liveHarness(
 
       const runningRecord = await waitForInterruptionPoint(projectRoot, assignmentId, 45_000);
       assert.equal(runningRecord.state, "running");
-      assert.ok(runningRecord.hostRunId);
+      assert.ok(runningRecord.nativeRunId);
 
       runProcess.kill("SIGTERM");
       const exit = await waitForExit(runProcess);
@@ -206,7 +206,7 @@ liveHarness(
       assert.deepEqual(snapshot.status.activeAssignmentIds, [assignmentId]);
       assert.match(stdout(status), /Active assignments: 1/);
       assert.equal(inspect?.state, "running");
-      assert.equal(inspect?.hostRunId, runningRecord.hostRunId);
+      assert.equal(inspect?.nativeRunId, runningRecord.nativeRunId);
       assert.match(stdout(resume), /Recovery brief generated/);
       assert.equal(resumedEnvelope.metadata.activeAssignmentId, assignmentId);
       assert.equal(resumedEnvelope.recoveryBrief.activeAssignments[0]?.id, assignmentId);
@@ -476,11 +476,19 @@ async function appendPartialResult(
 
 async function inspectRun(projectRoot: string, assignmentId: string) {
   const inspect = await runCli(projectRoot, ["inspect", assignmentId]);
-  return JSON.parse(stdout(inspect)) as {
+  const record = JSON.parse(stdout(inspect)) as {
     assignmentId: string;
     state: string;
-    hostRunId?: string;
     outcomeKind?: string;
+    adapterData?: {
+      nativeRunId?: string;
+    };
+  };
+  return {
+    assignmentId: record.assignmentId,
+    state: record.state,
+    outcomeKind: record.outcomeKind,
+    nativeRunId: record.adapterData?.nativeRunId
   };
 }
 
@@ -517,21 +525,26 @@ async function waitForInterruptionPoint(
   projectRoot: string,
   assignmentId: string,
   timeoutMs: number
-): Promise<{ state: string; hostRunId?: string }> {
+): Promise<{ state: string; nativeRunId?: string }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
       const record = await readJsonArtifact<{
         state: string;
-        hostRunId?: string;
+        adapterData?: {
+          nativeRunId?: string;
+        };
       }>(projectRoot, `adapters/codex/runs/${assignmentId}.json`);
       const readme = await readFile(join(projectRoot, "README.md"), "utf8");
       if (
         record.state === "running" &&
-        typeof record.hostRunId === "string" &&
+        typeof record.adapterData?.nativeRunId === "string" &&
         /Live harness interruption marker\./.test(readme)
       ) {
-        return record;
+        return {
+          state: record.state,
+          nativeRunId: record.adapterData.nativeRunId
+        };
       }
     } catch {
       // keep polling until the handle and on-disk marker are durably visible

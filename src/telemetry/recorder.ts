@@ -1,6 +1,9 @@
-import type { RuntimeStore } from "../persistence/store.js";
 import type { TelemetryEvent } from "./types.js";
 import { nowIso } from "../utils/time.js";
+
+export interface TelemetrySink {
+  appendTelemetry(event: TelemetryEvent): Promise<void>;
+}
 
 export interface TelemetryRecordResult {
   event: TelemetryEvent;
@@ -8,7 +11,7 @@ export interface TelemetryRecordResult {
 }
 
 export interface RecordTelemetryInput {
-  store: RuntimeStore;
+  store: TelemetrySink;
   eventType: string;
   taskId: string;
   assignmentId?: string;
@@ -34,7 +37,7 @@ export async function recordTelemetry(input: RecordTelemetryInput): Promise<Tele
 }
 
 export async function recordNormalizedTelemetry(
-  store: RuntimeStore,
+  store: TelemetrySink,
   event: Omit<TelemetryEvent, "timestamp">
 ): Promise<TelemetryRecordResult> {
   const normalized: TelemetryEvent = {
@@ -46,7 +49,7 @@ export async function recordNormalizedTelemetry(
 }
 
 async function appendTelemetryBestEffort(
-  store: RuntimeStore,
+  store: TelemetrySink,
   event: TelemetryEvent
 ): Promise<string | undefined> {
   try {

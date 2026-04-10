@@ -11,6 +11,7 @@ import type { CodexCommandRunner } from "../hosts/codex/adapter/cli.js";
 import { RuntimeStore } from "../persistence/store.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
+import { getNativeRunId } from "../core/run-state.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { nowIso } from "../utils/time.js";
 
@@ -155,7 +156,7 @@ test("codex adapter executes a bounded run and persists minimal reconnect metada
   assert.equal(execution.outcome.kind, "result");
   assert.equal(execution.outcome.capture.status, "completed");
   assert.equal(execution.run.assignmentId, assignmentId);
-  assert.equal(execution.run.hostRunId, "thread-123");
+  assert.equal(getNativeRunId(execution.run), "thread-123");
   assert.equal(execution.telemetry?.usage?.inputTokens, 100);
   assert.equal(execution.telemetry?.usage?.cachedTokens, 20);
   assert.equal(execution.telemetry?.usage?.totalTokens, 130);
@@ -244,7 +245,7 @@ test("codex adapter does not replay stale last-message artifacts on rerun", asyn
   assert.equal(second.outcome.kind, "result");
   assert.equal(second.outcome.capture.status, "failed");
   assert.match(second.outcome.capture.summary, /invalid structured output/i);
-  assert.equal(second.run.hostRunId, "thread-rerun-2");
+  assert.equal(getNativeRunId(second.run), "thread-rerun-2");
 });
 
 test("codex adapter converts malformed structured output into a failed result", async () => {
@@ -314,7 +315,7 @@ test("codex adapter converts malformed structured output into a failed result", 
   assert.equal(execution.outcome.capture.status, "failed");
   assert.match(execution.outcome.capture.summary, /invalid structured output/i);
   assert.equal(execution.run.state, "completed");
-  assert.equal(execution.run.hostRunId, "thread-bad-output");
+  assert.equal(getNativeRunId(execution.run), "thread-bad-output");
 });
 
 test("codex adapter persists the thread handle before a run fails", async () => {
@@ -355,7 +356,7 @@ test("codex adapter persists the thread handle before a run fails", async () => 
       await input.onEvent?.({ type: "thread.started", thread_id: "thread-interrupt-1" });
       const record = await adapter.inspectRun(store, assignmentId);
       observedRunningRecord =
-        record?.state === "running" && record.hostRunId === "thread-interrupt-1";
+        record?.state === "running" && getNativeRunId(record) === "thread-interrupt-1";
       throw new Error("simulated interruption");
     }
   };
@@ -368,7 +369,7 @@ test("codex adapter persists the thread handle before a run fails", async () => 
   assert.equal(observedRunningRecord, true);
   assert.equal(execution.outcome.kind, "result");
   assert.equal(execution.outcome.capture.status, "failed");
-  assert.equal(execution.run.hostRunId, "thread-interrupt-1");
+  assert.equal(getNativeRunId(execution.run), "thread-interrupt-1");
   assert.equal(execution.run.state, "completed");
 });
 
@@ -540,8 +541,8 @@ test("codex adapter serializes run-record writes so heartbeat updates do not dro
   const execution = await adapter.executeAssignment(store, projection, envelope);
   const inspected = await adapter.inspectRun(store, assignmentId);
 
-  assert.equal(execution.run.hostRunId, "thread-serialized-1");
-  assert.equal(inspected?.hostRunId, "thread-serialized-1");
+  assert.equal(getNativeRunId(execution.run), "thread-serialized-1");
+  assert.equal(getNativeRunId(inspected), "thread-serialized-1");
 });
 
 test("codex adapter waits for canceled runs to persist a terminal record", async () => {
@@ -601,17 +602,17 @@ test("codex adapter waits for canceled runs to persist a terminal record", async
   const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
   const executionPromise = adapter.executeAssignment(store, projection, envelope);
 
-  await waitFor(async () => Boolean((await adapter.inspectRun(store, assignmentId))?.hostRunId));
+  await waitFor(async () => Boolean(getNativeRunId(await adapter.inspectRun(store, assignmentId))));
   await adapter.cancelActiveRun("graceful");
   const execution = await executionPromise;
   const inspected = await adapter.inspectRun(store, assignmentId);
 
   assert.equal(execution.run.state, "completed");
-  assert.equal(execution.run.hostRunId, "thread-cancel-1");
+  assert.equal(getNativeRunId(execution.run), "thread-cancel-1");
   assert.equal(execution.outcome.kind, "result");
   assert.equal(execution.outcome.capture.status, "failed");
   assert.equal(inspected?.state, "completed");
-  assert.equal(inspected?.hostRunId, "thread-cancel-1");
+  assert.equal(getNativeRunId(inspected), "thread-cancel-1");
 });
 
 test("codex adapter recovers final run-record writes after a transient write failure", async () => {
@@ -700,7 +701,7 @@ test("codex adapter recovers final run-record writes after a transient write fai
   assert.match(execution.outcome.capture.summary, /This should be replaced by the failed write path\./i);
   assert.match(execution.warning ?? "", /final run record could not be persisted/i);
   assert.equal(inspected?.state, "running");
-  assert.equal(inspected?.hostRunId, "thread-write-recover-1");
+  assert.equal(getNativeRunId(inspected), "thread-write-recover-1");
 });
 
 test("codex adapter keeps a successful outcome when thread-start metadata persistence fails", async () => {
@@ -743,8 +744,11 @@ test("codex adapter keeps a successful outcome when thread-start metadata persis
       value !== null &&
       "state" in value &&
       value.state === "running" &&
-      "hostRunId" in value &&
-      value.hostRunId === "thread-warning-1"
+      "adapterData" in value &&
+      typeof value.adapterData === "object" &&
+      value.adapterData !== null &&
+      "nativeRunId" in value.adapterData &&
+      value.adapterData.nativeRunId === "thread-warning-1"
     ) {
       failedThreadWrite = true;
       throw new Error("simulated thread metadata write failure");
@@ -790,7 +794,7 @@ test("codex adapter keeps a successful outcome when thread-start metadata persis
   assert.equal(execution.outcome.capture.status, "completed");
   assert.match(execution.warning ?? "", /thread-start handling/i);
   assert.equal(inspected?.state, "completed");
-  assert.equal(inspected?.hostRunId, "thread-warning-1");
+  assert.equal(getNativeRunId(inspected), "thread-warning-1");
 });
 
 test("codex adapter treats malformed lease JSON as stale inspection state", async () => {
@@ -880,7 +884,7 @@ test("codex adapter prefers a completed run record over a malformed lease file",
   await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, {
     assignmentId,
     state: "completed",
-    hostRunId: "thread-completed-1",
+    adapterData: { nativeRunId: "thread-completed-1" },
     startedAt: nowIso(),
     completedAt: nowIso(),
     outcomeKind: "result",
@@ -891,7 +895,7 @@ test("codex adapter prefers a completed run record over a malformed lease file",
   const inspected = await adapter.inspectRun(store, assignmentId);
 
   assert.equal(inspected?.state, "completed");
-  assert.equal(inspected?.hostRunId, "thread-completed-1");
+  assert.equal(getNativeRunId(inspected), "thread-completed-1");
 });
 
 test("codex adapter inspectRun precedence matrix matches recovery invariants", async () => {
@@ -908,7 +912,7 @@ test("codex adapter inspectRun precedence matrix matches recovery invariants", a
       leaseContent: "{",
       runRecord: {
         state: "completed",
-        hostRunId: "thread-completed-matrix"
+        adapterData: { nativeRunId: "thread-completed-matrix" }
       },
       expectedState: "completed",
       expectedHostRunId: "thread-completed-matrix"
@@ -918,14 +922,14 @@ test("codex adapter inspectRun precedence matrix matches recovery invariants", a
       leaseContent: JSON.stringify({
         assignmentId: "placeholder",
         state: "running",
-        hostRunId: "thread-running-matrix",
+        adapterData: { nativeRunId: "thread-running-matrix" },
         startedAt: nowIso(),
         heartbeatAt: nowIso(),
         leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
       }),
       runRecord: {
         state: "completed",
-        hostRunId: "thread-completed-matrix-2"
+        adapterData: { nativeRunId: "thread-completed-matrix-2" }
       },
       expectedState: "running",
       expectedHostRunId: "thread-running-matrix"
@@ -982,7 +986,7 @@ test("codex adapter inspectRun precedence matrix matches recovery invariants", a
     const inspected = await adapter.inspectRun(store, assignmentId);
 
     assert.equal(inspected?.state, testCase.expectedState, testCase.name);
-    assert.equal(inspected?.hostRunId, testCase.expectedHostRunId, testCase.name);
+    assert.equal(getNativeRunId(inspected), testCase.expectedHostRunId, testCase.name);
   }
 });
 
@@ -1080,7 +1084,7 @@ test("codex adapter fails the run when heartbeat lease refreshes stop persisting
     assert.equal(execution.outcome.capture.status, "failed");
     assert.match(execution.outcome.capture.summary, /heartbeat refresh/i);
     assert.equal(inspected?.state, "completed");
-    assert.equal(inspected?.hostRunId, "thread-heartbeat-failure-1");
+    assert.equal(getNativeRunId(inspected), "thread-heartbeat-failure-1");
   } finally {
     if (originalHeartbeat === undefined) {
       delete process.env.COORTEX_RUN_HEARTBEAT_MS;

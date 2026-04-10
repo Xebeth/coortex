@@ -87,16 +87,21 @@ export interface RecoveryBrief {
 export interface HostRunRecord {
   assignmentId: string;
   state: "running" | "completed";
-  hostRunId?: string;
   startedAt: string;
   heartbeatAt?: string;
   leaseExpiresAt?: string;
   staleAt?: string;
+  staleReasonCode?:
+    | "missing_lease_expiry"
+    | "invalid_lease_expiry"
+    | "expired_lease"
+    | "malformed_lease_artifact";
   staleReason?: string;
   completedAt?: string;
   outcomeKind?: "result" | "decision";
   resultStatus?: ResultPacket["status"];
   summary?: string;
+  adapterData?: Record<string, unknown>;
 }
 
 export interface RuntimeSnapshot {
