@@ -894,6 +894,98 @@ test("codex adapter prefers a completed run record over a malformed lease file",
   assert.equal(inspected?.hostRunId, "thread-completed-1");
 });
 
+test("codex adapter inspectRun precedence matrix matches recovery invariants", async () => {
+  const cases = [
+    {
+      name: "malformed lease without a durable run record becomes stale running state",
+      leaseContent: "{",
+      runRecord: undefined,
+      expectedState: "running",
+      expectedHostRunId: undefined
+    },
+    {
+      name: "malformed lease does not override a completed run record",
+      leaseContent: "{",
+      runRecord: {
+        state: "completed",
+        hostRunId: "thread-completed-matrix"
+      },
+      expectedState: "completed",
+      expectedHostRunId: "thread-completed-matrix"
+    },
+    {
+      name: "valid running lease overrides a completed run record until reconciliation",
+      leaseContent: JSON.stringify({
+        assignmentId: "placeholder",
+        state: "running",
+        hostRunId: "thread-running-matrix",
+        startedAt: nowIso(),
+        heartbeatAt: nowIso(),
+        leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+      }),
+      runRecord: {
+        state: "completed",
+        hostRunId: "thread-completed-matrix-2"
+      },
+      expectedState: "running",
+      expectedHostRunId: "thread-running-matrix"
+    }
+  ] as const;
+
+  for (const testCase of cases) {
+    const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-inspect-matrix-"));
+    const store = RuntimeStore.forProject(projectRoot);
+    const sessionId = randomUUID();
+    const config: RuntimeConfig = {
+      version: 1,
+      sessionId,
+      adapter: "codex",
+      host: "codex",
+      rootPath: projectRoot,
+      createdAt: nowIso()
+    };
+
+    await store.initialize(config);
+    const bootstrap = createBootstrapRuntime({
+      rootPath: projectRoot,
+      sessionId,
+      adapter: "codex",
+      host: "codex",
+      workflow: "milestone-2"
+    });
+    for (const event of bootstrap.events) {
+      await store.appendEvent(event);
+    }
+
+    const projection = await store.rebuildProjection();
+    const assignmentId = bootstrap.initialAssignmentId;
+    const adapter = new CodexAdapter();
+    await adapter.initialize(store, projection);
+    await mkdir(join(projectRoot, ".coortex", "adapters", "codex", "runs"), { recursive: true });
+    await writeFile(
+      join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+      testCase.leaseContent.replace('"assignmentId":"placeholder"', `"assignmentId":"${assignmentId}"`),
+      "utf8"
+    );
+    if (testCase.runRecord) {
+      await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, {
+        assignmentId,
+        startedAt: nowIso(),
+        completedAt: nowIso(),
+        outcomeKind: "result",
+        resultStatus: "completed",
+        summary: testCase.name,
+        ...testCase.runRecord
+      });
+    }
+
+    const inspected = await adapter.inspectRun(store, assignmentId);
+
+    assert.equal(inspected?.state, testCase.expectedState, testCase.name);
+    assert.equal(inspected?.hostRunId, testCase.expectedHostRunId, testCase.name);
+  }
+});
+
 test("codex adapter fails the run when heartbeat lease refreshes stop persisting", async () => {
   const originalHeartbeat = process.env.COORTEX_RUN_HEARTBEAT_MS;
   process.env.COORTEX_RUN_HEARTBEAT_MS = "10";

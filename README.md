@@ -52,6 +52,7 @@ Start here:
 - `docs/architecture.md`
 - `docs/module-boundaries.md`
 - `docs/runtime-state-model.md`
+- `docs/run-recovery-invariants.md`
 - `docs/implementation-phases.md`
 
 Reference documents:
@@ -83,21 +84,18 @@ That means:
 
 ## Near-term implementation focus
 
-The first milestone should deliver:
+Milestone 2 is now complete in the current repository. The next implementation milestone is workflow modules, beginning with explicit sequencing surfaces such as:
 
-- project scaffold
-- runtime state model
-- append-only persistence
-- snapshot/projection rebuild
-- recovery brief generation
-- trimming for tool output and bounded envelopes
-- telemetry scaffold
-- one reference host adapter
-- minimal CLI/status surfaces
+- `plan`
+- `review`
+- `verify`
+- additional workflow modules as needed
 
-## Milestone 1 status
+## Milestone 2 status
 
-The current repository now includes a working Milestone 1 vertical slice in TypeScript/Node:
+The current repository includes a complete Milestone 2 implementation in TypeScript/Node: the real execution slice and the recovery-hardening work described in the phase plan are both implemented and validated.
+
+Implemented in the current repository:
 
 - config types and validation under `src/config`
 - host-agnostic runtime models under `src/core`
@@ -108,17 +106,28 @@ The current repository now includes a working Milestone 1 vertical slice in Type
 - a static Codex kernel boundary under `src/hosts/codex/kernel`
 - a Codex reference adapter under `src/hosts/codex/adapter`
 - explicit placeholder boundaries under `src/workflows` and `src/backends`
-- minimal `ctx` CLI surfaces under `src/cli`
+- runtime-backed `ctx` CLI surfaces under `src/cli`
 
-The adapter contract now includes:
+The adapter/runtime path now includes:
 
 - startup/resume integration
 - bounded envelope building
+- real Codex-backed `run` execution
+- run inspection through persisted host metadata
+- heartbeat and lease-backed host-run tracking
+- stale-run reconciliation into queued retry state
+- active-lease protection against duplicate reruns
 - result normalization
 - decision normalization
 - telemetry normalization hooks
+- explicit Codex bypass-mode support for live success-path validation
 
-Repository tests also enforce the Milestone 1 module map and guard key boundary rules so the documented architecture stays true as the code evolves.
+Repository tests enforce the Milestone 1 module map, guard key boundary rules, and validate the Milestone 2 execution slice through:
+
+- the standard automated suite
+- a bypass-enabled live Codex smoke path
+- a bypass-enabled Milestone 2 live harness
+- a restricted-mode live test that verifies truthful persisted state without bypass
 
 The durable runtime root is `.coortex/` in the current project.
 
@@ -130,6 +139,7 @@ Generated files include:
 - `.coortex/runtime/telemetry.ndjson`
 - `.coortex/runtime/last-resume-envelope.json`
 - `.coortex/artifacts/results/*.txt` when envelope trimming persists large outputs
+- `.coortex/adapters/codex/runs/*.json` for persisted host run metadata
 - `.coortex/adapters/codex/kernel.md`
 - `.coortex/adapters/codex/profile.json`
 - `.codex/config.toml` with a Coortex-managed `model_instructions_file` block for project-local Codex integration
@@ -149,12 +159,19 @@ Initialize the local runtime:
 node dist/cli/ctx.js init
 ```
 
-Check status, doctor output, and a recovery envelope:
+Check status, doctor output, run inspection, and a recovery envelope:
 
 ```bash
 node dist/cli/ctx.js status
 node dist/cli/ctx.js doctor
+node dist/cli/ctx.js inspect
 node dist/cli/ctx.js resume
+```
+
+Execute the active assignment through the Codex adapter:
+
+```bash
+node dist/cli/ctx.js run
 ```
 
 Run the milestone test suite:
@@ -162,6 +179,22 @@ Run the milestone test suite:
 ```bash
 npm test
 ```
+
+Run the live Milestone 2 validation paths:
+
+```bash
+COORTEX_LIVE_CODEX_SMOKE=1 node --test dist/__tests__/cli.test.js --test-name-pattern "ctx run completes a live Codex smoke path"
+COORTEX_LIVE_CODEX_HARNESS=1 npm run test:live-m2
+COORTEX_LIVE_CODEX_RESTRICTED=1 node --test dist/__tests__/cli.test.js --test-name-pattern "ctx run reports truthful persisted state without bypass mode"
+```
+
+Enable Codex bypass mode for explicit live success-path validation by setting:
+
+```bash
+COORTEX_CODEX_DANGEROUS_BYPASS=1
+```
+
+When enabled, Coortex persists the Codex runtime setting and uses `--dangerously-bypass-approvals-and-sandbox` for Codex-backed runs. The default remains sandboxed execution.
 
 ## License
 MIT

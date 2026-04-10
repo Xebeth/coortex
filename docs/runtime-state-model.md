@@ -10,6 +10,7 @@ For the longer-term target, see:
 
 - `docs/coortex-ideal-spec.md`
 - `docs/coortex-roadmap.md`
+- `docs/run-recovery-invariants.md`
 
 ---
 
