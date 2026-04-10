@@ -458,13 +458,13 @@ export class CodexAdapter implements HostAdapter {
 
   private async writeRunRecord(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void> {
     const writePromise = this.runRecordWriteQueue.catch(() => undefined).then(async () => {
+      await store.writeJsonArtifact(`adapters/${this.id}/runs/${record.assignmentId}.json`, record);
+      await store.writeJsonArtifact(`adapters/${this.id}/last-run.json`, record);
       if (record.state === "running") {
         await store.writeJsonArtifact(`adapters/${this.id}/runs/${record.assignmentId}.lease.json`, record);
       } else {
         await rm(this.runLeasePath(store, record.assignmentId), { force: true });
       }
-      await store.writeJsonArtifact(`adapters/${this.id}/runs/${record.assignmentId}.json`, record);
-      await store.writeJsonArtifact(`adapters/${this.id}/last-run.json`, record);
     });
     this.runRecordWriteQueue = writePromise.catch(() => undefined);
     await writePromise;

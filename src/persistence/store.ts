@@ -115,7 +115,7 @@ export class RuntimeStore {
     if (!config) {
       throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
     }
-    const events = await this.loadEvents();
+    const { events } = await this.loadReplayableEvents();
     return projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
   }
 
