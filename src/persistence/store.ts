@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { validateRuntimeConfig } from "../config/schema.js";
@@ -8,7 +8,12 @@ import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
 import { appendLine, ensureDir, readJsonFile, readLines, writeJsonAtomic, writeTextAtomic } from "./files.js";
 import { parseJson, toPrettyJson } from "../utils/json.js";
-import { fromSnapshot, projectRuntimeState, toSnapshot } from "../projections/runtime-projection.js";
+import {
+  applyRuntimeEvent,
+  fromSnapshot,
+  projectRuntimeState,
+  toSnapshot
+} from "../projections/runtime-projection.js";
 
 export class RuntimeStore {
   readonly rootDir: string;
@@ -110,7 +115,7 @@ export class RuntimeStore {
     if (!config) {
       throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
     }
-    const { events } = await this.loadReplayableEvents();
+    const events = await this.loadEvents();
     return projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
   }
 
@@ -120,19 +125,46 @@ export class RuntimeStore {
   }> {
     const snapshot = await this.loadSnapshot();
     const { events, warning } = await this.loadReplayableEvents();
+    if (warning && snapshot) {
+      try {
+        const replayed = replayEventsAfterSnapshot(snapshot, events);
+        if (replayed) {
+          return {
+            projection: replayed,
+            warning: `${warning} Rebuilt runtime state from ${this.snapshotPath} plus replayable events after ${snapshot.lastEventId ?? "the snapshot boundary"}.`
+          };
+        }
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return {
+          projection: fromSnapshot(snapshot),
+          warning: `${warning} Event replay after ${this.snapshotPath} could not rebuild runtime state; fell back to ${this.snapshotPath}. ${detail}`.trim()
+        };
+      }
+      return {
+        projection: fromSnapshot(snapshot),
+        warning: `${warning} Fell back to ${this.snapshotPath} to avoid rewriting rolled-back salvaged state.`
+      };
+    }
     if (events.length > 0) {
       const config = await this.loadConfig();
       if (!config) {
         throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
       }
-      return warning
-        ? {
-            projection: projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events),
-            warning
-          }
-        : {
-            projection: projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events)
-          };
+      try {
+        const projection = projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
+        return warning ? { projection, warning } : { projection };
+      } catch (error) {
+        if (!snapshot) {
+          throw error;
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        const fallbackWarning = `${warning ?? ""} Event replay could not rebuild runtime state; fell back to ${this.snapshotPath}. ${detail}`.trim();
+        return {
+          projection: fromSnapshot(snapshot),
+          warning: fallbackWarning
+        };
+      }
     }
     if (snapshot) {
       return warning
@@ -157,6 +189,12 @@ export class RuntimeStore {
     if (!warning) {
       return undefined;
     }
+    if (await this.loadSnapshot()) {
+      return undefined;
+    }
+    if (events.length === 0) {
+      return undefined;
+    }
     const config = await this.loadConfig();
     if (!config) {
       throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
@@ -176,9 +214,11 @@ export class RuntimeStore {
     warning?: string;
   }> {
     const repairWarning = await this.repairEventLog();
-    const projection = await this.rebuildProjection();
+    const recovered = await this.loadProjectionWithRecovery();
+    const projection = recovered.projection;
     await this.writeSnapshot(toSnapshot(projection));
-    return repairWarning ? { projection, warning: repairWarning } : { projection };
+    const warning = [repairWarning, recovered.warning].filter(Boolean).join(" ").trim();
+    return warning ? { projection, warning } : { projection };
   }
 
   async syncSnapshotFromEvents(): Promise<RuntimeProjection> {
@@ -203,6 +243,28 @@ export class RuntimeStore {
     await writeFile(fullPath, content, "utf8");
     return fullPath;
   }
+
+  async deleteArtifact(relativePath: string): Promise<void> {
+    await rm(join(this.rootDir, relativePath), { force: true });
+  }
 }
 
 export { toPrettyJson };
+
+function replayEventsAfterSnapshot(
+  snapshot: RuntimeSnapshot,
+  events: RuntimeEvent[]
+): RuntimeProjection | undefined {
+  if (!snapshot.lastEventId) {
+    return undefined;
+  }
+  const snapshotIndex = events.findIndex((event) => event.eventId === snapshot.lastEventId);
+  if (snapshotIndex === -1) {
+    return undefined;
+  }
+  const projection = fromSnapshot(snapshot);
+  for (const event of events.slice(snapshotIndex + 1)) {
+    applyRuntimeEvent(projection, event);
+  }
+  return projection;
+}

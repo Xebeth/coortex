@@ -17,6 +17,7 @@ export interface CommandDiagnostic {
     | "event-log-salvaged"
     | "event-log-repaired"
     | "telemetry-write-failed"
+    | "host-run-persist-failed"
     | "active-run-present"
     | "stale-run-reconciled";
   message: string;
@@ -58,8 +59,6 @@ export async function initRuntime(
 
   const createdAt = nowIso();
   const sessionId = randomUUID();
-  const codexDangerouslyBypassApprovalsAndSandbox =
-    process.env.COORTEX_CODEX_DANGEROUS_BYPASS === "1" ? true : undefined;
 
   const config: RuntimeConfig = {
     version: 1,
@@ -67,10 +66,7 @@ export async function initRuntime(
     adapter: adapter.id,
     host: adapter.host,
     rootPath: projectRoot,
-    createdAt,
-    ...(codexDangerouslyBypassApprovalsAndSandbox === undefined
-      ? {}
-      : { codexDangerouslyBypassApprovalsAndSandbox })
+    createdAt
   };
 
   await store.initialize(config);
@@ -173,55 +169,96 @@ export async function runRuntime(
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
   const assignment = getRunnableAssignment(projectionBefore);
-  const brief = buildRecoveryBrief(projectionBefore);
-  const envelope = await adapter.buildResumeEnvelope(store, projectionBefore, brief);
+  const claimedRun = adapter.claimRunLease
+    ? await adapter.claimRunLease(store, projectionBefore, assignment.id)
+    : undefined;
+  let executionStarted = false;
+  try {
+    const envelopeProjection = projectionForRunnableAssignment(projectionBefore, assignment.id);
+    const brief = buildRecoveryBrief(envelopeProjection);
+    const envelope = await adapter.buildResumeEnvelope(store, envelopeProjection, brief);
+    const launchedProjection = await markAssignmentInProgress(store, projectionBefore, assignment.id);
 
-  const startedTelemetry = await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry({
-      eventType: "host.run.started",
-      taskId: projectionBefore.sessionId,
-      assignmentId: assignment.id,
-      metadata: {
-        envelopeChars: envelope.estimatedChars,
-        trimApplied: envelope.trimApplied,
-        trimmedFields: envelope.trimmedFields.length
-      }
-    })
-  );
-  const diagnostics = [
-    ...projectionBeforeResult.diagnostics,
-    ...reconciled.diagnostics,
-    ...diagnosticsFromWarning(startedTelemetry.warning, "telemetry-write-failed")
-  ];
-
-  const execution = await adapter.executeAssignment(store, projectionBefore, envelope);
-  const events = buildOutcomeEvents(projectionBefore, execution, adapter);
-  for (const event of events) {
-    await store.appendEvent(event);
-  }
-  const projectionAfterResult = await store.syncSnapshotFromEventsWithRecovery();
-  const projectionAfter = projectionAfterResult.projection;
-  diagnostics.push(...diagnosticsFromWarning(projectionAfterResult.warning, "event-log-repaired"));
-
-  if (execution.telemetry) {
-    const completedTelemetry = await recordNormalizedTelemetry(
+    const startedTelemetry = await recordNormalizedTelemetry(
       store,
-      adapter.normalizeTelemetry(execution.telemetry)
+      adapter.normalizeTelemetry({
+        eventType: "host.run.started",
+        taskId: launchedProjection.sessionId,
+        assignmentId: assignment.id,
+        metadata: {
+          envelopeChars: envelope.estimatedChars,
+          trimApplied: envelope.trimApplied,
+          trimmedFields: envelope.trimmedFields.length
+        }
+      })
     );
-    diagnostics.push(
-      ...diagnosticsFromWarning(completedTelemetry.warning, "telemetry-write-failed")
-    );
+    const diagnostics = [
+      ...projectionBeforeResult.diagnostics,
+      ...reconciled.diagnostics,
+      ...diagnosticsFromWarning(startedTelemetry.warning, "telemetry-write-failed")
+    ];
+
+    executionStarted = true;
+    const execution = await adapter.executeAssignment(store, launchedProjection, envelope, claimedRun);
+    diagnostics.push(...diagnosticsFromWarning(execution.warning, "host-run-persist-failed"));
+    const events = buildOutcomeEvents(launchedProjection, execution, adapter);
+    for (const event of events) {
+      await store.appendEvent(event);
+    }
+    const projectionAfterResult = await store.syncSnapshotFromEventsWithRecovery();
+    const projectionAfter = projectionAfterResult.projection;
+    diagnostics.push(...diagnosticsFromWarning(projectionAfterResult.warning, "event-log-repaired"));
+
+    if (execution.telemetry) {
+      const completedTelemetry = await recordNormalizedTelemetry(
+        store,
+        adapter.normalizeTelemetry(execution.telemetry)
+      );
+      diagnostics.push(
+        ...diagnosticsFromWarning(completedTelemetry.warning, "telemetry-write-failed")
+      );
+    }
+
+    return {
+      projectionBefore: launchedProjection,
+      projectionAfter,
+      assignment,
+      envelope,
+      execution,
+      diagnostics
+    };
+  } catch (error) {
+    if (!executionStarted) {
+      await adapter.releaseRunLease?.(store, assignment.id);
+    }
+    throw error;
+  }
+}
+
+async function markAssignmentInProgress(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string
+): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
+  const assignment = projection.assignments.get(assignmentId);
+  if (!assignment || assignment.state === "in_progress") {
+    return projection;
   }
 
-  return {
-    projectionBefore,
-    projectionAfter,
-    assignment,
-    envelope,
-    execution,
-    diagnostics
-  };
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp: nowIso(),
+    type: "assignment.updated",
+    payload: {
+      assignmentId,
+      patch: {
+        state: "in_progress",
+        updatedAt: nowIso()
+      }
+    }
+  });
+  return (await store.syncSnapshotFromEventsWithRecovery()).projection;
 }
 
 export async function inspectRuntimeRun(
@@ -315,23 +352,50 @@ export function buildOutcomeEvents(
 export function getRunnableAssignment(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>
 ) {
-  const activeAssignment = [...projection.assignments.values()].find((assignment) =>
-    projection.status.activeAssignmentIds.includes(assignment.id)
-  );
-  if (!activeAssignment) {
+  const activeAssignments = projection.status.activeAssignmentIds
+    .map((assignmentId) => projection.assignments.get(assignmentId))
+    .filter((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));
+  if (activeAssignments.length === 0) {
     throw new Error("No active assignment is available to run.");
   }
-  const unresolvedDecisions = [...projection.decisions.values()].filter(
-    (decision) => decision.assignmentId === activeAssignment.id && decision.state === "open"
-  );
-  if (activeAssignment.state === "blocked" || unresolvedDecisions.length > 0) {
-    const suffix =
-      unresolvedDecisions.length > 0
-        ? ` Resolve decision ${unresolvedDecisions[0]!.decisionId} first.`
-        : "";
-    throw new Error(`Assignment ${activeAssignment.id} is blocked and cannot be run.${suffix}`);
+
+  for (const activeAssignment of activeAssignments) {
+    const unresolvedDecisions = [...projection.decisions.values()].filter(
+      (decision) => decision.assignmentId === activeAssignment.id && decision.state === "open"
+    );
+    if (activeAssignment.state === "blocked" || unresolvedDecisions.length > 0) {
+      continue;
+    }
+    return activeAssignment;
   }
-  return activeAssignment;
+
+  const blockedAssignment = activeAssignments[0]!;
+  const unresolvedDecisions = [...projection.decisions.values()].filter(
+    (decision) => decision.assignmentId === blockedAssignment.id && decision.state === "open"
+  );
+  const suffix =
+    unresolvedDecisions.length > 0
+      ? ` Resolve decision ${unresolvedDecisions[0]!.decisionId} first.`
+      : "";
+  throw new Error(`Assignment ${blockedAssignment.id} is blocked and cannot be run.${suffix}`);
+}
+
+function projectionForRunnableAssignment(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string
+) {
+  return {
+    ...projection,
+    status: {
+      ...projection.status,
+      currentObjective:
+        projection.assignments.get(assignmentId)?.objective ?? projection.status.currentObjective,
+      activeAssignmentIds: [assignmentId]
+    },
+    decisions: new Map(
+      [...projection.decisions.entries()].filter(([, decision]) => decision.assignmentId === assignmentId)
+    )
+  };
 }
 
 async function reconcileActiveRuns(
@@ -370,21 +434,24 @@ async function reconcileActiveRuns(
     const timestamp = nowIso();
     await store.writeJsonArtifact(`adapters/${adapter.id}/runs/${assignmentId}.json`, {
       ...record,
+      state: "completed",
       staleAt: timestamp,
       staleReason: staleReason(record)
     });
     await store.writeJsonArtifact(`adapters/${adapter.id}/last-run.json`, {
       ...record,
+      state: "completed",
       staleAt: timestamp,
       staleReason: staleReason(record)
     });
+    await store.deleteArtifact(`adapters/${adapter.id}/runs/${assignmentId}.lease.json`);
 
-    const assignment = projection.assignments.get(assignmentId);
-    const objective = assignment?.objective ?? projection.status.currentObjective;
+    const assignment = effectiveProjection.assignments.get(assignmentId);
+    const objective = assignment?.objective ?? effectiveProjection.status.currentObjective;
     const events: RuntimeEvent[] = [
       {
         eventId: randomUUID(),
-        sessionId: projection.sessionId,
+        sessionId: effectiveProjection.sessionId,
         timestamp,
         type: "assignment.updated",
         payload: {
@@ -397,12 +464,12 @@ async function reconcileActiveRuns(
       },
       {
         eventId: randomUUID(),
-        sessionId: projection.sessionId,
+        sessionId: effectiveProjection.sessionId,
         timestamp,
         type: "status.updated",
         payload: {
           status: {
-            ...projection.status,
+            ...effectiveProjection.status,
             currentObjective: `Retry assignment ${assignmentId}: ${objective}`,
             lastDurableOutputAt: timestamp,
             resumeReady: true
@@ -455,16 +522,23 @@ function isRunLeaseExpired(record: HostRunRecord): boolean {
     return false;
   }
   if (!record.leaseExpiresAt) {
-    return false;
+    return true;
   }
-  return Date.parse(record.leaseExpiresAt) <= Date.now();
+  const leaseExpiry = Date.parse(record.leaseExpiresAt);
+  if (Number.isNaN(leaseExpiry)) {
+    return true;
+  }
+  return leaseExpiry <= Date.now();
 }
 
 function staleReason(record: HostRunRecord): string {
-  if (record.leaseExpiresAt) {
+  if (!record.leaseExpiresAt) {
+    return "Run record remained in running state without a lease expiry.";
+  }
+  if (!Number.isNaN(Date.parse(record.leaseExpiresAt))) {
     return `Run lease expired at ${record.leaseExpiresAt}.`;
   }
-  return "Run record remained in running state without a lease expiry.";
+  return `Run record has an invalid lease expiry: ${record.leaseExpiresAt}.`;
 }
 
 function nextAssignmentState(execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>) {
