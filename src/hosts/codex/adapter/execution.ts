@@ -2,7 +2,6 @@ import { access } from "node:fs/promises";
 
 import type { HostExecutionOutcome, HostTelemetryCapture } from "../../../adapters/contract.js";
 import type { ResultPacket } from "../../../core/types.js";
-import type { RunningExec } from "./cli.js";
 import { validateCodexStructuredOutcome, type CodexStructuredOutcome } from "./prompt.js";
 
 type CodexExecutionWithoutArtifacts = Pick<HostExecutionOutcome, "outcome">;
@@ -66,29 +65,6 @@ export async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
-}
-
-export async function stopRunningExec(running: RunningExec): Promise<void> {
-  const settledResult = running.result.catch(() => undefined);
-  try {
-    await running.terminate("graceful");
-  } catch {
-    // Ignore and continue to exit wait/force escalation.
-  }
-
-  const gracefulExit = await waitForRunningExit(running, 5_000);
-  if (gracefulExit) {
-    return;
-  }
-
-  try {
-    await running.terminate("force");
-  } catch {
-    await settledResult;
-    return;
-  }
-  await waitForRunningExit(running, 5_000).catch(() => undefined);
-  await settledResult;
 }
 
 export function readPositiveIntEnv(name: string, fallback: number): number {
@@ -173,20 +149,4 @@ function preferNonEmpty(value: string, fallback: string): string {
 
 function uniqueChangedFiles(files: string[]): string[] {
   return [...new Set(files.filter((file) => file.trim().length > 0))];
-}
-
-async function waitForRunningExit(running: RunningExec, timeoutMs: number): Promise<boolean> {
-  try {
-    await Promise.race([
-      running.waitForExit(timeoutMs),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error(`Timed out after ${timeoutMs}ms.`));
-        }, timeoutMs);
-      })
-    ]);
-    return true;
-  } catch {
-    return false;
-  }
 }

@@ -103,6 +103,10 @@ Responsibilities:
 - define the host adapter interface
 - define normalized host capability reporting
 - define common adapter expectations
+- own shared host-run infrastructure used by multiple adapters
+  such as base run-record shaping, lease-backed persistence,
+  inspection precedence helpers, and execution-session lifecycle
+  coordination
 
 Must not become a dumping ground for host-specific implementations.
 
@@ -118,6 +122,8 @@ Responsibilities:
 - integrate the host’s config/profile/session surfaces
 - build task envelopes for that host
 - normalize host outputs and telemetry back into Coortex
+- provide only the host-native execution and parsing behavior not
+  covered by shared adapter infrastructure
 
 Must not own runtime truth.
 

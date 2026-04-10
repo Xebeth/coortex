@@ -14,8 +14,10 @@ In the current implementation:
 - `recovery` owns pure stale-run derivation and brief-shaping logic
 - `cli` owns persistence orchestration when reconciliation mutates
   durable state
+- `adapters` owns shared host-run record and lease-backed persistence
+  helpers plus shared execution-session coordination
 - host adapters supply host-specific metadata parsing and execution
-  behavior
+  behavior on top of that shared infrastructure
 
 Host adapters are expected to supply metadata and execution behavior,
 not redefine reconciliation policy.
