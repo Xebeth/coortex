@@ -53,6 +53,7 @@ Start here:
 - `docs/module-boundaries.md`
 - `docs/runtime-state-model.md`
 - `docs/run-recovery-invariants.md`
+- `docs/codex-run-recovery-mapping.md`
 - `docs/implementation-phases.md`
 
 Reference documents:

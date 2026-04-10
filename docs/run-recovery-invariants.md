@@ -2,12 +2,23 @@
 
 ## Purpose
 
-This document defines the current invariants for Coortex's run-lifecycle
-and recovery behavior.
+This document defines the host-agnostic invariants for Coortex's
+run-lifecycle and recovery behavior.
 
-It is intentionally narrower than the full architecture documents. The
-goal is to make the Milestone 2 execution and recovery paths explicit
-enough that code review and test coverage can check the same model.
+It describes the contract the runtime and host adapters must preserve,
+independent of any particular host CLI or on-disk adapter layout.
+
+In the current implementation:
+
+- `core` owns the base host-run state model and generic run-state rules
+- `recovery` owns pure stale-run derivation and brief-shaping logic
+- `cli` owns persistence orchestration when reconciliation mutates
+  durable state
+- host adapters supply host-specific metadata parsing and execution
+  behavior
+
+Host adapters are expected to supply metadata and execution behavior,
+not redefine reconciliation policy.
 
 Related documents:
 
@@ -15,6 +26,7 @@ Related documents:
 - `docs/architecture.md`
 - `docs/telemetry.md`
 - `docs/implementation-phases.md`
+- `docs/codex-run-recovery-mapping.md`
 
 ---
 
@@ -26,44 +38,43 @@ run state at a time.
 That state is derived from:
 
 1. runtime event log and snapshot
-2. adapter-owned run record metadata
-3. adapter-owned lease metadata
+2. adapter-owned durable run metadata
+3. adapter-owned active lease metadata
 
-The runtime owns assignment truth. Adapter artifacts only explain the
-current host-run situation well enough to reconcile runtime truth after
-interruption.
+The runtime owns assignment truth. Adapter artifacts only describe the
+host-run situation well enough to reconcile runtime truth after
+interruption or host failure.
+
+The base host-run record is runtime-owned. Adapter-specific fields, if
+needed, should layer on top rather than changing the generic
+run-lifecycle semantics.
 
 ---
 
-## Artifacts
+## Artifact roles
 
-For the Codex adapter, the relevant durable artifacts are:
+Every adapter must provide durable artifacts with these roles:
 
-- `.coortex/runtime/events.ndjson`
-- `.coortex/runtime/snapshot.json`
-- `.coortex/adapters/codex/runs/<assignment>.json`
-- `.coortex/adapters/codex/runs/<assignment>.lease.json`
-- `.coortex/adapters/codex/last-run.json`
-
-### Artifact roles
-
-- `events.ndjson`
+- runtime event log
   Authoritative append-only runtime log during normal operation.
 
-- `snapshot.json`
+- runtime snapshot
   Authoritative durable fallback for operator recovery when event replay
   is malformed or incomplete.
 
-- `runs/<assignment>.json`
+- per-assignment run record
   Durable host-run metadata for inspection and reconciliation.
 
-- `runs/<assignment>.lease.json`
+- per-assignment active lease
   Exclusivity primitive for active host execution. It is authoritative
   only while the run is actually active.
 
-- `last-run.json`
-  Convenience pointer for the most recent inspected host run. It is not
-  an exclusivity primitive.
+- last-run pointer
+  Convenience pointer for the most recently inspected host run. It is
+  not an exclusivity primitive.
+
+Adapters may realize those roles with different filenames or storage
+backends, but the role semantics must stay consistent.
 
 ---
 
@@ -72,14 +83,16 @@ For the Codex adapter, the relevant durable artifacts are:
 For `inspect`, `status`, `resume`, and `run` reconciliation, the current
 effective host-run state follows these rules:
 
-1. A valid completed run record wins over a malformed lease artifact.
-2. A valid running lease wins over a running or stale run record.
+1. A valid completed run record wins over malformed active-lease
+   metadata.
+2. Valid active-lease metadata wins over running or stale run-record
+   metadata.
 3. A lease-less running record is treated as stale.
 4. A running record with a missing or invalid lease expiry is treated as
    stale.
 5. A running record with an expired lease is treated as stale.
-6. A malformed lease with no valid completed run record is treated as
-   stale running state so reconciliation can clear it.
+6. Malformed active-lease metadata with no valid completed run record is
+   treated as stale running state so reconciliation can clear it.
 
 ---
 
@@ -94,9 +107,9 @@ effective host-run state follows these rules:
 
 ### Running updates
 
-- While a run is active, the lease sidecar must be updated before the
-  derived run record so concurrent inspection does not observe older
-  lease state than the run record implies.
+- While a run is active, lease metadata must be refreshed before derived
+  run metadata so concurrent inspection does not observe older lease
+  state than the run record implies.
 - Heartbeat persistence failure is fatal because lease freshness is part
   of duplicate-run protection.
 
@@ -104,7 +117,7 @@ effective host-run state follows these rules:
 
 - Once a run is no longer active, queued heartbeat callbacks must not be
   able to rewrite the run back to `running`.
-- For non-running terminal writes, the lease sidecar must be removed
+- For non-running terminal writes, active-lease metadata must be removed
   before the completed run record becomes visible.
 - Lease cleanup is mandatory even when final run-record persistence
   degrades to a warning.
@@ -118,7 +131,7 @@ effective host-run state follows these rules:
 When an active lease is stale, reconciliation must:
 
 1. rewrite the host run record to a non-running stale-completed state
-2. remove the lease sidecar
+2. remove the active lease
 3. move the assignment back to `queued`
 4. update runtime status from the latest projection, not the original
    one from the beginning of reconciliation
@@ -162,8 +175,8 @@ If a snapshot exists and the event log is malformed:
 1. try to rebuild from the snapshot plus replayable events after the
    snapshot's `lastEventId`
 2. if that suffix replay fails, fall back to the snapshot
-3. do not rewrite `events.ndjson` when an existing snapshot is the
-   safer durable source
+3. do not rewrite the authoritative event log when an existing snapshot
+   is the safer durable source
 
 The goal is to preserve the latest durable state without silently
 rolling back to an older salvaged projection.
@@ -185,14 +198,14 @@ rolling back to an older salvaged projection.
 
 The test suite should explicitly cover:
 
-- valid running lease
-- expired running lease
+- valid active lease
+- expired active lease
 - missing lease expiry
 - invalid lease expiry
 - malformed lease with no run record
 - malformed lease with completed run record
 - lease-only stale state
-- completed record with leftover running lease
+- completed record with leftover active lease
 - concurrent run attempts
 - queued heartbeat after completion
 - claim-time metadata failure

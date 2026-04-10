@@ -1,5 +1,5 @@
 import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
-import type { DecisionPacket, ResultPacket } from "../core/types.js";
+import type { DecisionPacket, HostRunRecord, ResultPacket } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
 
 export interface RuntimeArtifactStore {
@@ -86,21 +86,6 @@ export interface HostTelemetryCapture {
     TelemetryEvent,
     "inputTokens" | "outputTokens" | "totalTokens" | "cachedTokens" | "reasoningTokens"
   >;
-}
-
-export interface HostRunRecord {
-  assignmentId: string;
-  state: "running" | "completed";
-  hostRunId?: string;
-  startedAt: string;
-  heartbeatAt?: string;
-  leaseExpiresAt?: string;
-  staleAt?: string;
-  staleReason?: string;
-  completedAt?: string;
-  outcomeKind?: "result" | "decision";
-  resultStatus?: ResultPacket["status"];
-  summary?: string;
 }
 
 export interface HostExecutionOutcome {

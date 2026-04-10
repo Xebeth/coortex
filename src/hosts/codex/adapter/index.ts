@@ -9,17 +9,18 @@ import type {
   HostDecisionCapture,
   HostExecutionOutcome,
   HostResultCapture,
-  HostRunRecord,
   HostTelemetryCapture,
   RuntimeArtifactStore,
   TaskEnvelope
 } from "../../../adapters/contract.js";
 import type {
   DecisionPacket,
+  HostRunRecord,
   RecoveryBrief,
   ResultPacket,
   RuntimeProjection
 } from "../../../core/types.js";
+import { selectAuthoritativeRunRecord } from "../../../core/run-state.js";
 import { nowIso } from "../../../utils/time.js";
 import { buildTaskEnvelope } from "./envelope.js";
 import type { CodexPaths } from "./types.js";
@@ -397,16 +398,7 @@ export class CodexAdapter implements HostAdapter {
         "codex run record"
       );
       const leaseRecord = await this.readLeaseRecord(store, assignmentId);
-      if (runRecord?.state === "completed" && leaseRecord?.staleReason === "malformed lease file") {
-        return runRecord;
-      }
-      if (leaseRecord?.state === "running") {
-        return leaseRecord;
-      }
-      if (runRecord) {
-        return runRecord;
-      }
-      return leaseRecord;
+      return selectAuthoritativeRunRecord(runRecord, leaseRecord);
     }
     return store.readJsonArtifact<HostRunRecord>(`adapters/${this.id}/last-run.json`, "codex run record");
   }

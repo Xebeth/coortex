@@ -11,6 +11,7 @@ For the longer-term target, see:
 - `docs/coortex-ideal-spec.md`
 - `docs/coortex-roadmap.md`
 - `docs/run-recovery-invariants.md`
+- `docs/codex-run-recovery-mapping.md`
 
 ---
 
@@ -97,6 +98,32 @@ Required contents:
 
 It must be compact enough to fit inside a bounded task envelope.
 
+## 6. Host Run Record
+
+The host run record is the durable, host-agnostic summary of one
+assignment execution attempt.
+
+Required fields:
+
+- `assignment_id`
+- `state`
+- `started_at`
+
+Common optional fields:
+
+- `heartbeat_at`
+- `lease_expires_at`
+- `stale_at`
+- `stale_reason`
+- `completed_at`
+- `outcome_kind`
+- `result_status`
+- `summary`
+
+Host-native identifiers or extra metadata should be treated as adapter
+extensions over this base shape rather than part of the core
+run-lifecycle model.
+
 ---
 
 ## Lifecycle
@@ -121,6 +148,7 @@ The state model must support:
 - snapshot serialization
 - projection rebuild
 - recovery-brief derivation
+- durable host-run summaries for reconciliation
 
 Representative events:
 
@@ -154,7 +182,8 @@ Host adapters may add **mapping metadata** between runtime state and host-native
 
 That mapping metadata should not replace the runtime entity model.
 
-The runtime entity model remains the canonical representation.
+The runtime entity model, including the base host-run record, remains
+the canonical representation.
 
 ---
 

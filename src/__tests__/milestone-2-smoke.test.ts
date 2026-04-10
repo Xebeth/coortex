@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { CodexCommandRunner } from "../hosts/codex/adapter/cli.js";
 import type { RuntimeConfig } from "../config/types.js";
-import type { HostRunRecord } from "../adapters/contract.js";
+import type { HostRunRecord } from "../core/types.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { initRuntime, inspectRuntimeRun, loadOperatorProjection, resumeRuntime, runRuntime } from "../cli/commands.js";

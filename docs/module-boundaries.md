@@ -47,6 +47,7 @@ Responsibilities:
 - assignment types and lifecycle
 - result packets
 - decision packets
+- base host-run record shape and generic run-state rules
 - runtime/session status
 - workflow-facing state rules
 
@@ -80,7 +81,7 @@ Owns interruption handling and resume logic.
 Responsibilities:
 - rebuild actionable current state
 - derive compact recovery brief
-- handle stale/requeue logic in later phases
+- derive stale/requeue decisions from runtime-owned state
 
 Must not rely on transcript history as primary truth.
 
@@ -158,6 +159,8 @@ Responsibilities:
 - status
 - doctor/validation
 - resume/status surfaces
+- persist recovery-side mutations when operator commands reconcile
+  durable state
 
 Must remain thin.
 

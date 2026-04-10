@@ -84,6 +84,21 @@ export interface RecoveryBrief {
   generatedAt: string;
 }
 
+export interface HostRunRecord {
+  assignmentId: string;
+  state: "running" | "completed";
+  hostRunId?: string;
+  startedAt: string;
+  heartbeatAt?: string;
+  leaseExpiresAt?: string;
+  staleAt?: string;
+  staleReason?: string;
+  completedAt?: string;
+  outcomeKind?: "result" | "decision";
+  resultStatus?: ResultPacket["status"];
+  summary?: string;
+}
+
 export interface RuntimeSnapshot {
   version: 1;
   sessionId: string;
