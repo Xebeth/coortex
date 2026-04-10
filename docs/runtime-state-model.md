@@ -130,6 +130,21 @@ Representative events:
 - decision resolved
 - status updated
 
+### Derived persistence artifacts
+
+`events.ndjson` is the authoritative durable log and should remain
+append-only during normal read/status/resume inspection paths.
+
+`snapshot.json` and generated recovery artifacts such as
+`last-resume-envelope.json` are derived caches. Rewriting them during
+resume or projection refresh is acceptable because they summarize
+authoritative runtime state rather than replace it.
+
+Malformed-line recovery is best-effort. Recovery may salvage replayable
+events in memory, and durable repair paths may rewrite the event log to
+preserve replayable events without preserving original byte-for-byte
+formatting.
+
 ---
 
 ## Adapter Relationship

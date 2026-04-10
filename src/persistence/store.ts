@@ -6,7 +6,7 @@ import type { RuntimeConfig } from "../config/types.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
-import { appendLine, ensureDir, readJsonFile, readLines, writeJsonAtomic } from "./files.js";
+import { appendLine, ensureDir, readJsonFile, readLines, writeJsonAtomic, writeTextAtomic } from "./files.js";
 import { parseJson, toPrettyJson } from "../utils/json.js";
 import { fromSnapshot, projectRuntimeState, toSnapshot } from "../projections/runtime-projection.js";
 
@@ -57,6 +57,35 @@ export class RuntimeStore {
     );
   }
 
+  async loadReplayableEvents(): Promise<{
+    events: RuntimeEvent[];
+    warning?: string;
+    malformedLines: number[];
+  }> {
+    const lines = await readLines(this.eventsPath);
+    const events: RuntimeEvent[] = [];
+    const warnings: string[] = [];
+    const malformedLines: number[] = [];
+
+    for (const [index, line] of lines.entries()) {
+      try {
+        events.push(parseJson<RuntimeEvent>(line, `runtime event ${index + 1} from ${this.eventsPath}`));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        malformedLines.push(index + 1);
+        warnings.push(`Event replay skipped malformed line ${index + 1} in ${this.eventsPath}. ${message}`);
+      }
+    }
+
+    return warnings.length > 0
+      ? {
+          events,
+          warning: warnings.join(" "),
+          malformedLines
+        }
+      : { events, malformedLines };
+  }
+
   async writeSnapshot(snapshot: RuntimeSnapshot): Promise<void> {
     await writeJsonAtomic(this.snapshotPath, snapshot);
   }
@@ -81,34 +110,79 @@ export class RuntimeStore {
     if (!config) {
       throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
     }
-    const events = await this.loadEvents();
+    const { events } = await this.loadReplayableEvents();
     return projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
   }
 
-  async loadProjection(): Promise<RuntimeProjection> {
-    const events = await this.loadEvents();
+  async loadProjectionWithRecovery(): Promise<{
+    projection: RuntimeProjection;
+    warning?: string;
+  }> {
+    const snapshot = await this.loadSnapshot();
+    const { events, warning } = await this.loadReplayableEvents();
     if (events.length > 0) {
       const config = await this.loadConfig();
       if (!config) {
         throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
       }
-      return projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
+      return warning
+        ? {
+            projection: projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events),
+            warning
+          }
+        : {
+            projection: projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events)
+          };
     }
-    const snapshot = await this.loadSnapshot();
     if (snapshot) {
-      return fromSnapshot(snapshot);
+      return warning
+        ? { projection: fromSnapshot(snapshot), warning }
+        : { projection: fromSnapshot(snapshot) };
     }
     throw new Error(`No persisted runtime state found at ${this.rootDir}`);
   }
 
+  async loadProjection(): Promise<RuntimeProjection> {
+    const { projection } = await this.loadProjectionWithRecovery();
+    return projection;
+  }
+
   async hasEvents(): Promise<boolean> {
-    const events = await this.loadEvents();
-    return events.length > 0;
+    const lines = await readLines(this.eventsPath);
+    return lines.length > 0;
+  }
+
+  async repairEventLog(): Promise<string | undefined> {
+    const { events, warning } = await this.loadReplayableEvents();
+    if (!warning) {
+      return undefined;
+    }
+    const config = await this.loadConfig();
+    if (!config) {
+      throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
+    }
+    try {
+      projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
+    } catch {
+      return undefined;
+    }
+    const content = events.map((event) => JSON.stringify(event)).join("\n");
+    await writeTextAtomic(this.eventsPath, content.length > 0 ? `${content}\n` : "");
+    return `${warning} Rewrote ${this.eventsPath} with ${events.length} replayable event(s).`;
+  }
+
+  async syncSnapshotFromEventsWithRecovery(): Promise<{
+    projection: RuntimeProjection;
+    warning?: string;
+  }> {
+    const repairWarning = await this.repairEventLog();
+    const projection = await this.rebuildProjection();
+    await this.writeSnapshot(toSnapshot(projection));
+    return repairWarning ? { projection, warning: repairWarning } : { projection };
   }
 
   async syncSnapshotFromEvents(): Promise<RuntimeProjection> {
-    const projection = await this.rebuildProjection();
-    await this.writeSnapshot(toSnapshot(projection));
+    const { projection } = await this.syncSnapshotFromEventsWithRecovery();
     return projection;
   }
 

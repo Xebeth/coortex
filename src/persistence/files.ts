@@ -20,9 +20,13 @@ export async function readJsonFile<T>(path: string, label: string): Promise<T | 
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
+  await writeTextAtomic(path, toPrettyJson(value));
+}
+
+export async function writeTextAtomic(path: string, content: string): Promise<void> {
   await ensureDir(dirname(path));
   const tempPath = `${path}.tmp`;
-  await writeFile(tempPath, toPrettyJson(value), "utf8");
+  await writeFile(tempPath, content, "utf8");
   await rename(tempPath, path);
 }
 

@@ -4,11 +4,9 @@ import { join, resolve } from "node:path";
 import type { HostAdapter } from "../adapters/contract.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
-import type { RuntimeConfig } from "../config/types.js";
 import {
   initRuntime,
   inspectRuntimeRun,
-  loadReconciledProjectionWithDiagnostics,
   loadOperatorProjectionWithDiagnostics,
   resumeRuntime,
   runRuntime,
@@ -20,7 +18,7 @@ async function main(): Promise<void> {
   const [command, assignmentIdArg] = process.argv.slice(2);
   const projectRoot = process.cwd();
   const store = RuntimeStore.forProject(projectRoot);
-  const adapter = await createAdapter(store, command);
+  const adapter = new CodexAdapter();
 
   switch (command) {
     case "init":
@@ -30,7 +28,7 @@ async function main(): Promise<void> {
       await doctorCommand(store, adapter);
       return;
     case "status":
-      await statusCommand(store, adapter);
+      await statusCommand(store);
       return;
     case "resume":
       await resumeCommand(store, adapter);
@@ -45,29 +43,6 @@ async function main(): Promise<void> {
       printUsage();
       process.exitCode = command ? 1 : 0;
   }
-}
-
-async function createAdapter(
-  store: RuntimeStore,
-  command?: string
-): Promise<HostAdapter> {
-  if (command === "init") {
-    return new CodexAdapter();
-  }
-
-  const config = await store.loadConfig();
-  return createAdapterFromConfig(config);
-}
-
-function createAdapterFromConfig(config?: RuntimeConfig): HostAdapter {
-  void config;
-  const envBypass = process.env.COORTEX_CODEX_DANGEROUS_BYPASS === "1";
-  return new CodexAdapter(
-    undefined,
-    {
-      dangerouslyBypassApprovalsAndSandbox: envBypass
-    }
-  );
 }
 
 async function initCommand(
@@ -118,7 +93,7 @@ async function doctorCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   process.exitCode = hasFailure ? 1 : 0;
 }
 
-async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise<void> {
+async function statusCommand(store: RuntimeStore): Promise<void> {
   const config = await store.loadConfig();
   if (!config) {
     console.log("Coortex is not initialized. Run `ctx init` first.");
@@ -126,7 +101,7 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     return;
   }
 
-  const { projection, diagnostics } = await loadReconciledProjectionWithDiagnostics(store, adapter);
+  const { projection, diagnostics } = await loadOperatorProjectionWithDiagnostics(store);
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
@@ -170,15 +145,9 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
     return;
   }
 
-  let runSettled = Promise.resolve();
-  const cancellation = createRunCancellationController(adapter, {
-    exit: (code) => process.exit(code),
-    awaitRunPersistence: () => runSettled
-  });
+  const cancellation = createRunCancellationController(adapter);
   try {
-    const runPromise = runRuntime(store, adapter);
-    runSettled = runPromise.then(() => undefined, () => undefined);
-    const { assignment, execution, diagnostics } = await runPromise;
+    const { assignment, execution, diagnostics } = await runRuntime(store, adapter);
 
     console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
     if (execution.run.hostRunId) {
@@ -189,9 +158,6 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
       console.log(`Recommended option: ${execution.outcome.capture.recommendedOption}`);
     } else {
       console.log(`Result (${execution.outcome.capture.status}): ${execution.outcome.capture.summary}`);
-      if (execution.outcome.capture.status === "failed") {
-        process.exitCode = 1;
-      }
     }
     printDiagnostics(diagnostics);
   } finally {

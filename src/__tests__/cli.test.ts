@@ -138,6 +138,94 @@ test("ctx status and resume recover from snapshot when the event log is missing"
   assert.match(resume.stdout, /Recovery brief generated/);
 });
 
+test("ctx status, resume, and doctor salvage malformed logs without rewriting them", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-malformed-events-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const eventsPath = join(projectRoot, ".coortex", "runtime", "events.ndjson");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const originalEvents = await readFile(eventsPath, "utf8");
+  const corruptedEvents = `${originalEvents.split("\n").filter(Boolean)[0]}\n{"broken":\n${originalEvents
+    .split("\n")
+    .filter(Boolean)
+    .slice(1)
+    .join("\n")}\n`;
+  await writeFile(eventsPath, corruptedEvents, "utf8");
+
+  const status = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  assert.match(status.stdout, /Active assignments: 1/);
+  assert.match(status.stderr, /WARNING event-log-salvaged .*skipped malformed line/);
+  assert.equal(await readFile(eventsPath, "utf8"), corruptedEvents);
+
+  const resume = await execFileAsync(process.execPath, [cliPath, "resume"], {
+    cwd: projectRoot
+  });
+  assert.match(resume.stdout, /Recovery brief generated/);
+  assert.match(resume.stderr, /WARNING event-log-salvaged .*skipped malformed line/);
+  assert.equal(await readFile(eventsPath, "utf8"), corruptedEvents);
+
+  const doctor = await execFileAsync(process.execPath, [cliPath, "doctor"], {
+    cwd: projectRoot
+  });
+  assert.match(doctor.stdout, /OK snapshot/);
+  assert.match(doctor.stderr, /WARNING event-log-salvaged .*skipped malformed line/);
+  assert.equal(await readFile(eventsPath, "utf8"), corruptedEvents);
+});
+
+test("ctx run surfaces telemetry write failures as structured diagnostics", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-telemetry-diagnostic-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const fixturePath = join(projectRoot, "codex-exec-fixture.json");
+
+  await writeFile(
+    fixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [{ type: "thread.started", thread_id: "thread-cli-telemetry" }],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "completed",
+          resultSummary: "Telemetry diagnostic path completed.",
+          changedFiles: ["README.md"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const env = {
+    ...process.env,
+    COORTEX_CODEX_EXEC_FIXTURE: fixturePath
+  };
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  await rm(join(projectRoot, ".coortex", "runtime", "telemetry.ndjson"));
+  await mkdir(join(projectRoot, ".coortex", "runtime", "telemetry.ndjson"), { recursive: true });
+
+  const run = await execFileAsync(process.execPath, [cliPath, "run"], {
+    cwd: projectRoot,
+    env
+  });
+
+  assert.match(run.stdout, /Executed assignment/);
+  assert.match(run.stderr, /WARNING telemetry-write-failed Telemetry append failed for host.run.started/);
+  assert.match(run.stderr, /WARNING telemetry-write-failed Telemetry append failed for host.run.completed/);
+});
+
 test("ctx init reports codex config conflicts by path without echoing file contents", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-conflict-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");

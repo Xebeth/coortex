@@ -2,6 +2,11 @@ import type { RuntimeStore } from "../persistence/store.js";
 import type { TelemetryEvent } from "./types.js";
 import { nowIso } from "../utils/time.js";
 
+export interface TelemetryRecordResult {
+  event: TelemetryEvent;
+  warning?: string;
+}
+
 export interface RecordTelemetryInput {
   store: RuntimeStore;
   eventType: string;
@@ -12,7 +17,7 @@ export interface RecordTelemetryInput {
   metadata: Record<string, unknown>;
 }
 
-export async function recordTelemetry(input: RecordTelemetryInput): Promise<TelemetryEvent> {
+export async function recordTelemetry(input: RecordTelemetryInput): Promise<TelemetryRecordResult> {
   const event: TelemetryEvent = {
     timestamp: nowIso(),
     eventType: input.eventType,
@@ -24,18 +29,31 @@ export async function recordTelemetry(input: RecordTelemetryInput): Promise<Tele
   if (input.assignmentId) {
     event.assignmentId = input.assignmentId;
   }
-  await input.store.appendTelemetry(event);
-  return event;
+  const warning = await appendTelemetryBestEffort(input.store, event);
+  return warning ? { event, warning } : { event };
 }
 
 export async function recordNormalizedTelemetry(
   store: RuntimeStore,
   event: Omit<TelemetryEvent, "timestamp">
-): Promise<TelemetryEvent> {
+): Promise<TelemetryRecordResult> {
   const normalized: TelemetryEvent = {
     timestamp: nowIso(),
     ...event
   };
-  await store.appendTelemetry(normalized);
-  return normalized;
+  const warning = await appendTelemetryBestEffort(store, normalized);
+  return warning ? { event: normalized, warning } : { event: normalized };
+}
+
+async function appendTelemetryBestEffort(
+  store: RuntimeStore,
+  event: TelemetryEvent
+): Promise<string | undefined> {
+  try {
+    await store.appendTelemetry(event);
+    return undefined;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `Telemetry append failed for ${event.eventType}: ${message}`;
+  }
 }
