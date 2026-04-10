@@ -8,6 +8,7 @@ import type { RuntimeConfig } from "../config/types.js";
 import {
   initRuntime,
   inspectRuntimeRun,
+  loadReconciledProjectionWithDiagnostics,
   loadOperatorProjectionWithDiagnostics,
   resumeRuntime,
   runRuntime,
@@ -29,7 +30,7 @@ async function main(): Promise<void> {
       await doctorCommand(store, adapter);
       return;
     case "status":
-      await statusCommand(store);
+      await statusCommand(store, adapter);
       return;
     case "resume":
       await resumeCommand(store, adapter);
@@ -117,7 +118,7 @@ async function doctorCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   process.exitCode = hasFailure ? 1 : 0;
 }
 
-async function statusCommand(store: RuntimeStore): Promise<void> {
+async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise<void> {
   const config = await store.loadConfig();
   if (!config) {
     console.log("Coortex is not initialized. Run `ctx init` first.");
@@ -125,7 +126,7 @@ async function statusCommand(store: RuntimeStore): Promise<void> {
     return;
   }
 
-  const { projection, diagnostics } = await loadOperatorProjectionWithDiagnostics(store);
+  const { projection, diagnostics } = await loadReconciledProjectionWithDiagnostics(store, adapter);
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
@@ -169,9 +170,15 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
     return;
   }
 
-  const cancellation = createRunCancellationController(adapter);
+  let runSettled = Promise.resolve();
+  const cancellation = createRunCancellationController(adapter, {
+    exit: (code) => process.exit(code),
+    awaitRunPersistence: () => runSettled
+  });
   try {
-    const { assignment, execution, diagnostics } = await runRuntime(store, adapter);
+    const runPromise = runRuntime(store, adapter);
+    runSettled = runPromise.then(() => undefined, () => undefined);
+    const { assignment, execution, diagnostics } = await runPromise;
 
     console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
     if (execution.run.hostRunId) {
@@ -182,6 +189,9 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
       console.log(`Recommended option: ${execution.outcome.capture.recommendedOption}`);
     } else {
       console.log(`Result (${execution.outcome.capture.status}): ${execution.outcome.capture.summary}`);
+      if (execution.outcome.capture.status === "failed") {
+        process.exitCode = 1;
+      }
     }
     printDiagnostics(diagnostics);
   } finally {

@@ -295,6 +295,21 @@ export async function loadOperatorProjectionWithDiagnostics(store: RuntimeStore)
   };
 }
 
+export async function loadReconciledProjectionWithDiagnostics(
+  store: RuntimeStore,
+  adapter: HostAdapter
+): Promise<{
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
+  diagnostics: CommandDiagnostic[];
+}> {
+  const loaded = await loadOperatorProjectionWithDiagnostics(store);
+  const reconciled = await reconcileActiveRuns(store, adapter, loaded.projection);
+  return {
+    projection: reconciled.projection,
+    diagnostics: [...loaded.diagnostics, ...reconciled.diagnostics]
+  };
+}
+
 export function buildOutcomeEvents(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>,

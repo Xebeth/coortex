@@ -143,6 +143,57 @@ test("ctx status and resume recover from snapshot when the event log is missing"
   assert.match(resume.stdout, /Recovery brief generated/);
 });
 
+test("ctx status reconciles stale host run leases before reporting active work", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-stale-status-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+  };
+  const assignmentId = snapshot.assignments[0]!.id;
+  const staleAt = new Date(Date.now() - 60_000).toISOString();
+  const staleRecord = {
+    assignmentId,
+    state: "running",
+    hostRunId: "thread-cli-stale-status",
+    startedAt: staleAt,
+    heartbeatAt: staleAt,
+    leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+  };
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
+
+  const status = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+  };
+
+  assert.match(status.stderr, /WARNING stale-run-reconciled/);
+  assert.match(status.stdout, new RegExp(`- ${assignmentId} queued `));
+  assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+});
+
 test("ctx status, resume, and doctor salvage malformed logs without rewriting them", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-malformed-events-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -229,6 +280,56 @@ test("ctx run surfaces telemetry write failures as structured diagnostics", asyn
   assert.match(run.stdout, /Executed assignment/);
   assert.match(run.stderr, /WARNING telemetry-write-failed Telemetry append failed for host.run.started/);
   assert.match(run.stderr, /WARNING telemetry-write-failed Telemetry append failed for host.run.completed/);
+});
+
+test("ctx run exits non-zero when it persists a failed result", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-failed-run-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const fixturePath = join(projectRoot, "codex-exec-fixture.json");
+
+  await writeFile(
+    fixturePath,
+    JSON.stringify(
+      {
+        exitCode: 2,
+        stdoutLines: [{ type: "thread.started", thread_id: "thread-cli-failed" }],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "failed",
+          resultSummary: "Codex execution failed before finishing the assignment.",
+          changedFiles: [],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const env = {
+    ...process.env,
+    COORTEX_CODEX_EXEC_FIXTURE: fixturePath
+  };
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "run"], {
+      cwd: projectRoot,
+      env
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.equal(error.code, 1);
+      assert.match(error.stdout ?? "", /Result \(failed\): Codex run failed with exit code 2\./);
+      return true;
+    }
+  );
 });
 
 test("ctx init reports codex config conflicts by path without echoing file contents", async () => {

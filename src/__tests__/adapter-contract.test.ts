@@ -842,6 +842,58 @@ test("codex adapter treats malformed lease JSON as stale inspection state", asyn
   );
 });
 
+test("codex adapter prefers a completed run record over a malformed lease file", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-malformed-lease-completed-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const assignmentId = bootstrap.initialAssignmentId;
+  const adapter = new CodexAdapter();
+  await adapter.initialize(store, projection);
+  await mkdir(join(projectRoot, ".coortex", "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+    "{",
+    "utf8"
+  );
+  await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, {
+    assignmentId,
+    state: "completed",
+    hostRunId: "thread-completed-1",
+    startedAt: nowIso(),
+    completedAt: nowIso(),
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Completed run record should win over malformed lease."
+  });
+
+  const inspected = await adapter.inspectRun(store, assignmentId);
+
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.hostRunId, "thread-completed-1");
+});
+
 test("codex adapter fails the run when heartbeat lease refreshes stop persisting", async () => {
   const originalHeartbeat = process.env.COORTEX_RUN_HEARTBEAT_MS;
   process.env.COORTEX_RUN_HEARTBEAT_MS = "10";
@@ -1139,6 +1191,95 @@ test("codex adapter writes running lease updates atomically", async () => {
       process.env.COORTEX_RUN_HEARTBEAT_MS = originalHeartbeat;
     }
   }
+});
+
+test("codex adapter clears the lease before writing a completed run record", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-complete-order-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const assignmentId = bootstrap.initialAssignmentId;
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  let checkedCompletedWrite = false;
+  (store as RuntimeStore & {
+    writeJsonArtifact: RuntimeStore["writeJsonArtifact"];
+  }).writeJsonArtifact = async (artifactPath, value) => {
+    if (
+      artifactPath === `adapters/codex/runs/${assignmentId}.json` &&
+      typeof value === "object" &&
+      value !== null &&
+      "state" in value &&
+      value.state === "completed"
+    ) {
+      checkedCompletedWrite = true;
+      await assert.rejects(
+        readFile(
+          join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+          "utf8"
+        ),
+        /ENOENT/
+      );
+    }
+    return originalWriteJsonArtifact(artifactPath, value);
+  };
+
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec(input) {
+      await input.onEvent?.({ type: "thread.started", thread_id: "thread-complete-order-1" });
+      await mkdir(dirname(input.outputPath), { recursive: true });
+      await writeFile(
+        input.outputPath,
+        JSON.stringify({
+          outcomeType: "result",
+          resultStatus: "completed",
+          resultSummary: "Lease was cleared before the completed run record write.",
+          changedFiles: [],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }),
+        "utf8"
+      );
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  await adapter.initialize(store, projection);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const execution = await adapter.executeAssignment(store, projection, envelope);
+
+  assert.equal(execution.run.state, "completed");
+  assert.equal(checkedCompletedWrite, true);
 });
 
 function codexFixtureName(): string {

@@ -392,11 +392,14 @@ export class CodexAdapter implements HostAdapter {
     assignmentId?: string
   ): Promise<HostRunRecord | undefined> {
     if (assignmentId) {
-      const leaseRecord = await this.readLeaseRecord(store, assignmentId);
       const runRecord = await store.readJsonArtifact<HostRunRecord>(
         `adapters/${this.id}/runs/${assignmentId}.json`,
         "codex run record"
       );
+      const leaseRecord = await this.readLeaseRecord(store, assignmentId);
+      if (runRecord?.state === "completed" && leaseRecord?.staleReason === "malformed lease file") {
+        return runRecord;
+      }
       if (leaseRecord?.state === "running") {
         return leaseRecord;
       }
@@ -458,13 +461,13 @@ export class CodexAdapter implements HostAdapter {
 
   private async writeRunRecord(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void> {
     const writePromise = this.runRecordWriteQueue.catch(() => undefined).then(async () => {
-      await store.writeJsonArtifact(`adapters/${this.id}/runs/${record.assignmentId}.json`, record);
-      await store.writeJsonArtifact(`adapters/${this.id}/last-run.json`, record);
       if (record.state === "running") {
         await store.writeJsonArtifact(`adapters/${this.id}/runs/${record.assignmentId}.lease.json`, record);
       } else {
         await rm(this.runLeasePath(store, record.assignmentId), { force: true });
       }
+      await store.writeJsonArtifact(`adapters/${this.id}/runs/${record.assignmentId}.json`, record);
+      await store.writeJsonArtifact(`adapters/${this.id}/last-run.json`, record);
     });
     this.runRecordWriteQueue = writePromise.catch(() => undefined);
     await writePromise;
@@ -533,7 +536,8 @@ export class CodexAdapter implements HostAdapter {
         return {
           assignmentId,
           state: "running",
-          startedAt: nowIso()
+          startedAt: nowIso(),
+          staleReason: "malformed lease file"
         };
       }
     }
