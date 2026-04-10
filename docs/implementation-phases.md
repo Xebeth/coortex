@@ -59,13 +59,31 @@ Build the first coherent slice of Coortex:
 
 Move from scaffolded integration into real host-driven task execution and make interruption recovery stronger.
 
+### Current status
+
+Milestone 2 is complete in the current repository.
+
+The current implementation now includes:
+
+- real execution through the reference adapter
+- persisted result and decision capture in real runs
+- run inspection through persisted host metadata
+- stronger recovery logic for interrupted runs
+- lease and heartbeat-backed host-run tracking
+- stale-run reconciliation and queued retry behavior
+- explicit execution-mode handling for live validation
+- recovery-oriented telemetry for stale-run reconciliation and host lifecycle events
+
 ### Deliverables
 
 - real task execution through the reference adapter
+- result/decision capture in real runs
+- run inspection through persisted host metadata
 - stronger recovery logic
 - improved resume behavior
 - more complete telemetry
 - more robust adapter lifecycle handling
+- explicit execution-mode handling for live validation
 
 ---
 

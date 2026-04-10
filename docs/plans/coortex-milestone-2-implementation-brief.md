@@ -1,5 +1,24 @@
 # Coortex Milestone 2 Implementation Brief
 
+## Status
+
+The Milestone 2 execution slice defined in this brief is complete in the current repository.
+
+The current branch includes:
+
+- real Codex-backed `ctx run` execution from runtime-owned bounded envelopes
+- persisted result and decision capture through the normal runtime path
+- run inspection through adapter-owned host metadata
+- automated verification through the standard suite
+- live verification through:
+  - a bypass-enabled Codex smoke path
+  - a bypass-enabled Milestone 2 live harness
+  - a restricted-mode live test that validates truthful persisted state without bypass
+
+The repository now also includes the recovery-hardening follow-on that this brief originally left for later, including lease and heartbeat-backed host-run tracking, stale-run reconciliation, and duplicate-run protection while a lease is active.
+
+The scope statements below describe the original execution-slice target for Milestone 2 and are retained as planning context for what this brief set out to prove.
+
 ## 1. Increment
 
 Milestone 2 is the **smallest end-to-end real execution path** for Coortex.
@@ -67,14 +86,16 @@ Milestone 2 is complete when all of the following are true:
 7. Basic resume or inspection works for this path only to the extent required for the path to function.
 8. Automated tests prove the end-to-end path without requiring broader recovery-hardening behavior.
 
-## 6. Suggested milestone after Milestone 2
+## 6. Historical follow-on note
 
-The milestone after Milestone 2 should be **execution recovery hardening**.
+When this brief was written, the intended follow-on after the execution slice was **execution recovery hardening**.
 
-That milestone should address the robustness intentionally excluded here, including:
+That follow-on covered the robustness intentionally excluded here, including:
 
 - stronger interruption semantics
 - lease and heartbeat support
 - stale ownership reconciliation
 - explicit resume and requeue policy
 - richer recovery-oriented telemetry
+
+Those items are now implemented in the current repository. Current phase sequencing should be taken from `docs/implementation-phases.md` and `docs/coortex-roadmap.md`.

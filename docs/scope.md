@@ -2,9 +2,9 @@
 
 ## Purpose
 
-This document defines the current implementation scope for Coortex.
+This document defines the current implementation scope for Coortex after landing the full Milestone 2 slice: real execution plus the recovery-hardening work needed to make that path routine and durable.
 
-The system is designed as a **host-agnostic coordination core** with **host-specific adapters**. The current implementation scope is intentionally limited to the first milestone so the core runtime can be proven before broad host support is attempted.
+The system is designed as a **host-agnostic coordination core** with **host-specific adapters**. The current implementation scope remains intentionally narrow so the runtime-first core and one real reference-host path can be proven before broad host support is attempted.
 
 For the longer-term target, see:
 
@@ -18,12 +18,13 @@ For the longer-term target, see:
 
 The current scope is:
 
-1. build the host-agnostic core runtime
-2. build the persistence and recovery substrate
-3. build bounded task-envelope logic with trimming
-4. define the host adapter contract
-5. implement one **reference host adapter**
-6. keep future host support possible without redesigning the core
+1. keep the host-agnostic runtime authoritative
+2. preserve durable persistence and bounded-envelope discipline
+3. run one real reference-host execution path end-to-end
+4. persist truthful runtime state for both success and blocked paths
+5. reconcile interrupted or stale host runs back into actionable runtime state
+6. provide runtime-backed inspection and resume surfaces for that path
+7. keep future host support possible without redesigning the core
 
 The current reference host is **Codex**. That does not make Coortex Codex-specific; it is simply the first adapter used to validate the core architecture.
 
@@ -50,6 +51,9 @@ The current reference host is **Codex**. That does not make Coortex Codex-specif
 - rebuild actionable state from durable artifacts
 - compact recovery brief generation
 - resume-oriented state reconstruction
+- lease and heartbeat-backed run tracking
+- stale-run reconciliation into queued retry state
+- duplicate-run prevention while an active lease is present
 
 ### Context discipline
 - bounded task envelopes
@@ -61,32 +65,41 @@ The current reference host is **Codex**. That does not make Coortex Codex-specif
 - lifecycle events
 - session/task identifiers
 - envelope/trimming metadata
-- placeholders or fields for usage/token metrics
+- usage/token metrics when the host exposes them
 - normalized telemetry schema independent of the host
+- stale-run reconciliation telemetry
 
 ### Adapter foundation
 - host adapter contract
 - one reference adapter implementation
 - host capability surface definition
+- explicit execution-mode handling for the reference host
 
-### Initial command surface
+### Real execution path
+- assignment -> bounded envelope -> host run -> result or decision capture -> persistence into runtime state
+- host-run inspection through adapter-owned metadata
+- truthful persisted state in both success and blocked paths
+
+### Current command surface
 - `ctx init`
 - `ctx doctor`
 - `ctx status`
 - `ctx resume`
+- `ctx run`
+- `ctx inspect`
 
 ---
 
 ## Out of Scope
 
-The following are not required in the first milestone:
+The following are still out of scope for the current implementation slice:
 
 - support for multiple host adapters at once
 - full workflow catalog
 - full team/worker orchestration
 - plugin ecosystem
 - advanced hook integrations
-- full safety/approval subsystem
+- full safety/approval subsystem beyond the current Codex execution-mode switch
 - advanced memory tiers
 - advanced history compaction beyond first trimming layer
 - full backend matrix
@@ -96,9 +109,9 @@ The following are not required in the first milestone:
 
 ---
 
-## First-Milestone Success Criteria
+## Current Success Criteria
 
-The first milestone is successful when:
+The current implementation slice is successful when:
 
 1. the host-agnostic core runtime exists
 2. durable state can be written and rebuilt
@@ -107,8 +120,12 @@ The first milestone is successful when:
 5. large tool output is trimmed before entering the envelope
 6. telemetry is recorded in a host-neutral schema
 7. a host adapter contract exists
-8. one reference adapter works against real runtime state
-9. the initial CLI/status surfaces work against real persisted data
+8. one reference adapter executes a real host-backed run against real runtime state
+9. results and decisions are persisted back through the normal runtime path
+10. `ctx run` and `ctx inspect` work against real persisted data
+11. stale or interrupted runs are reconciled back into queued retry state
+12. duplicate reruns are rejected while an active host lease is present
+13. live validation can exercise both bypass-enabled success paths and restricted-mode truthful persistence
 
 ---
 

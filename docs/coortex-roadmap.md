@@ -32,6 +32,9 @@ This phase proves the runtime-first architecture.
 
 ## Phase 2 — Real Execution Path
 
+Status:
+Implemented in the current repository.
+
 Objective:
 Move from foundational scaffolding to real task execution through the reference adapter.
 
@@ -44,6 +47,9 @@ Deliver:
 ---
 
 ## Phase 3 — Recovery Hardening
+
+Status:
+Implemented in the current repository.
 
 Objective:
 Make interruption handling robust enough for routine development use.
