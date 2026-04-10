@@ -360,6 +360,27 @@ test("ctx run refuses to rerun a blocked assignment with an unresolved decision"
   assert.equal(snapshot.decisions.length, 1);
 });
 
+test("ctx commands honor the current bypass env var after init", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-bypass-toggle-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env: liveCodexEnv
+  });
+
+  const doctorWithoutEnv = await execFileAsync(process.execPath, [cliPath, "doctor"], {
+    cwd: projectRoot
+  });
+  assert.match(doctorWithoutEnv.stdout, /OK codex-danger-mode disabled/);
+
+  const doctorWithEnv = await execFileAsync(process.execPath, [cliPath, "doctor"], {
+    cwd: projectRoot,
+    env: liveCodexEnv
+  });
+  assert.match(doctorWithEnv.stdout, /OK codex-danger-mode enabled/);
+});
+
 const liveCodexSmoke = process.env.COORTEX_LIVE_CODEX_SMOKE === "1" ? test : test.skip;
 const liveCodexRestricted =
   process.env.COORTEX_LIVE_CODEX_RESTRICTED === "1" ? test : test.skip;

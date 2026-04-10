@@ -59,11 +59,12 @@ async function createAdapter(
 }
 
 function createAdapterFromConfig(config?: RuntimeConfig): HostAdapter {
+  void config;
+  const envBypass = process.env.COORTEX_CODEX_DANGEROUS_BYPASS === "1";
   return new CodexAdapter(
     undefined,
     {
-      dangerouslyBypassApprovalsAndSandbox:
-        config?.codexDangerouslyBypassApprovalsAndSandbox === true
+      dangerouslyBypassApprovalsAndSandbox: envBypass
     }
   );
 }
