@@ -58,6 +58,8 @@ export async function initRuntime(
 
   const createdAt = nowIso();
   const sessionId = randomUUID();
+  const codexDangerouslyBypassApprovalsAndSandbox =
+    process.env.COORTEX_CODEX_DANGEROUS_BYPASS === "1" ? true : undefined;
 
   const config: RuntimeConfig = {
     version: 1,
@@ -65,7 +67,10 @@ export async function initRuntime(
     adapter: adapter.id,
     host: adapter.host,
     rootPath: projectRoot,
-    createdAt
+    createdAt,
+    ...(codexDangerouslyBypassApprovalsAndSandbox === undefined
+      ? {}
+      : { codexDangerouslyBypassApprovalsAndSandbox })
   };
 
   await store.initialize(config);
@@ -450,23 +455,16 @@ function isRunLeaseExpired(record: HostRunRecord): boolean {
     return false;
   }
   if (!record.leaseExpiresAt) {
-    return true;
+    return false;
   }
-  const leaseExpiry = Date.parse(record.leaseExpiresAt);
-  if (Number.isNaN(leaseExpiry)) {
-    return true;
-  }
-  return leaseExpiry <= Date.now();
+  return Date.parse(record.leaseExpiresAt) <= Date.now();
 }
 
 function staleReason(record: HostRunRecord): string {
-  if (!record.leaseExpiresAt) {
-    return "Run record remained in running state without a lease expiry.";
-  }
-  if (!Number.isNaN(Date.parse(record.leaseExpiresAt))) {
+  if (record.leaseExpiresAt) {
     return `Run lease expired at ${record.leaseExpiresAt}.`;
   }
-  return `Run record has an invalid lease expiry: ${record.leaseExpiresAt}.`;
+  return "Run record remained in running state without a lease expiry.";
 }
 
 function nextAssignmentState(execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>) {

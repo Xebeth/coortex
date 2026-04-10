@@ -25,7 +25,7 @@ export async function writeJsonAtomic(path: string, value: unknown): Promise<voi
 
 export async function writeTextAtomic(path: string, content: string): Promise<void> {
   await ensureDir(dirname(path));
-  const tempPath = `${path}.tmp`;
+  const tempPath = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
   await writeFile(tempPath, content, "utf8");
   await rename(tempPath, path);
 }

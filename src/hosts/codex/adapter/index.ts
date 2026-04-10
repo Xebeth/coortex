@@ -43,6 +43,9 @@ export interface CodexAdapterOptions {
   dangerouslyBypassApprovalsAndSandbox?: boolean;
 }
 
+const DEFAULT_RUN_LEASE_MS = 30_000;
+const DEFAULT_HEARTBEAT_MS = 5_000;
+
 export class CodexAdapter implements HostAdapter {
   readonly id = "codex";
   readonly host = "codex";
@@ -158,8 +161,23 @@ export class CodexAdapter implements HostAdapter {
     );
     const outputPath = join(paths.runsDir, `${assignmentId}-${executionId}-last-message.json`);
     const prompt = buildCodexExecutionPrompt(envelope);
-    let runningRecord = createRunningRecord(assignmentId, startedAt);
+    const leaseMs = readPositiveIntEnv("COORTEX_RUN_LEASE_MS", DEFAULT_RUN_LEASE_MS);
+    const heartbeatMs = readPositiveIntEnv("COORTEX_RUN_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS);
+    let runningRecord = createRunningRecord(assignmentId, startedAt, leaseMs);
     await this.writeRunRecord(store, runningRecord);
+    let heartbeatTimer: NodeJS.Timeout | undefined;
+    const refreshLease = async () => {
+      if (runningRecord.state !== "running") {
+        return;
+      }
+      const heartbeatAt = nowIso();
+      runningRecord = {
+        ...runningRecord,
+        heartbeatAt,
+        leaseExpiresAt: new Date(Date.parse(heartbeatAt) + leaseMs).toISOString()
+      };
+      await this.writeRunRecord(store, runningRecord);
+    };
 
     let execution;
     try {
@@ -183,6 +201,10 @@ export class CodexAdapter implements HostAdapter {
         }
       });
       this.activeRun = running;
+      await refreshLease();
+      heartbeatTimer = setInterval(() => {
+        void refreshLease();
+      }, heartbeatMs);
       execution = await running.result;
     } catch (error) {
       const completedAt = nowIso();
@@ -214,6 +236,9 @@ export class CodexAdapter implements HostAdapter {
         }
       };
     } finally {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
       this.activeRun = undefined;
     }
 
@@ -508,14 +533,22 @@ function uniqueChangedFiles(files: string[]): string[] {
 function createRunningRecord(
   assignmentId: string,
   startedAt: string,
+  leaseMs: number,
   hostRunId?: string
 ): HostRunRecord {
   return {
     assignmentId,
     state: "running",
     ...(hostRunId ? { hostRunId } : {}),
-    startedAt
+    startedAt,
+    heartbeatAt: startedAt,
+    leaseExpiresAt: new Date(Date.parse(startedAt) + leaseMs).toISOString()
   };
+}
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
 async function deriveExecutionOutcome(

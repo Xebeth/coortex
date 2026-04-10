@@ -9,7 +9,6 @@ export interface RuntimeArtifactStore {
   readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined>;
   writeJsonArtifact(relativePath: string, value: unknown): Promise<string>;
   writeTextArtifact(relativePath: string, content: string): Promise<string>;
-  deleteArtifact(relativePath: string): Promise<void>;
 }
 
 export interface AdapterCapabilities {
@@ -109,7 +108,6 @@ export interface HostExecutionOutcome {
     | { kind: "decision"; capture: HostDecisionCapture };
   run: HostRunRecord;
   telemetry?: HostTelemetryCapture;
-  warning?: string;
 }
 
 export interface HostAdapter {
@@ -127,15 +125,8 @@ export interface HostAdapter {
   executeAssignment(
     store: RuntimeArtifactStore,
     projection: RuntimeProjection,
-    envelope: TaskEnvelope,
-    claimedRun?: HostRunRecord
+    envelope: TaskEnvelope
   ): Promise<HostExecutionOutcome>;
-  claimRunLease?(
-    store: RuntimeArtifactStore,
-    projection: RuntimeProjection,
-    assignmentId: string
-  ): Promise<HostRunRecord>;
-  releaseRunLease?(store: RuntimeArtifactStore, assignmentId: string): Promise<void>;
   cancelActiveRun?(signal?: "graceful" | "force"): Promise<void>;
   inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined>;
   normalizeResult(capture: HostResultCapture): ResultPacket;

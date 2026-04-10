@@ -326,6 +326,59 @@ test("milestone-2 smoke: equivalent executions produce stable persisted shapes",
   );
 });
 
+test("milestone-2 smoke: resume reconciles a stale running host lease into a queued retry", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in stale reconciliation smoke test");
+  });
+
+  const staleAt = new Date(Date.now() - 60_000).toISOString();
+  const expiredRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    hostRunId: "smoke-thread-stale",
+    startedAt: staleAt,
+    heartbeatAt: staleAt,
+    leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, expiredRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", expiredRecord);
+
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const snapshot = await setup.store.loadSnapshot();
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+
+  assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(snapshot?.assignments[0]?.state, "queued");
+  assert.match(snapshot?.status.currentObjective ?? "", /Retry assignment/);
+  assert.match(resumed.brief.nextRequiredAction, /Start assignment/);
+  assert.equal(inspected?.state, "running");
+  assert.ok(typeof inspected?.staleAt === "string");
+  assert.match(inspected?.staleReason ?? "", /lease expired/i);
+});
+
+test("milestone-2 smoke: run refuses to start while an active host lease is still present", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used when active lease blocks rerun");
+  });
+
+  const now = new Date();
+  const runningRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    hostRunId: "smoke-thread-active",
+    startedAt: now.toISOString(),
+    heartbeatAt: now.toISOString(),
+    leaseExpiresAt: new Date(now.getTime() + 60_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
+
+  await assert.rejects(
+    runRuntime(setup.store, setup.adapter),
+    /already has an active host run lease/
+  );
+});
+
 async function createSmokeSetup(runExec: CodexCommandRunner["runExec"]): Promise<SmokeSetup> {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-m2-smoke-"));
   const store = RuntimeStore.forProject(projectRoot);
