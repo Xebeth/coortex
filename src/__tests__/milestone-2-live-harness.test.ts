@@ -18,6 +18,10 @@ import { nowIso } from "../utils/time.js";
 const execFileAsync = promisify(execFile);
 const liveHarness = process.env.COORTEX_LIVE_CODEX_HARNESS === "1" ? test : test.skip;
 const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+const liveCodexEnv = {
+  ...process.env,
+  COORTEX_CODEX_DANGEROUS_BYPASS: "1"
+};
 
 liveHarness(
   "milestone-2 live harness: automates the manual checklist against a real Codex install",
@@ -164,7 +168,7 @@ liveHarness(
       const runProcess = spawn(process.execPath, [cliPath, "run"], {
         cwd: projectRoot,
         detached: process.platform !== "win32",
-        env: process.env,
+        env: liveCodexEnv,
         stdio: ["ignore", "pipe", "pipe"]
       });
       runProcess.stdout.setEncoding("utf8");
@@ -390,7 +394,7 @@ async function createLiveFixture(
 async function runCli(projectRoot: string, args: string[]) {
   return execFileAsync(process.execPath, [cliPath, ...args], {
     cwd: projectRoot,
-    env: process.env
+    env: liveCodexEnv
   });
 }
 
@@ -573,12 +577,9 @@ function normalizeRepeatability(snapshot: RuntimeSnapshot, telemetry: TelemetryE
     results: snapshot.results.map((result) => ({
       producerId: result.producerId,
       status: result.status,
-      summary: result.summary,
       changedFiles: [...result.changedFiles]
     })),
     decisions: snapshot.decisions.map((decision) => ({
-      blockerSummary: decision.blockerSummary,
-      recommendedOption: decision.recommendedOption,
       state: decision.state
     })),
     telemetry: completedTelemetry

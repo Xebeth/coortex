@@ -150,19 +150,12 @@ export class DefaultCodexCommandRunner implements CodexCommandRunner {
         }
       },
       waitForExit: async (timeoutMs = 30_000) => {
-        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeout(() => {
-            reject(new Error(`Timed out waiting for codex exec ${child.pid ?? "unknown"} to exit.`));
-          }, timeoutMs);
-        });
-        try {
-          await Promise.race([running.result.then(() => undefined), timeoutPromise]);
-        } finally {
-          if (timeoutHandle) {
-            clearTimeout(timeoutHandle);
-          }
-        }
+        await Promise.race([
+          running.result.then(() => undefined),
+          delay(timeoutMs).then(() => {
+            throw new Error(`Timed out waiting for codex exec ${child.pid ?? "unknown"} to exit.`);
+          })
+        ]);
         await assertTreeGone(child.pid, timeoutMs);
         return { code: exitCode };
       }

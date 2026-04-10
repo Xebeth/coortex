@@ -5,4 +5,5 @@ export interface RuntimeConfig {
   host: string;
   rootPath: string;
   createdAt: string;
+  codexDangerouslyBypassApprovalsAndSandbox?: boolean;
 }

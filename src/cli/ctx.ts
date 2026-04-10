@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type { HostAdapter } from "../adapters/contract.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
+import type { RuntimeConfig } from "../config/types.js";
 import {
   initRuntime,
   inspectRuntimeRun,
@@ -18,7 +19,7 @@ async function main(): Promise<void> {
   const [command, assignmentIdArg] = process.argv.slice(2);
   const projectRoot = process.cwd();
   const store = RuntimeStore.forProject(projectRoot);
-  const adapter = new CodexAdapter();
+  const adapter = await createAdapter(store, command);
 
   switch (command) {
     case "init":
@@ -43,6 +44,28 @@ async function main(): Promise<void> {
       printUsage();
       process.exitCode = command ? 1 : 0;
   }
+}
+
+async function createAdapter(
+  store: RuntimeStore,
+  command?: string
+): Promise<HostAdapter> {
+  if (command === "init") {
+    return new CodexAdapter();
+  }
+
+  const config = await store.loadConfig();
+  return createAdapterFromConfig(config);
+}
+
+function createAdapterFromConfig(config?: RuntimeConfig): HostAdapter {
+  return new CodexAdapter(
+    undefined,
+    {
+      dangerouslyBypassApprovalsAndSandbox:
+        config?.codexDangerouslyBypassApprovalsAndSandbox === true
+    }
+  );
 }
 
 async function initCommand(

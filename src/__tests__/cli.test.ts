@@ -7,6 +7,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const liveCodexEnv = {
+  ...process.env,
+  COORTEX_CODEX_DANGEROUS_BYPASS: "1"
+};
 
 test("ctx init, status, resume, run, inspect, and doctor work against persisted runtime state", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-"));
@@ -90,6 +94,7 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   });
   assert.match(doctor.stdout, /OK codex-profile/);
   assert.match(doctor.stdout, /OK codex-exec-schema/);
+  assert.match(doctor.stdout, /OK codex-danger-mode disabled/);
 
   const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
   assert.match(codexConfig, /model_instructions_file = "/);
@@ -356,9 +361,39 @@ test("ctx run refuses to rerun a blocked assignment with an unresolved decision"
 });
 
 const liveCodexSmoke = process.env.COORTEX_LIVE_CODEX_SMOKE === "1" ? test : test.skip;
+const liveCodexRestricted =
+  process.env.COORTEX_LIVE_CODEX_RESTRICTED === "1" ? test : test.skip;
 
 liveCodexSmoke("ctx run completes a live Codex smoke path", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-live-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const gitignorePath = join(projectRoot, ".gitignore");
+
+  await writeFile(gitignorePath, ".coortex/\n.codex/\n", "utf8");
+  await execFileAsync("git", ["init", "-b", "main"], {
+    cwd: projectRoot
+  });
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env: liveCodexEnv
+  });
+
+  const run = await execFileAsync(process.execPath, [cliPath, "run"], {
+    cwd: projectRoot,
+    env: liveCodexEnv
+  });
+  assert.match(run.stdout, /Executed assignment/);
+
+  const inspect = await execFileAsync(process.execPath, [cliPath, "inspect"], {
+    cwd: projectRoot,
+    env: liveCodexEnv
+  });
+  assert.match(inspect.stdout, /"state": "completed"/);
+});
+
+liveCodexRestricted("ctx run reports truthful persisted state without bypass mode", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-live-restricted-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
   const gitignorePath = join(projectRoot, ".gitignore");
 
@@ -376,8 +411,31 @@ liveCodexSmoke("ctx run completes a live Codex smoke path", async () => {
   });
   assert.match(run.stdout, /Executed assignment/);
 
+  const status = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
   const inspect = await execFileAsync(process.execPath, [cliPath, "inspect"], {
     cwd: projectRoot
   });
-  assert.match(inspect.stdout, /"state": "completed"/);
+
+  const snapshot = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{ status: string }>;
+    decisions: Array<{ state: string }>;
+    status: { activeAssignmentIds: string[] };
+  };
+
+  if (/\"outcomeKind\": \"decision\"/.test(inspect.stdout)) {
+    assert.match(run.stdout, /Decision:/);
+    assert.equal(snapshot.decisions.length, 1);
+    assert.equal(snapshot.decisions[0]?.state, "open");
+    assert.equal(snapshot.status.activeAssignmentIds.length, 1);
+    assert.match(status.stdout, /Open decisions: 1/);
+    return;
+  }
+
+  assert.match(run.stdout, /Result \((completed|failed|partial)\):/);
+  assert.equal(snapshot.results.length, 1);
+  assert.match(status.stdout, /Results: 1/);
 });

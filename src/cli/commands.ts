@@ -53,13 +53,19 @@ export async function initRuntime(
 
   const createdAt = nowIso();
   const sessionId = randomUUID();
+  const codexDangerouslyBypassApprovalsAndSandbox =
+    process.env.COORTEX_CODEX_DANGEROUS_BYPASS === "1" ? true : undefined;
+
   const config: RuntimeConfig = {
     version: 1,
     sessionId,
     adapter: adapter.id,
     host: adapter.host,
     rootPath: projectRoot,
-    createdAt
+    createdAt,
+    ...(codexDangerouslyBypassApprovalsAndSandbox === undefined
+      ? {}
+      : { codexDangerouslyBypassApprovalsAndSandbox })
   };
 
   await store.initialize(config);
