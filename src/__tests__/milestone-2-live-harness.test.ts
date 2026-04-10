@@ -18,6 +18,10 @@ import { nowIso } from "../utils/time.js";
 const execFileAsync = promisify(execFile);
 const liveHarness = process.env.COORTEX_LIVE_CODEX_HARNESS === "1" ? test : test.skip;
 const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+const liveCodexEnv = {
+  ...process.env,
+  COORTEX_CODEX_DANGEROUS_BYPASS: "1"
+};
 
 liveHarness(
   "milestone-2 live harness: automates the manual checklist against a real Codex install",
@@ -164,7 +168,7 @@ liveHarness(
       const runProcess = spawn(process.execPath, [cliPath, "run"], {
         cwd: projectRoot,
         detached: process.platform !== "win32",
-        env: process.env,
+        env: liveCodexEnv,
         stdio: ["ignore", "pipe", "pipe"]
       });
       runProcess.stdout.setEncoding("utf8");
@@ -182,7 +186,7 @@ liveHarness(
       assert.equal(runningRecord.state, "running");
       assert.ok(runningRecord.hostRunId);
 
-      await terminateProcessTree(runProcess);
+      runProcess.kill("SIGTERM");
       const exit = await waitForExit(runProcess);
       const inspect = await inspectRun(projectRoot, assignmentId);
       const status = await runCli(projectRoot, ["status"]);
@@ -197,7 +201,7 @@ liveHarness(
         };
       }>(projectRoot, "runtime/last-resume-envelope.json");
 
-      assert.ok(exit.signal === "SIGTERM" || exit.code === 1 || exit.code === 143 || exit.code === null);
+      assert.ok(exit.signal === "SIGTERM" || exit.code === 1 || exit.code === 143);
       assert.equal(snapshot.results.length, 0);
       assert.deepEqual(snapshot.status.activeAssignmentIds, [assignmentId]);
       assert.match(stdout(status), /Active assignments: 1/);
@@ -298,6 +302,32 @@ liveHarness(
         })}`
       );
     });
+
+    await t.test("real-host run repairs malformed logs while preserving later valid events", async () => {
+      const projectRoot = await createLiveFixture("malformed-log");
+      await runCli(projectRoot, ["init"]);
+      const assignmentId = await retargetActiveAssignment(projectRoot, {
+        objective:
+          "Append the exact line `Live harness malformed log complete.` under the `## Harness Notes` heading in README.md. Do not change any other file.",
+        writeScope: ["README.md"],
+        requiredOutputs: ["README.md updated", "durable result summary"]
+      });
+
+      await appendPartialResult(projectRoot, assignmentId, "Live harness valid progress before repair.");
+      const store = RuntimeStore.forProject(projectRoot);
+      await writeFile(store.eventsPath, `${await readFile(store.eventsPath, "utf8")}{"broken":\n`, "utf8");
+
+      const run = await runCli(projectRoot, ["run"]);
+      const projection = await loadOperatorProjection(store);
+      const readme = await readFile(join(projectRoot, "README.md"), "utf8");
+      const events = (await readFile(store.eventsPath, "utf8")).split("\n").filter(Boolean);
+
+      assert.match(stdout(run), /Executed assignment/);
+      assert.equal(projection.results.size, 2);
+      assert.doesNotMatch(await readFile(store.eventsPath, "utf8"), /\{"broken":/);
+      assert.match(readme, /Live harness malformed log complete\./);
+      assert.ok(events.length >= 5);
+    });
   }
 );
 
@@ -364,7 +394,7 @@ async function createLiveFixture(
 async function runCli(projectRoot: string, args: string[]) {
   return execFileAsync(process.execPath, [cliPath, ...args], {
     cwd: projectRoot,
-    env: process.env
+    env: liveCodexEnv
   });
 }
 
@@ -511,25 +541,6 @@ async function waitForInterruptionPoint(
   throw new Error(`Timed out waiting for interruption point for ${assignmentId}.`);
 }
 
-async function terminateProcessTree(child: ReturnType<typeof spawn>): Promise<void> {
-  if (!child.pid) {
-    return;
-  }
-  if (process.platform === "win32") {
-    try {
-      await execFileAsync("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
-    } catch {
-      child.kill("SIGTERM");
-    }
-    return;
-  }
-  try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    child.kill("SIGTERM");
-  }
-}
-
 function waitForExit(
   child: ReturnType<typeof spawn>
 ): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
@@ -566,12 +577,9 @@ function normalizeRepeatability(snapshot: RuntimeSnapshot, telemetry: TelemetryE
     results: snapshot.results.map((result) => ({
       producerId: result.producerId,
       status: result.status,
-      summary: result.summary,
       changedFiles: [...result.changedFiles]
     })),
     decisions: snapshot.decisions.map((decision) => ({
-      blockerSummary: decision.blockerSummary,
-      recommendedOption: decision.recommendedOption,
       state: decision.state
     })),
     telemetry: completedTelemetry

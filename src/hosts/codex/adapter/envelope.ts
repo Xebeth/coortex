@@ -19,13 +19,12 @@ export async function buildTaskEnvelope(
   brief: RecoveryBrief,
   options: EnvelopeOptions
 ): Promise<TaskEnvelope> {
-  const activeAssignment =
-    [...projection.assignments.values()].find((assignment) =>
-      projection.status.activeAssignmentIds.includes(assignment.id)
-    ) ?? [...projection.assignments.values()][0];
+  const activeAssignment = projection.status.activeAssignmentIds
+    .map((assignmentId) => projection.assignments.get(assignmentId))
+    .find((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));
 
   if (!activeAssignment) {
-    throw new Error("Cannot build envelope without an assignment.");
+    throw new Error("Cannot build envelope without an active assignment.");
   }
 
   const trimmedFields: TrimmedField[] = [];

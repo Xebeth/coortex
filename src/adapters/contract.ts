@@ -9,6 +9,7 @@ export interface RuntimeArtifactStore {
   readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined>;
   writeJsonArtifact(relativePath: string, value: unknown): Promise<string>;
   writeTextArtifact(relativePath: string, content: string): Promise<string>;
+  deleteArtifact(relativePath: string): Promise<void>;
 }
 
 export interface AdapterCapabilities {
@@ -92,6 +93,10 @@ export interface HostRunRecord {
   state: "running" | "completed";
   hostRunId?: string;
   startedAt: string;
+  heartbeatAt?: string;
+  leaseExpiresAt?: string;
+  staleAt?: string;
+  staleReason?: string;
   completedAt?: string;
   outcomeKind?: "result" | "decision";
   resultStatus?: ResultPacket["status"];
@@ -104,6 +109,7 @@ export interface HostExecutionOutcome {
     | { kind: "decision"; capture: HostDecisionCapture };
   run: HostRunRecord;
   telemetry?: HostTelemetryCapture;
+  warning?: string;
 }
 
 export interface HostAdapter {
@@ -121,8 +127,16 @@ export interface HostAdapter {
   executeAssignment(
     store: RuntimeArtifactStore,
     projection: RuntimeProjection,
-    envelope: TaskEnvelope
+    envelope: TaskEnvelope,
+    claimedRun?: HostRunRecord
   ): Promise<HostExecutionOutcome>;
+  claimRunLease?(
+    store: RuntimeArtifactStore,
+    projection: RuntimeProjection,
+    assignmentId: string
+  ): Promise<HostRunRecord>;
+  releaseRunLease?(store: RuntimeArtifactStore, assignmentId: string): Promise<void>;
+  cancelActiveRun?(signal?: "graceful" | "force"): Promise<void>;
   inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined>;
   normalizeResult(capture: HostResultCapture): ResultPacket;
   normalizeDecision(capture: HostDecisionCapture): DecisionPacket;
