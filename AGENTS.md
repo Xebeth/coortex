@@ -14,6 +14,9 @@ These instructions apply to the entire repository.
   - `BREAKING CHANGE: description`
 
 ## Documents
+- When a change alters a documented invariant, contract rule, matrix
+  expectation, or recovery semantics, update the corresponding docs in
+  the same commit as the code or test change.
 
 ## For the architect role/skill
 Read the following documents in this order:
