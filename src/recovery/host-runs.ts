@@ -61,12 +61,14 @@ export function buildStaleRunReconciliation(
   record: HostRunRecord,
   timestamp = nowIso()
 ): StaleRunReconciliation {
+  const staleReasonCode = record.staleReasonCode ?? describeStaleRunReasonCode(record);
+  const staleReason = record.staleReason ?? describeStaleRunReason(record);
   const staleRecord: HostRunRecord = {
     ...record,
     state: "completed",
     staleAt: timestamp,
-    staleReasonCode: describeStaleRunReasonCode(record),
-    staleReason: describeStaleRunReason(record)
+    staleReasonCode,
+    staleReason
   };
   const nativeRunId = getNativeRunId(record);
   const assignment = projection.assignments.get(assignmentId);

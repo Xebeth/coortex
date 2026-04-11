@@ -107,6 +107,10 @@ Responsibilities:
   such as base run-record shaping, lease-backed persistence,
   inspection precedence helpers, and execution-session lifecycle
   coordination
+- keep shared host-run persistence generic over artifact roles instead
+  of assuming one adapter's filesystem layout
+- require the hooks needed by generic host-run orchestration,
+  including lease claim/release and stale-run artifact reconciliation
 
 Must not become a dumping ground for host-specific implementations.
 

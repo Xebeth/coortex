@@ -172,6 +172,11 @@ function createCancellationAdapter(
     async executeAssignment() {
       throw new Error("not used");
     },
+    async claimRunLease() {
+      throw new Error("not used");
+    },
+    async releaseRunLease() {},
+    async reconcileStaleRun() {},
     async inspectRun() {
       return undefined;
     },

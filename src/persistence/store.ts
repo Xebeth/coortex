@@ -6,7 +6,16 @@ import type { RuntimeConfig } from "../config/types.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
-import { appendLine, ensureDir, readJsonFile, readLines, writeJsonAtomic, writeTextAtomic } from "./files.js";
+import {
+  appendLine,
+  ensureDir,
+  readJsonFile,
+  readLines,
+  readTextFile,
+  writeJsonAtomic,
+  writeTextAtomic,
+  writeTextExclusive
+} from "./files.js";
 import { parseJson, toPrettyJson } from "../utils/json.js";
 import {
   applyRuntimeEvent,
@@ -115,7 +124,7 @@ export class RuntimeStore {
     if (!config) {
       throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
     }
-    const { events } = await this.loadReplayableEvents();
+    const events = await this.loadEvents();
     return projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
   }
 
@@ -228,6 +237,16 @@ export class RuntimeStore {
 
   async readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined> {
     return readJsonFile<T>(join(this.rootDir, relativePath), label);
+  }
+
+  async readTextArtifact(relativePath: string, _label: string): Promise<string | undefined> {
+    return readTextFile(join(this.rootDir, relativePath));
+  }
+
+  async claimTextArtifact(relativePath: string, content: string): Promise<string> {
+    const fullPath = join(this.rootDir, relativePath);
+    await writeTextExclusive(fullPath, content);
+    return fullPath;
   }
 
   async writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {

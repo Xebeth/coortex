@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { HostExecutionOutcome, HostTelemetryCapture } from "./contract.js";
 import { getNativeRunId } from "../core/run-state.js";
 import type { HostRunRecord } from "../core/types.js";
@@ -128,11 +130,11 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         await stopHostRun(running);
       }
       const completedAt = nowIso();
-      const outcome = input.buildFailedOutcome(
+      const outcome = ensureStableOutcomeIds(input.buildFailedOutcome(
         input.assignmentId,
         completedAt,
         input.summarizeExecutionFailure(error)
-      );
+      ));
       const runRecord = buildCompletedRunRecord(
         outcome,
         input.assignmentId,
@@ -163,33 +165,66 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
       input.setActiveRun(undefined);
     }
 
-    const completedAt = nowIso();
-    const completed = await input.deriveCompleted(execution, getNativeRunId(runningRecord));
-    const runRecord = buildCompletedRunRecord(
-      completed.outcome,
-      input.assignmentId,
-      input.startedAt,
-      completedAt,
-      completed.nativeRunId
-    );
-    const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
+    try {
+      const completedAt = nowIso();
+      const completed = await input.deriveCompleted(execution, getNativeRunId(runningRecord));
+      const outcome = ensureStableOutcomeIds(completed.outcome);
+      const runRecord = buildCompletedRunRecord(
+        outcome,
+        input.assignmentId,
+        input.startedAt,
+        completedAt,
+        completed.nativeRunId
+      );
+      const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
 
-    return {
-      ...completed.outcome,
-      run: runRecord,
-      ...(warning ? { warning } : {}),
-      telemetry: {
-        eventType: "host.run.completed",
-        taskId: input.taskId,
-        assignmentId: input.assignmentId,
-        metadata: {
-          nativeRunId: completed.nativeRunId ?? "",
-          exitCode: execution.exitCode,
-          outcomeKind: completed.outcome.outcome.kind
-        },
-        ...(completed.usage ? { usage: completed.usage } : {})
-      }
-    };
+      return {
+        ...outcome,
+        run: runRecord,
+        ...(warning ? { warning } : {}),
+        telemetry: {
+          eventType: "host.run.completed",
+          taskId: input.taskId,
+          assignmentId: input.assignmentId,
+          metadata: {
+            nativeRunId: completed.nativeRunId ?? "",
+            exitCode: execution.exitCode,
+            outcomeKind: outcome.outcome.kind
+          },
+          ...(completed.usage ? { usage: completed.usage } : {})
+        }
+      };
+    } catch (error) {
+      const completedAt = nowIso();
+      const outcome = ensureStableOutcomeIds(input.buildFailedOutcome(
+        input.assignmentId,
+        completedAt,
+        input.summarizeExecutionFailure(error)
+      ));
+      const runRecord = buildCompletedRunRecord(
+        outcome,
+        input.assignmentId,
+        input.startedAt,
+        completedAt,
+        getNativeRunId(runningRecord)
+      );
+      const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
+      return {
+        ...outcome,
+        run: runRecord,
+        ...(warning ? { warning } : {}),
+        telemetry: {
+          eventType: "host.run.completed",
+          taskId: input.taskId,
+          assignmentId: input.assignmentId,
+          metadata: {
+            nativeRunId: getNativeRunId(runningRecord) ?? "",
+            exitCode: execution.exitCode,
+            outcomeKind: outcome.outcome.kind
+          }
+        }
+      };
+    }
   })();
 
   const settled = runPromise.then(() => undefined, () => undefined);
@@ -199,6 +234,31 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
   } finally {
     input.setActiveExecutionSettled(undefined);
   }
+}
+
+function ensureStableOutcomeIds(
+  outcome: Pick<HostExecutionOutcome, "outcome">
+): Pick<HostExecutionOutcome, "outcome"> {
+  if (outcome.outcome.kind === "decision") {
+    return {
+      outcome: {
+        kind: "decision",
+        capture: {
+          ...outcome.outcome.capture,
+          decisionId: outcome.outcome.capture.decisionId ?? randomUUID()
+        }
+      }
+    };
+  }
+  return {
+    outcome: {
+      kind: "result",
+      capture: {
+        ...outcome.outcome.capture,
+        resultId: outcome.outcome.capture.resultId ?? randomUUID()
+      }
+    }
+  };
 }
 
 async function stopHostRun<TExecution>(running: HostRunHandle<TExecution>): Promise<void> {

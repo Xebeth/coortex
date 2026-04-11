@@ -9,14 +9,19 @@ export function selectAuthoritativeRunRecord(
   runRecord: HostRunRecord | undefined,
   leaseRecord: HostRunRecord | undefined
 ): HostRunRecord | undefined {
-  if (
-    runRecord?.state === "completed" &&
-    leaseRecord?.staleReasonCode === "malformed_lease_artifact"
-  ) {
+  if (runRecord?.state === "completed") {
     return runRecord;
   }
   if (leaseRecord?.state === "running") {
     return leaseRecord;
+  }
+  if (runRecord?.state === "running" && !leaseRecord) {
+    return {
+      ...runRecord,
+      state: "completed",
+      staleReasonCode: "missing_lease_artifact",
+      staleReason: "Run record remained in running state without an active lease artifact."
+    };
   }
   if (runRecord) {
     return runRecord;

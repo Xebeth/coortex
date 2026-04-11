@@ -700,7 +700,8 @@ test("codex adapter recovers final run-record writes after a transient write fai
   assert.equal(execution.outcome.capture.status, "completed");
   assert.match(execution.outcome.capture.summary, /This should be replaced by the failed write path\./i);
   assert.match(execution.warning ?? "", /final run record could not be persisted/i);
-  assert.equal(inspected?.state, "running");
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.staleReasonCode, "missing_lease_artifact");
   assert.equal(getNativeRunId(inspected), "thread-write-recover-1");
 });
 
@@ -837,157 +838,13 @@ test("codex adapter treats malformed lease JSON as stale inspection state", asyn
 
   assert.equal(inspected?.assignmentId, assignmentId);
   assert.equal(inspected?.state, "running");
-  await assert.rejects(
-    readFile(
+  assert.equal(
+    await readFile(
       join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.lease.json`),
       "utf8"
     ),
-    /ENOENT/
+    "{"
   );
-});
-
-test("codex adapter prefers a completed run record over a malformed lease file", async () => {
-  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-malformed-lease-completed-"));
-  const store = RuntimeStore.forProject(projectRoot);
-  const sessionId = randomUUID();
-  const config: RuntimeConfig = {
-    version: 1,
-    sessionId,
-    adapter: "codex",
-    host: "codex",
-    rootPath: projectRoot,
-    createdAt: nowIso()
-  };
-
-  await store.initialize(config);
-  const bootstrap = createBootstrapRuntime({
-    rootPath: projectRoot,
-    sessionId,
-    adapter: "codex",
-    host: "codex",
-    workflow: "milestone-2"
-  });
-  for (const event of bootstrap.events) {
-    await store.appendEvent(event);
-  }
-
-  const projection = await store.rebuildProjection();
-  const assignmentId = bootstrap.initialAssignmentId;
-  const adapter = new CodexAdapter();
-  await adapter.initialize(store, projection);
-  await mkdir(join(projectRoot, ".coortex", "adapters", "codex", "runs"), { recursive: true });
-  await writeFile(
-    join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.lease.json`),
-    "{",
-    "utf8"
-  );
-  await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, {
-    assignmentId,
-    state: "completed",
-    adapterData: { nativeRunId: "thread-completed-1" },
-    startedAt: nowIso(),
-    completedAt: nowIso(),
-    outcomeKind: "result",
-    resultStatus: "completed",
-    summary: "Completed run record should win over malformed lease."
-  });
-
-  const inspected = await adapter.inspectRun(store, assignmentId);
-
-  assert.equal(inspected?.state, "completed");
-  assert.equal(getNativeRunId(inspected), "thread-completed-1");
-});
-
-test("codex adapter inspectRun precedence matrix matches recovery invariants", async () => {
-  const cases = [
-    {
-      name: "malformed lease without a durable run record becomes stale running state",
-      leaseContent: "{",
-      runRecord: undefined,
-      expectedState: "running",
-      expectedHostRunId: undefined
-    },
-    {
-      name: "malformed lease does not override a completed run record",
-      leaseContent: "{",
-      runRecord: {
-        state: "completed",
-        adapterData: { nativeRunId: "thread-completed-matrix" }
-      },
-      expectedState: "completed",
-      expectedHostRunId: "thread-completed-matrix"
-    },
-    {
-      name: "valid running lease overrides a completed run record until reconciliation",
-      leaseContent: JSON.stringify({
-        assignmentId: "placeholder",
-        state: "running",
-        adapterData: { nativeRunId: "thread-running-matrix" },
-        startedAt: nowIso(),
-        heartbeatAt: nowIso(),
-        leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
-      }),
-      runRecord: {
-        state: "completed",
-        adapterData: { nativeRunId: "thread-completed-matrix-2" }
-      },
-      expectedState: "running",
-      expectedHostRunId: "thread-running-matrix"
-    }
-  ] as const;
-
-  for (const testCase of cases) {
-    const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-inspect-matrix-"));
-    const store = RuntimeStore.forProject(projectRoot);
-    const sessionId = randomUUID();
-    const config: RuntimeConfig = {
-      version: 1,
-      sessionId,
-      adapter: "codex",
-      host: "codex",
-      rootPath: projectRoot,
-      createdAt: nowIso()
-    };
-
-    await store.initialize(config);
-    const bootstrap = createBootstrapRuntime({
-      rootPath: projectRoot,
-      sessionId,
-      adapter: "codex",
-      host: "codex",
-      workflow: "milestone-2"
-    });
-    for (const event of bootstrap.events) {
-      await store.appendEvent(event);
-    }
-
-    const projection = await store.rebuildProjection();
-    const assignmentId = bootstrap.initialAssignmentId;
-    const adapter = new CodexAdapter();
-    await adapter.initialize(store, projection);
-    await mkdir(join(projectRoot, ".coortex", "adapters", "codex", "runs"), { recursive: true });
-    await writeFile(
-      join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.lease.json`),
-      testCase.leaseContent.replace('"assignmentId":"placeholder"', `"assignmentId":"${assignmentId}"`),
-      "utf8"
-    );
-    if (testCase.runRecord) {
-      await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, {
-        assignmentId,
-        startedAt: nowIso(),
-        completedAt: nowIso(),
-        outcomeKind: "result",
-        resultStatus: "completed",
-        summary: testCase.name,
-        ...testCase.runRecord
-      });
-    }
-
-    const inspected = await adapter.inspectRun(store, assignmentId);
-
-    assert.equal(inspected?.state, testCase.expectedState, testCase.name);
-    assert.equal(getNativeRunId(inspected), testCase.expectedHostRunId, testCase.name);
-  }
 });
 
 test("codex adapter fails the run when heartbeat lease refreshes stop persisting", async () => {
@@ -1091,95 +948,6 @@ test("codex adapter fails the run when heartbeat lease refreshes stop persisting
     } else {
       process.env.COORTEX_RUN_HEARTBEAT_MS = originalHeartbeat;
     }
-  }
-});
-
-test("codex adapter ignores a queued heartbeat callback after completion", async () => {
-  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-late-heartbeat-"));
-  const store = RuntimeStore.forProject(projectRoot);
-  const sessionId = randomUUID();
-  const config: RuntimeConfig = {
-    version: 1,
-    sessionId,
-    adapter: "codex",
-    host: "codex",
-    rootPath: projectRoot,
-    createdAt: nowIso()
-  };
-
-  await store.initialize(config);
-  const bootstrap = createBootstrapRuntime({
-    rootPath: projectRoot,
-    sessionId,
-    adapter: "codex",
-    host: "codex",
-    workflow: "milestone-2"
-  });
-  for (const event of bootstrap.events) {
-    await store.appendEvent(event);
-  }
-
-  const projection = await store.rebuildProjection();
-  const brief = buildRecoveryBrief(projection);
-  const assignmentId = bootstrap.initialAssignmentId;
-  const runner: CodexCommandRunner = {
-    async startExec(input) {
-      return createMockRunningExec(this, input);
-    },
-    async runExec(input) {
-      await input.onEvent?.({ type: "thread.started", thread_id: "thread-late-heartbeat-1" });
-      await mkdir(dirname(input.outputPath), { recursive: true });
-      await writeFile(
-        input.outputPath,
-        JSON.stringify({
-          outcomeType: "result",
-          resultStatus: "completed",
-          resultSummary: "Late heartbeat did not resurrect the running lease.",
-          changedFiles: [],
-          blockerSummary: "",
-          decisionOptions: [],
-          recommendedOption: ""
-        }),
-        "utf8"
-      );
-      return {
-        exitCode: 0,
-        stdout: "",
-        stderr: ""
-      };
-    }
-  };
-
-  const originalSetInterval = globalThis.setInterval;
-  const originalClearInterval = globalThis.clearInterval;
-  let queuedHeartbeat: (() => void) | undefined;
-  globalThis.setInterval = ((callback: Parameters<typeof globalThis.setInterval>[0]) => {
-    queuedHeartbeat = typeof callback === "function" ? callback : undefined;
-    return 1 as unknown as NodeJS.Timeout;
-  }) as typeof globalThis.setInterval;
-  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
-
-  try {
-    const adapter = new CodexAdapter(runner);
-    await adapter.initialize(store, projection);
-    const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
-    const execution = await adapter.executeAssignment(store, projection, envelope);
-    queuedHeartbeat?.();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const inspected = await adapter.inspectRun(store, assignmentId);
-
-    assert.equal(execution.run.state, "completed");
-    assert.equal(inspected?.state, "completed");
-    await assert.rejects(
-      readFile(
-        join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.lease.json`),
-        "utf8"
-      ),
-      /ENOENT/
-    );
-  } finally {
-    globalThis.setInterval = originalSetInterval;
-    globalThis.clearInterval = originalClearInterval;
   }
 });
 

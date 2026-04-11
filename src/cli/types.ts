@@ -6,6 +6,7 @@ export interface CommandDiagnostic {
     | "telemetry-write-failed"
     | "host-run-persist-failed"
     | "active-run-present"
-    | "stale-run-reconciled";
+    | "stale-run-reconciled"
+    | "completed-run-reconciled";
   message: string;
 }

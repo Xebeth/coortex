@@ -93,6 +93,7 @@ export interface HostRunRecord {
   staleAt?: string;
   staleReasonCode?:
     | "missing_lease_expiry"
+    | "missing_lease_artifact"
     | "invalid_lease_expiry"
     | "expired_lease"
     | "malformed_lease_artifact";
@@ -101,6 +102,30 @@ export interface HostRunRecord {
   outcomeKind?: "result" | "decision";
   resultStatus?: ResultPacket["status"];
   summary?: string;
+  terminalOutcome?:
+    | {
+        kind: "result";
+        result: {
+          resultId?: string;
+          producerId: string;
+          status: ResultPacket["status"];
+          summary: string;
+          changedFiles: string[];
+          createdAt: string;
+        };
+      }
+    | {
+        kind: "decision";
+        decision: {
+          decisionId?: string;
+          requesterId: string;
+          blockerSummary: string;
+          options: DecisionOption[];
+          recommendedOption: string;
+          state: DecisionPacket["state"];
+          createdAt: string;
+        };
+      };
   adapterData?: Record<string, unknown>;
 }
 

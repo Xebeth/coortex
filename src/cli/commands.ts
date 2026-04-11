@@ -2,7 +2,7 @@ import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
-import type { HostAdapter } from "../adapters/contract.js";
+import type { HostAdapter, HostExecutionOutcome } from "../adapters/contract.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
@@ -178,15 +178,17 @@ export async function runRuntime(
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
   const assignment = getRunnableAssignment(projectionBefore);
-  const claimedRun = adapter.claimRunLease
-    ? await adapter.claimRunLease(store, projectionBefore, assignment.id)
-    : undefined;
+  const claimedRun = await adapter.claimRunLease(store, projectionBefore, assignment.id);
   let executionStarted = false;
+  let launchedProjection: Awaited<ReturnType<typeof loadOperatorProjection>> | undefined;
+  let envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>> | undefined;
+  let execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>> | undefined;
+  let diagnostics: CommandDiagnostic[] = [...projectionBeforeResult.diagnostics];
   try {
     const envelopeProjection = projectionForRunnableAssignment(projectionBefore, assignment.id);
     const brief = buildRecoveryBrief(envelopeProjection);
-    const envelope = await adapter.buildResumeEnvelope(store, envelopeProjection, brief);
-    const launchedProjection = await markAssignmentInProgress(store, projectionBefore, assignment.id);
+    envelope = await adapter.buildResumeEnvelope(store, envelopeProjection, brief);
+    launchedProjection = await markAssignmentInProgress(store, projectionBefore, assignment.id);
 
     const startedTelemetry = await recordNormalizedTelemetry(
       store,
@@ -201,13 +203,10 @@ export async function runRuntime(
         }
       })
     );
-    const diagnostics = [
-      ...projectionBeforeResult.diagnostics,
-      ...diagnosticsFromWarning(startedTelemetry.warning, "telemetry-write-failed")
-    ];
+    diagnostics.push(...diagnosticsFromWarning(startedTelemetry.warning, "telemetry-write-failed"));
 
     executionStarted = true;
-    const execution = await adapter.executeAssignment(store, launchedProjection, envelope, claimedRun);
+    execution = await adapter.executeAssignment(store, launchedProjection, envelope, claimedRun);
     diagnostics.push(...diagnosticsFromWarning(execution.warning, "host-run-persist-failed"));
     const events = buildOutcomeEvents(launchedProjection, execution, adapter);
     for (const event of events) {
@@ -237,7 +236,32 @@ export async function runRuntime(
     };
   } catch (error) {
     if (!executionStarted) {
-      await adapter.releaseRunLease?.(store, assignment.id);
+      await adapter.releaseRunLease(store, assignment.id);
+    } else if (launchedProjection && envelope) {
+      const recoveredExecution =
+        execution && isRecoverableCompletedExecution(execution)
+          ? execution
+          : synthesizeRecoveredExecution(await adapter.inspectRun(store, assignment.id));
+      if (recoveredExecution) {
+        const recovered = await loadReconciledProjectionWithDiagnostics(store, adapter);
+        diagnostics.push(
+          ...diagnosticsFromWarning(
+            `Runtime event persistence was interrupted after the host run completed durably. Recovered from durable host run metadata. ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            "host-run-persist-failed"
+          ),
+          ...recovered.diagnostics
+        );
+        return {
+          projectionBefore: launchedProjection,
+          projectionAfter: recovered.projection,
+          assignment,
+          envelope,
+          execution: recoveredExecution,
+          diagnostics
+        };
+      }
     }
     throw error;
   }
@@ -253,4 +277,59 @@ export async function inspectRuntimeRun(
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
   return adapter.inspectRun(store, assignmentId);
+}
+
+function isRecoverableCompletedExecution(
+  execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>
+): boolean {
+  return isRecoverableCompletedRunRecord(execution.run);
+}
+
+function synthesizeRecoveredExecution(
+  record: Awaited<ReturnType<HostAdapter["inspectRun"]>>
+): HostExecutionOutcome | undefined {
+  if (!record || !isRecoverableCompletedRunRecord(record) || !record.terminalOutcome) {
+    return undefined;
+  }
+  if (record.terminalOutcome.kind === "decision") {
+    return {
+      outcome: {
+        kind: "decision",
+        capture: {
+          assignmentId: record.assignmentId,
+          requesterId: record.terminalOutcome.decision.requesterId,
+          blockerSummary: record.terminalOutcome.decision.blockerSummary,
+          options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
+          recommendedOption: record.terminalOutcome.decision.recommendedOption,
+          state: record.terminalOutcome.decision.state,
+          createdAt: record.terminalOutcome.decision.createdAt,
+          ...(record.terminalOutcome.decision.decisionId
+            ? { decisionId: record.terminalOutcome.decision.decisionId }
+            : {})
+        }
+      },
+      run: record
+    };
+  }
+  return {
+    outcome: {
+      kind: "result",
+      capture: {
+        assignmentId: record.assignmentId,
+        producerId: record.terminalOutcome.result.producerId,
+        status: record.terminalOutcome.result.status,
+        summary: record.terminalOutcome.result.summary,
+        changedFiles: [...record.terminalOutcome.result.changedFiles],
+        createdAt: record.terminalOutcome.result.createdAt,
+        ...(record.terminalOutcome.result.resultId
+          ? { resultId: record.terminalOutcome.result.resultId }
+          : {})
+      }
+    },
+    run: record
+  };
+}
+
+function isRecoverableCompletedRunRecord(record: { state: string; terminalOutcome?: unknown }): boolean {
+  return record.state === "completed" && Boolean(record.terminalOutcome);
 }

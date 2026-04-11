@@ -22,6 +22,13 @@ In the current implementation:
 Host adapters are expected to supply metadata and execution behavior,
 not redefine reconciliation policy.
 
+Adapters must expose explicit hooks for:
+
+- lease claim before execution
+- lease release for abandoned pre-launch claims
+- stale-run artifact reconciliation after runtime state is durably
+  updated
+
 Related documents:
 
 - `docs/runtime-state-model.md`
@@ -78,6 +85,10 @@ Every adapter must provide durable artifacts with these roles:
 Adapters may realize those roles with different filenames or storage
 backends, but the role semantics must stay consistent.
 
+Shared host-run infrastructure must depend on those artifact roles
+through the artifact-store contract, not by hardcoding a specific
+filesystem layout.
+
 ---
 
 ## Run-state precedence
@@ -85,8 +96,8 @@ backends, but the role semantics must stay consistent.
 For `inspect`, `status`, `resume`, and `run` reconciliation, the current
 effective host-run state follows these rules:
 
-1. A valid completed run record wins over malformed active-lease
-   metadata.
+1. A valid completed run record wins over active-lease metadata for the
+   same assignment, including malformed or stale leftover leases.
 2. Valid active-lease metadata wins over running or stale run-record
    metadata.
 3. A lease-less running record is treated as stale.
@@ -143,6 +154,25 @@ The operation must be idempotent. Re-running `status`, `resume`, or
 `run` after reconciliation must not repeatedly requeue the same stale
 run.
 
+Runtime events and snapshot updates must become durable before adapter
+artifacts are rewritten to their reconciled stale-completed form.
+
+### Completed-run reconciliation
+
+If a host adapter has already durably recorded a terminal outcome but
+runtime event persistence fails afterward, the next `status`, `resume`,
+or `run` must reconcile that completed host run back into runtime truth
+instead of ignoring it as inert metadata.
+
+If a completed run record and a leftover lease both exist for the same
+assignment, the completed run record wins. Recovery must absorb the
+terminal outcome into runtime truth and then clear the leftover lease;
+it must not requeue the assignment.
+
+Completed-run reconciliation must be idempotent. Once the runtime has
+absorbed the terminal result or decision, later commands must not
+replay it again.
+
 ### Command consistency
 
 - `ctx status`
@@ -198,6 +228,15 @@ rolling back to an older salvaged projection.
 
 ## Test matrix expectation
 
+The repository now includes an explicit shared host-run matrix for
+inspection precedence and reconciliation semantics, plus focused
+adapter and persistence matrices for host-specific lifecycle behavior
+and event-log recovery behavior.
+
+Together, those explicit suites represent the supported contract below.
+New recovery changes should extend one of those matrices rather than
+rely on ad-hoc regressions alone.
+
 The test suite should explicitly cover:
 
 - valid active lease
@@ -207,7 +246,8 @@ The test suite should explicitly cover:
 - malformed lease with no run record
 - malformed lease with completed run record
 - lease-only stale state
-- completed record with leftover active lease
+- completed record with leftover active lease recovered into runtime
+  truth
 - concurrent run attempts
 - queued heartbeat after completion
 - claim-time metadata failure
@@ -216,6 +256,3 @@ The test suite should explicitly cover:
 - malformed suffix that replays cleanly after snapshot
 - malformed suffix that does not replay after snapshot
 - strict rebuild failure on malformed event logs
-
-New recovery changes should extend this matrix rather than rely on
-ad-hoc regressions alone.

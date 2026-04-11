@@ -16,6 +16,20 @@ export function buildCompletedRunRecord(
       completedAt,
       outcomeKind: "decision",
       summary: outcome.outcome.capture.blockerSummary,
+      terminalOutcome: {
+        kind: "decision",
+        decision: {
+          requesterId: outcome.outcome.capture.requesterId,
+          blockerSummary: outcome.outcome.capture.blockerSummary,
+          options: outcome.outcome.capture.options.map((option) => ({ ...option })),
+          recommendedOption: outcome.outcome.capture.recommendedOption,
+          state: outcome.outcome.capture.state ?? "open",
+          createdAt: outcome.outcome.capture.createdAt ?? completedAt,
+          ...(outcome.outcome.capture.decisionId
+            ? { decisionId: outcome.outcome.capture.decisionId }
+            : {})
+        }
+      },
       ...(nativeRunId ? { adapterData: { nativeRunId } } : {})
     };
   }
@@ -28,6 +42,17 @@ export function buildCompletedRunRecord(
     outcomeKind: "result",
     resultStatus: outcome.outcome.capture.status,
     summary: outcome.outcome.capture.summary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: outcome.outcome.capture.producerId,
+        status: outcome.outcome.capture.status,
+        summary: outcome.outcome.capture.summary,
+        changedFiles: [...outcome.outcome.capture.changedFiles],
+        createdAt: outcome.outcome.capture.createdAt ?? completedAt,
+        ...(outcome.outcome.capture.resultId ? { resultId: outcome.outcome.capture.resultId } : {})
+      }
+    },
     ...(nativeRunId ? { adapterData: { nativeRunId } } : {})
   };
 }

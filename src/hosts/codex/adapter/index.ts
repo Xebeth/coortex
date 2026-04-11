@@ -14,7 +14,7 @@ import type {
   TaskEnvelope
 } from "../../../adapters/contract.js";
 import { buildCompletedRunRecord, createRunningRunRecord } from "../../../adapters/host-run-records.js";
-import { HostRunStore } from "../../../adapters/host-run-store.js";
+import { HostRunStore, type HostRunArtifactPaths } from "../../../adapters/host-run-store.js";
 import { executeHostRunSession } from "../../../adapters/host-run-session.js";
 import type {
   DecisionPacket,
@@ -96,6 +96,18 @@ export class CodexAdapter implements HostAdapter {
     };
   }
 
+  private runArtifacts(): HostRunArtifactPaths {
+    return {
+      runRecordPath: (assignmentId) => `adapters/${this.id}/runs/${assignmentId}.json`,
+      runLeasePath: (assignmentId) => `adapters/${this.id}/runs/${assignmentId}.lease.json`,
+      lastRunPath: () => `adapters/${this.id}/last-run.json`
+    };
+  }
+
+  private runStore(store: RuntimeArtifactStore): HostRunStore {
+    return new HostRunStore(store, this.id, this.runArtifacts());
+  }
+
   async initialize(store: RuntimeArtifactStore, _projection: RuntimeProjection): Promise<void> {
     const paths = this.paths(store);
     await writeCodexKernel(paths.kernelPath);
@@ -158,7 +170,7 @@ export class CodexAdapter implements HostAdapter {
     const prompt = buildCodexExecutionPrompt(envelope);
     const leaseMs = readPositiveIntEnv("COORTEX_RUN_LEASE_MS", DEFAULT_RUN_LEASE_MS);
     const heartbeatMs = readPositiveIntEnv("COORTEX_RUN_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS);
-    const runStore = new HostRunStore(store, this.id);
+    const runStore = this.runStore(store);
     let runningRecord = claimedRun ?? createRunningRunRecord(assignmentId, startedAt, leaseMs);
     let schemaPath: string;
     try {
@@ -260,19 +272,23 @@ export class CodexAdapter implements HostAdapter {
     const leaseMs = readPositiveIntEnv("COORTEX_RUN_LEASE_MS", DEFAULT_RUN_LEASE_MS);
     const startedAt = nowIso();
     const runningRecord = createRunningRunRecord(assignmentId, startedAt, leaseMs);
-    await new HostRunStore(store, this.id).claim(runningRecord);
+    await this.runStore(store).claim(runningRecord);
     return runningRecord;
   }
 
   async releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
-    await new HostRunStore(store, this.id).release(assignmentId);
+    await this.runStore(store).release(assignmentId);
+  }
+
+  async reconcileStaleRun(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void> {
+    await this.runStore(store).write(record);
   }
 
   async inspectRun(
     store: RuntimeArtifactStore,
     assignmentId?: string
   ): Promise<HostRunRecord | undefined> {
-    return new HostRunStore(store, this.id).inspect(assignmentId);
+    return this.runStore(store).inspect(assignmentId);
   }
 
   normalizeResult(capture: HostResultCapture): ResultPacket {
