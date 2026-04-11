@@ -1163,6 +1163,66 @@ test("milestone-2 smoke: completed run record wins over a leftover lease during 
   );
 });
 
+test("milestone-2 smoke: resume ignores an active leftover lease when a completed run record exists", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in active-leftover-lease resume smoke test");
+  });
+
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    adapterData: { nativeRunId: "smoke-thread-completed-active-lease" },
+    startedAt: new Date(Date.now() - 120_000).toISOString(),
+    completedAt: new Date(Date.now() - 110_000).toISOString(),
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Completed run beats an active leftover lease",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: randomUUID(),
+        producerId: "codex",
+        status: "completed",
+        summary: "Completed run beats an active leftover lease",
+        changedFiles: [],
+        createdAt: new Date(Date.now() - 110_000).toISOString()
+      }
+    }
+  };
+  const activeLease: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    adapterData: { nativeRunId: "smoke-thread-active-leftover-lease" },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/last-run.json`, completedRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, activeLease);
+
+  await assert.rejects(
+    resumeRuntime(setup.store, setup.adapter),
+    /No active assignment is available to resume\./
+  );
+  const reconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+
+  assert.equal(reconciled.projection.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.deepEqual(reconciled.projection.status.activeAssignmentIds, []);
+  assert.equal([...reconciled.projection.results.values()].length, 1);
+  assert.ok(!reconciled.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.resultStatus, "completed");
+  await assert.rejects(
+    readFile(
+      join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
+      "utf8"
+    ),
+    /ENOENT/
+  );
+});
+
 test("milestone-2 smoke: stale reconciliation is idempotent after the first recovery", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in stale reconciliation idempotence smoke test");

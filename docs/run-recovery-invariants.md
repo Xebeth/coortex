@@ -165,9 +165,10 @@ or `run` must reconcile that completed host run back into runtime truth
 instead of ignoring it as inert metadata.
 
 If a completed run record and a leftover lease both exist for the same
-assignment, the completed run record wins. Recovery must absorb the
+assignment, the completed run record wins whether the leftover lease is
+still active, already expired, or malformed. Recovery must absorb the
 terminal outcome into runtime truth and then clear the leftover lease;
-it must not requeue the assignment.
+it must not requeue the assignment or fall back to stale-run handling.
 
 Completed-run reconciliation must be idempotent. Once the runtime has
 absorbed the terminal result or decision, later commands must not
@@ -246,8 +247,7 @@ The test suite should explicitly cover:
 - malformed lease with no run record
 - malformed lease with completed run record
 - lease-only stale state
-- completed record with leftover active lease recovered into runtime
-  truth
+- completed record with leftover lease recovered into runtime truth
 - concurrent run attempts
 - queued heartbeat after completion
 - claim-time metadata failure
