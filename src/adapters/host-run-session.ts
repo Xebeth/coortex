@@ -58,6 +58,22 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
   let metadataFailureRaised = false;
   let runClosed = false;
   let runPhase = 0;
+  let pendingRunningWrite: Promise<void> = Promise.resolve();
+
+  const persistRunningRecord = async (nextRecord: HostRunRecord, phase: number) => {
+    if (
+      runClosed ||
+      runningRecord.state !== "running" ||
+      nextRecord.state !== "running" ||
+      phase !== runPhase
+    ) {
+      return;
+    }
+    runningRecord = nextRecord;
+    const writePromise = input.runStore.write(nextRecord);
+    pendingRunningWrite = writePromise.catch(() => undefined);
+    await writePromise;
+  };
 
   const refreshLease = async () => {
     if (runClosed || runningRecord.state !== "running") {
@@ -70,11 +86,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
       heartbeatAt,
       leaseExpiresAt: new Date(Date.parse(heartbeatAt) + input.leaseMs).toISOString()
     };
-    if (runClosed || runningRecord.state !== "running" || phase !== runPhase) {
-      return;
-    }
-    runningRecord = nextRecord;
-    await input.runStore.write(runningRecord);
+    await persistRunningRecord(nextRecord, phase);
   };
 
   const recordMetadataWarning = (error: unknown, context: string) => {
@@ -102,12 +114,17 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     try {
       running = await input.startRun({
         onNativeRunId: async (nativeRunId) => {
-          if (getNativeRunId(runningRecord) === nativeRunId) {
+          const phase = runPhase;
+          if (
+            runClosed ||
+            runningRecord.state !== "running" ||
+            getNativeRunId(runningRecord) === nativeRunId
+          ) {
             return;
           }
-          runningRecord = withRunNativeId(runningRecord, nativeRunId);
+          const nextRecord = withRunNativeId(runningRecord, nativeRunId);
           try {
-            await input.runStore.write(runningRecord);
+            await persistRunningRecord(nextRecord, phase);
           } catch (error) {
             recordMetadataWarning(error, "thread-start handling");
           }
@@ -129,6 +146,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
       if (running) {
         await stopHostRun(running);
       }
+      await pendingRunningWrite;
       const completedAt = nowIso();
       const outcome = ensureStableOutcomeIds(input.buildFailedOutcome(
         input.assignmentId,
@@ -166,6 +184,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     }
 
     try {
+      await pendingRunningWrite;
       const completedAt = nowIso();
       const completed = await input.deriveCompleted(execution, getNativeRunId(runningRecord));
       const outcome = ensureStableOutcomeIds(completed.outcome);

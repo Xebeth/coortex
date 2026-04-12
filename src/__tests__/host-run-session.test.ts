@@ -47,135 +47,163 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
   }
 }
 
-test("host-run session matrix keeps completed state authoritative after a queued heartbeat callback", async (t) => {
-  const cases = [
-    {
-      name: "completed result is not rewritten back to running by a queued heartbeat"
+test("host-run session matrix keeps completed state authoritative after a queued heartbeat callback", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-heartbeat";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const writeEvents: Array<{ relativePath: string; state: string | undefined }> = [];
+  let queuedHeartbeat: (() => void) | undefined;
+  let heartbeatRegistered!: () => void;
+  const heartbeatReady = new Promise<void>((resolve) => {
+    heartbeatRegistered = resolve;
+  });
+  let resolveExecution!: (execution: { exitCode: number }) => void;
+  const executionResult = new Promise<{ exitCode: number }>((resolve) => {
+    resolveExecution = resolve;
+  });
+  let deriveCompletedCalls = 0;
+  let runningLeaseWrites = 0;
+  let heartbeatWriteObserved!: () => void;
+  const heartbeatWriteSeen = new Promise<void>((resolve) => {
+    heartbeatWriteObserved = resolve;
+  });
+  let releaseHeartbeatWrite!: () => void;
+  const heartbeatWriteReleased = new Promise<void>((resolve) => {
+    releaseHeartbeatWrite = resolve;
+  });
+  let heartbeatWriteBlocked = false;
+
+  globalThis.setInterval = ((callback: Parameters<typeof globalThis.setInterval>[0]) => {
+    queuedHeartbeat = typeof callback === "function" ? callback : undefined;
+    heartbeatRegistered();
+    return 1 as unknown as NodeJS.Timeout;
+  }) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  store.writeJsonArtifact = async (relativePath, value) => {
+    const state =
+      typeof value === "object" && value !== null && "state" in value
+        ? String((value as { state?: unknown }).state)
+        : undefined;
+    writeEvents.push({ relativePath, state });
+    if (
+      relativePath === artifacts.runLeasePath(assignmentId) &&
+      state === "running"
+    ) {
+      runningLeaseWrites += 1;
+      if (!heartbeatWriteBlocked && runningLeaseWrites === 3) {
+        heartbeatWriteBlocked = true;
+        heartbeatWriteObserved();
+        await heartbeatWriteReleased;
+      }
     }
-  ] as const;
+    return originalWriteJsonArtifact(relativePath, value);
+  };
 
-  for (const testCase of cases) {
-    await t.test(testCase.name, async () => {
-      const store = new MemoryArtifactStore();
-      const artifacts: HostRunArtifactPaths = {
-        runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
-        runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
-        lastRunPath: () => "runs/last.json"
-      };
-      const runStore = new HostRunStore(store, "matrix", artifacts);
-      const startedAt = "2026-04-11T10:00:00.000Z";
-      const assignmentId = "assignment-heartbeat";
-      const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
-      await runStore.claim(claimedRun);
-
-      const originalSetInterval = globalThis.setInterval;
-      const originalClearInterval = globalThis.clearInterval;
-      const writeEvents: Array<{ relativePath: string; state: string | undefined }> = [];
-      let queuedHeartbeat: (() => void) | undefined;
-      globalThis.setInterval = ((callback: Parameters<typeof globalThis.setInterval>[0]) => {
-        queuedHeartbeat = typeof callback === "function" ? callback : undefined;
-        return 1 as unknown as NodeJS.Timeout;
-      }) as typeof globalThis.setInterval;
-      globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
-      const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
-      store.writeJsonArtifact = async (relativePath, value) => {
-        writeEvents.push({
-          relativePath,
-          state:
-            typeof value === "object" && value !== null && "state" in value
-              ? String((value as { state?: unknown }).state)
-              : undefined
-        });
-        return originalWriteJsonArtifact(relativePath, value);
-      };
-
-      try {
-        let activeRun: HostRunHandle<{ exitCode: number }> | undefined;
-        const execution = await executeHostRunSession({
-          assignmentId,
-          startedAt,
-          taskId: "session-heartbeat",
-          runStore,
-          runRecord: claimedRun,
-          leaseMs: 30_000,
-          heartbeatMs: 5_000,
-          startRun: async ({ onNativeRunId }) => {
-            await onNativeRunId("native-heartbeat-1");
-            const result = Promise.resolve({ exitCode: 0 });
-            activeRun = {
-              result,
-              terminate: async () => undefined,
-              waitForExit: async () => ({ code: 0 })
-            };
-            return activeRun;
-          },
-          summarizeExecutionFailure: (error) =>
-            error instanceof Error ? error.message : String(error),
-          buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+  try {
+    const executionPromise = executeHostRunSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-heartbeat",
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 5_000,
+      startRun: async ({ onNativeRunId }) => {
+        await onNativeRunId("native-heartbeat-1");
+        return {
+          result: executionResult,
+          terminate: async () => undefined,
+          waitForExit: async () => ({ code: 0 })
+        };
+      },
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+        outcome: {
+          kind: "result",
+          capture: {
+            assignmentId: failedAssignmentId,
+            producerId: "matrix-host",
+            status: "failed",
+            summary,
+            changedFiles: [],
+            createdAt: completedAt
+          }
+        }
+      }),
+      deriveCompleted: async (_execution, nativeRunId) => {
+        deriveCompletedCalls += 1;
+        return {
+          outcome: {
             outcome: {
               kind: "result",
               capture: {
-                assignmentId: failedAssignmentId,
+                assignmentId,
                 producerId: "matrix-host",
-                status: "failed",
-                summary,
+                status: "completed",
+                summary: "Queued heartbeat did not rewrite the completed run.",
                 changedFiles: [],
-                createdAt: completedAt
+                createdAt: "2026-04-11T10:01:00.000Z"
               }
             }
-          }),
-          deriveCompleted: async (_execution, nativeRunId) => ({
-            outcome: {
-              outcome: {
-                kind: "result",
-                capture: {
-                  assignmentId,
-                  producerId: "matrix-host",
-                  status: "completed",
-                  summary: "Queued heartbeat did not rewrite the completed run.",
-                  changedFiles: [],
-                  createdAt: "2026-04-11T10:01:00.000Z"
-                }
-              }
-            },
-            ...(nativeRunId ? { nativeRunId } : {})
-          }),
-          setActiveRun: (run) => {
-            activeRun = run;
           },
-          setActiveExecutionSettled: () => undefined
-        });
-
-        assert.ok(queuedHeartbeat, "heartbeat callback should be registered");
-        queuedHeartbeat?.();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        const inspected = await runStore.inspect(assignmentId);
-
-        assert.equal(execution.run.state, "completed");
-        assert.equal(inspected?.state, "completed");
-        assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
-        assert.equal(activeRun, undefined);
-        const completionWriteIndex = writeEvents.reduce((lastIndex, event, index) => {
-          if (
-            (event.relativePath === artifacts.runRecordPath(assignmentId) ||
-              event.relativePath === artifacts.lastRunPath()) &&
-            event.state === "completed"
-          ) {
-            return index;
-          }
-          return lastIndex;
-        }, -1);
-        assert.ok(completionWriteIndex >= 0, "completed run write should be recorded");
-        const postCompletionRunningWrite = writeEvents.slice(completionWriteIndex + 1).find(
-          (event) => event.state === "running"
-        );
-        assert.equal(postCompletionRunningWrite, undefined, JSON.stringify(writeEvents));
-      } finally {
-        globalThis.setInterval = originalSetInterval;
-        globalThis.clearInterval = originalClearInterval;
-        store.writeJsonArtifact = originalWriteJsonArtifact;
-      }
+          ...(nativeRunId ? { nativeRunId } : {})
+        };
+      },
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
     });
+
+    await heartbeatReady;
+    assert.ok(queuedHeartbeat, "heartbeat callback should be registered");
+    queuedHeartbeat?.();
+    await heartbeatWriteSeen;
+    assert.equal(deriveCompletedCalls, 0);
+
+    resolveExecution({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(deriveCompletedCalls, 0, "completion must wait for the queued heartbeat write");
+
+    releaseHeartbeatWrite();
+    const execution = await executionPromise;
+    const inspected = await runStore.inspect(assignmentId);
+
+    assert.equal(deriveCompletedCalls, 1);
+    assert.equal(execution.run.state, "completed");
+    assert.equal(inspected?.state, "completed");
+    assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
+    const completionWriteIndex = writeEvents.reduce((lastIndex, event, index) => {
+      if (
+        (event.relativePath === artifacts.runRecordPath(assignmentId) ||
+          event.relativePath === artifacts.lastRunPath()) &&
+        event.state === "completed"
+      ) {
+        return index;
+      }
+      return lastIndex;
+    }, -1);
+    assert.ok(completionWriteIndex >= 0, "completed run write should be recorded");
+    const postCompletionRunningWrite = writeEvents.slice(completionWriteIndex + 1).find(
+      (event) => event.state === "running"
+    );
+    assert.equal(postCompletionRunningWrite, undefined, JSON.stringify(writeEvents));
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    store.writeJsonArtifact = originalWriteJsonArtifact;
   }
 });
 

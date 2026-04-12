@@ -43,6 +43,12 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
     return `${this.rootDir}/${relativePath}`;
   }
 
+  async listArtifacts(relativeDir: string): Promise<string[]> {
+    return [...this.artifacts.keys()]
+      .filter((relativePath) => relativePath.startsWith(`${relativeDir}/`))
+      .sort((left, right) => left.localeCompare(right));
+  }
+
   async deleteArtifact(relativePath: string): Promise<void> {
     this.artifacts.delete(relativePath);
   }
@@ -445,6 +451,126 @@ test("host run store clears abandoned running artifacts when claim metadata pers
 
   assert.equal(await store.readTextArtifact(artifacts.runLeasePath("assignment-2"), "lease"), undefined);
   assert.equal(await store.readJsonArtifact(artifacts.runRecordPath("assignment-2"), "record"), undefined);
+});
+
+test("host run store ignores a malformed last-run pointer during inspection", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-valid",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+
+  await store.writeJsonArtifact(artifacts.runRecordPath(runningRecord.assignmentId), runningRecord);
+  await store.writeJsonArtifact(artifacts.runLeasePath(runningRecord.assignmentId), runningRecord);
+  await store.writeTextArtifact(artifacts.lastRunPath(), "{");
+
+  assert.equal(await runStore.inspect(), undefined);
+  assert.deepEqual(await runStore.inspectAll(), [runningRecord]);
+  assert.deepEqual(await runStore.inspect(runningRecord.assignmentId), runningRecord);
+});
+
+test("host run store ignores a parseable but invalid last-run pointer during inspection", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-valid",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+
+  await store.writeJsonArtifact(artifacts.runRecordPath(runningRecord.assignmentId), runningRecord);
+  await store.writeJsonArtifact(artifacts.runLeasePath(runningRecord.assignmentId), runningRecord);
+  await store.writeJsonArtifact(artifacts.lastRunPath(), {});
+
+  assert.equal(await runStore.inspect(), undefined);
+  assert.deepEqual(await runStore.inspectAll(), [runningRecord]);
+  assert.deepEqual(await runStore.inspect(runningRecord.assignmentId), runningRecord);
+});
+
+test("host run store ignores a malformed last-run pointer during release cleanup", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-release-malformed-pointer",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+
+  await runStore.claim(runningRecord);
+  await store.writeTextArtifact(artifacts.lastRunPath(), "{");
+
+  await runStore.release(runningRecord.assignmentId);
+
+  assert.equal(
+    await store.readTextArtifact(artifacts.runLeasePath(runningRecord.assignmentId), "lease"),
+    undefined
+  );
+  assert.equal(
+    await store.readJsonArtifact(artifacts.runRecordPath(runningRecord.assignmentId), "record"),
+    undefined
+  );
+});
+
+test("host run store ignores a parseable but invalid last-run pointer during claim rollback cleanup", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  await store.writeJsonArtifact(artifacts.lastRunPath(), {});
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (relativePath === artifacts.lastRunPath()) {
+      throw new Error("simulated last-run write failure");
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  await assert.rejects(
+    runStore.claim({
+      assignmentId: "assignment-rollback-invalid-pointer",
+      state: "running",
+      startedAt: "2026-04-11T10:00:00.000Z",
+      heartbeatAt: "2026-04-11T10:00:00.000Z",
+      leaseExpiresAt: "2026-04-11T10:00:30.000Z"
+    }),
+    /simulated last-run write failure/
+  );
+
+  assert.equal(
+    await store.readTextArtifact(artifacts.runLeasePath("assignment-rollback-invalid-pointer"), "lease"),
+    undefined
+  );
+  assert.equal(
+    await store.readJsonArtifact(artifacts.runRecordPath("assignment-rollback-invalid-pointer"), "record"),
+    undefined
+  );
 });
 
 test("host run store surfaces lease cleanup failure during claim rollback", async () => {

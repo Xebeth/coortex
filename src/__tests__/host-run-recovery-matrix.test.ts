@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -23,8 +23,8 @@ import { createBootstrapRuntime } from "../core/runtime.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord, RecoveryBrief, ResultPacket, RuntimeProjection } from "../core/types.js";
 import { RuntimeStore } from "../persistence/store.js";
-import { loadOperatorProjection } from "../cli/runtime-state.js";
-import { reconcileActiveRuns } from "../cli/run-operations.js";
+import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "../cli/runtime-state.js";
+import { getRunnableAssignment, reconcileActiveRuns } from "../cli/run-operations.js";
 import { loadReconciledProjectionWithDiagnostics, resumeRuntime, runRuntime } from "../cli/commands.js";
 import { nowIso } from "../utils/time.js";
 
@@ -586,6 +586,161 @@ test("host-run command matrix preserves duplicate-run protection", async (t) => 
       }
     },
     {
+      name: "authoritative active lease blocks a run when runtime status drifts to a different assignment",
+      run: async () => {
+        const artifacts: HostRunArtifactPaths = {
+          runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,
+          runLeasePath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.lease.json`,
+          lastRunPath: () => "adapters/matrix/last-run.json"
+        };
+        const adapter = new ExecutionSentinelMatrixAdapter(artifacts);
+        const ctx = await createMatrixContext(adapter);
+        const driftedAssignmentId = await appendActiveAssignment(ctx);
+        const driftTimestamp = nowIso();
+
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp: driftTimestamp,
+          type: "status.updated",
+          payload: {
+            status: {
+              ...ctx.projection.status,
+              activeAssignmentIds: [driftedAssignmentId],
+              currentObjective: "Run the drifted assignment.",
+              lastDurableOutputAt: driftTimestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        ctx.projection = await loadOperatorProjection(ctx.store);
+
+        await ctx.adapter.claimRunLease(
+          ctx.store,
+          ctx.projection,
+          ctx.assignmentId,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z")
+        );
+
+        await assert.rejects(
+          runRuntime(ctx.store, ctx.adapter),
+          new RegExp(`Assignment ${ctx.assignmentId} already has an active host run lease\\.`)
+        );
+
+        const authoritativeRun = await ctx.adapter.inspectRun(ctx.store);
+        const driftedRun = await ctx.adapter.inspectRun(ctx.store, driftedAssignmentId);
+        assert.equal(authoritativeRun?.assignmentId, ctx.assignmentId);
+        assert.equal(authoritativeRun?.state, "running");
+        assert.equal(driftedRun, undefined);
+        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(adapter.executeAssignmentCount, 0);
+      }
+    },
+    {
+      name: "valid active lease still blocks a run when last-run points at an unrelated completed assignment",
+      run: async () => {
+        const artifacts: HostRunArtifactPaths = {
+          runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,
+          runLeasePath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.lease.json`,
+          lastRunPath: () => "adapters/matrix/last-run.json"
+        };
+        const adapter = new ExecutionSentinelMatrixAdapter(artifacts);
+        const ctx = await createMatrixContext(adapter);
+        const runnableAssignmentId = await appendActiveAssignment(ctx);
+        const unrelatedCompletedAssignmentId = await appendActiveAssignment(ctx);
+        const driftTimestamp = nowIso();
+
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp: driftTimestamp,
+          type: "status.updated",
+          payload: {
+            status: {
+              ...ctx.projection.status,
+              activeAssignmentIds: [runnableAssignmentId],
+              currentObjective: "Run the drifted assignment.",
+              lastDurableOutputAt: driftTimestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        ctx.projection = await loadOperatorProjection(ctx.store);
+
+        await ctx.adapter.claimRunLease(
+          ctx.store,
+          ctx.projection,
+          ctx.assignmentId,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z")
+        );
+        await ctx.adapter.runStore.write(
+          completedResultRecord(
+            unrelatedCompletedAssignmentId,
+            "completed",
+            "Unrelated completed run should not bypass lease detection."
+          )
+        );
+
+        await assert.rejects(
+          runRuntime(ctx.store, ctx.adapter),
+          new RegExp(`Assignment ${ctx.assignmentId} already has an active host run lease\\.`)
+        );
+
+        const authoritativeRun = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+        const pointedRun = await ctx.adapter.inspectRun(ctx.store);
+        assert.equal(authoritativeRun?.assignmentId, ctx.assignmentId);
+        assert.equal(authoritativeRun?.state, "running");
+        assert.equal(pointedRun?.assignmentId, unrelatedCompletedAssignmentId);
+        assert.equal(pointedRun?.state, "completed");
+        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(adapter.executeAssignmentCount, 0);
+      }
+    },
+    {
+      name: "snapshot fallback still blocks a run when a hidden assignment keeps a valid active lease",
+      run: async () => {
+        const artifacts: HostRunArtifactPaths = {
+          runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,
+          runLeasePath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.lease.json`,
+          lastRunPath: () => "adapters/matrix/last-run.json"
+        };
+        const adapter = new ExecutionSentinelMatrixAdapter(artifacts);
+        const ctx = await createMatrixContext(adapter);
+        await ctx.store.syncSnapshotFromEvents();
+        const hiddenAssignmentId = await appendAssignmentBeyondSnapshotBoundary(ctx);
+        await corruptSnapshotBoundary(ctx.store);
+        await ctx.adapter.claimRunLease(
+          ctx.store,
+          ctx.projection,
+          hiddenAssignmentId,
+          runningRecord(hiddenAssignmentId, "2999-04-11T10:00:30.000Z")
+        );
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+        const reconciled = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.deepEqual(reconciled.hiddenActiveLeases, [hiddenAssignmentId]);
+        assert.ok(
+          reconciled.diagnostics.some(
+            (diagnostic) =>
+              diagnostic.code === "active-run-present" &&
+              diagnostic.message.includes(hiddenAssignmentId)
+          )
+        );
+        await assert.rejects(
+          resumeRuntime(ctx.store, ctx.adapter),
+          new RegExp(`Assignment ${hiddenAssignmentId} already has an active host run lease\\.`)
+        );
+        await assert.rejects(
+          runRuntime(ctx.store, ctx.adapter),
+          new RegExp(`Assignment ${hiddenAssignmentId} already has an active host run lease\\.`)
+        );
+        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(adapter.executeAssignmentCount, 0);
+      }
+    },
+    {
       name: "concurrent run attempts do not launch duplicate host executions"
       ,
       run: async () => {
@@ -664,6 +819,629 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
       }
     },
     {
+      name: "status path preserves durable runtime results when only degraded completed host metadata remains",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const timestamp = nowIso();
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "result.submitted",
+          payload: {
+            result: {
+              resultId: randomUUID(),
+              assignmentId: ctx.assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Durable runtime result must not be requeued.",
+              changedFiles: [],
+              createdAt: timestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, {
+          assignmentId: ctx.assignmentId,
+          state: "completed",
+          startedAt: timestamp,
+          completedAt: timestamp,
+          staleAt: timestamp,
+          staleReasonCode: "missing_lease_artifact",
+          staleReason: "Run record remained in running state without an active lease artifact.",
+          adapterData: { nativeRunId: `native-${ctx.assignmentId}` }
+        });
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", {
+          assignmentId: ctx.assignmentId,
+          state: "completed",
+          startedAt: timestamp,
+          completedAt: timestamp,
+          staleAt: timestamp,
+          staleReasonCode: "missing_lease_artifact",
+          staleReason: "Run record remained in running state without an active lease artifact.",
+          adapterData: { nativeRunId: `native-${ctx.assignmentId}` }
+        });
+
+        const result = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+        const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "completed");
+        assert.deepEqual(result.projection.status.activeAssignmentIds, []);
+        assert.equal(result.projection.results.size, 1);
+        assert.equal(
+          [...result.projection.results.values()].at(-1)?.summary,
+          "Durable runtime result must not be requeued."
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.terminalOutcome, undefined);
+        assert.equal(inspected?.staleReasonCode, "missing_lease_artifact");
+      }
+    },
+    {
+      name: "status path preserves durable runtime results when only a malformed leftover lease remains",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const timestamp = nowIso();
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "result.submitted",
+          payload: {
+            result: {
+              resultId: randomUUID(),
+              assignmentId: ctx.assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Durable runtime result must clear malformed leftover leases.",
+              changedFiles: [],
+              createdAt: timestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await ctx.store.writeTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "{");
+
+        const result = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+        const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "completed");
+        assert.deepEqual(result.projection.status.activeAssignmentIds, []);
+        assert.equal(result.projection.results.size, 1);
+        assert.equal(
+          [...result.projection.results.values()].at(-1)?.summary,
+          "Durable runtime result must clear malformed leftover leases."
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.terminalOutcome?.kind, "result");
+        assert.equal(inspected?.staleReasonCode, "malformed_lease_artifact");
+        assert.equal(inspected?.staleReason, "malformed lease file");
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "status path preserves durable runtime decisions behind a malformed leftover lease",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const timestamp = nowIso();
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "decision.created",
+          payload: {
+            decision: {
+              decisionId: randomUUID(),
+              assignmentId: ctx.assignmentId,
+              requesterId: "matrix-host",
+              blockerSummary: "Durable runtime decision must clear malformed leftover leases.",
+              options: [
+                { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+                { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+              ],
+              recommendedOption: "wait",
+              state: "open",
+              createdAt: timestamp
+            }
+          }
+        });
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "assignment.updated",
+          payload: {
+            assignmentId: ctx.assignmentId,
+            patch: {
+              state: "blocked",
+              updatedAt: timestamp
+            }
+          }
+        });
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "status.updated",
+          payload: {
+            status: {
+              ...ctx.projection.status,
+              activeAssignmentIds: [ctx.assignmentId],
+              currentObjective: "Resolve the recovered decision before continuing.",
+              lastDurableOutputAt: timestamp,
+              resumeReady: true
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await ctx.store.writeTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "{");
+
+        const result = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+        const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+        assert.deepEqual(result.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+        assert.equal(
+          result.projection.status.currentObjective,
+          "Resolve the recovered decision before continuing."
+        );
+        assert.equal(result.projection.decisions.size, 1);
+        assert.equal(
+          [...result.projection.decisions.values()].at(-1)?.blockerSummary,
+          "Durable runtime decision must clear malformed leftover leases."
+        );
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.terminalOutcome?.kind, "decision");
+        assert.equal(inspected?.staleReasonCode, "malformed_lease_artifact");
+        assert.equal(inspected?.staleReason, "malformed lease file");
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "status path reconciles stale leases for non-active assignments while the drifted assignment stays active",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const driftedAssignmentId = await appendActiveAssignment(ctx);
+        const timestamp = nowIso();
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "status.updated",
+          payload: {
+            status: {
+              ...ctx.projection.status,
+              activeAssignmentIds: [driftedAssignmentId],
+              currentObjective: "Run the drifted assignment.",
+              lastDurableOutputAt: timestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+
+        const staleRecord = runningRecord(ctx.assignmentId, "2000-01-01T00:00:00.000Z");
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, staleRecord);
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, staleRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", staleRecord);
+
+        const result = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+        const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+        assert.equal(result.projection.assignments.get(driftedAssignmentId)?.state, "queued");
+        assert.deepEqual(result.projection.status.activeAssignmentIds, [driftedAssignmentId]);
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.staleReasonCode, "expired_lease");
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "status path recovers durable completed runs for non-active assignments while the drifted assignment stays active",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const driftedAssignmentId = await appendActiveAssignment(ctx);
+        const timestamp = nowIso();
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "status.updated",
+          payload: {
+            status: {
+              ...ctx.projection.status,
+              activeAssignmentIds: [driftedAssignmentId],
+              currentObjective: "Run the drifted assignment.",
+              lastDurableOutputAt: timestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await ctx.adapter.runStore.write(
+          completedResultRecord(ctx.assignmentId, "completed", "Recovered non-active completed result.")
+        );
+
+        const result = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+        const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "completed");
+        assert.equal(result.projection.assignments.get(driftedAssignmentId)?.state, "queued");
+        assert.deepEqual(result.projection.status.activeAssignmentIds, [driftedAssignmentId]);
+        assert.equal(
+          [...result.projection.results.values()].find((candidate) => candidate.assignmentId === ctx.assignmentId)?.summary,
+          "Recovered non-active completed result."
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.terminalOutcome?.kind, "result");
+      }
+    },
+    {
+      name: "status path leaves hidden completed runs out of projection when the snapshot boundary is unusable",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        await ctx.store.syncSnapshotFromEvents();
+        const hiddenAssignmentId = await appendAssignmentBeyondSnapshotBoundary(ctx);
+        await ctx.adapter.runStore.write(
+          completedResultRecord(hiddenAssignmentId, "completed", "Recovered hidden snapshot-fallback result.")
+        );
+        await corruptSnapshotBoundary(ctx.store);
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+        const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
+
+        assert.equal(result.projection.assignments.has(hiddenAssignmentId), false);
+        assert.deepEqual(result.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+        assert.equal(
+          [...result.projection.results.values()].find((candidate) => candidate.assignmentId === hiddenAssignmentId),
+          undefined
+        );
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.terminalOutcome?.kind, "result");
+      }
+    },
+    {
+      name: "snapshot-fallback stale cleanup does not hydrate assignments from pre-boundary events behind a later boundary",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const degradedAssignmentId = randomUUID();
+        const createdAt = new Date(Date.now() + 1_000).toISOString();
+        const laterBoundaryAt = new Date(Date.now() + 2_000).toISOString();
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp: createdAt,
+          type: "assignment.created",
+          payload: {
+            assignment: {
+              id: degradedAssignmentId,
+              parentTaskId: "task-pre-boundary-hidden-assignment",
+              workflow: "milestone-2",
+              ownerType: "host",
+              ownerId: "matrix",
+              objective: "Pre-boundary assignment that should stay absent during fallback.",
+              writeScope: ["README.md"],
+              requiredOutputs: ["result"],
+              state: "queued",
+              createdAt,
+              updatedAt: createdAt
+            }
+          }
+        });
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp: laterBoundaryAt,
+          type: "assignment.updated",
+          payload: {
+            assignmentId: ctx.assignmentId,
+            patch: {
+              updatedAt: laterBoundaryAt
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await removeAssignmentFromSnapshot(ctx.store, degradedAssignmentId);
+        await ctx.adapter.runStore.write(runningRecord(degradedAssignmentId, "2000-01-01T00:00:00.000Z"));
+        await corruptSnapshotBoundary(ctx.store);
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+        const repairedSnapshot = await ctx.store.loadSnapshot();
+        const inspected = await ctx.adapter.inspectRun(ctx.store, degradedAssignmentId);
+
+        assert.equal(result.projection.assignments.has(degradedAssignmentId), false);
+        assert.equal(
+          repairedSnapshot?.assignments.some((assignment) => assignment.id === degradedAssignmentId),
+          false
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.staleReasonCode, "expired_lease");
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${degradedAssignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "snapshot-fallback stale hidden runs are cleaned without hydrating when boundary proof is unusable",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        await ctx.store.syncSnapshotFromEvents();
+        const hiddenAssignmentId = await appendAssignmentBeyondSnapshotBoundary(ctx);
+        await ctx.adapter.runStore.write(runningRecord(hiddenAssignmentId, "2000-01-01T00:00:00.000Z"));
+        await corruptSnapshotBoundary(ctx.store);
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+        const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
+        const snapshot = await ctx.store.loadSnapshot();
+
+        assert.equal(result.projection.assignments.has(hiddenAssignmentId), false);
+        assert.equal(snapshot?.assignments.some((assignment) => assignment.id === hiddenAssignmentId), false);
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.staleReasonCode, "expired_lease");
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "snapshot-fallback stale repair preserves snapshot-owned assignments and status",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const relatedAssignmentId = await appendActiveAssignment(ctx);
+        await ctx.adapter.runStore.write(runningRecord(ctx.assignmentId, "2000-01-01T00:00:00.000Z"));
+        await corruptSnapshotBoundary(ctx.store);
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+        const snapshot = await ctx.store.loadSnapshot();
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+        assert.equal(result.projection.assignments.get(relatedAssignmentId)?.state, "queued");
+        assert.deepEqual(result.projection.status.activeAssignmentIds, [ctx.assignmentId, relatedAssignmentId]);
+        assert.equal(
+          result.projection.status.currentObjective,
+          `Retry assignment ${ctx.assignmentId}: ${ctx.projection.assignments.get(ctx.assignmentId)?.objective}`
+        );
+        assert.equal(snapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state, "queued");
+        assert.equal(snapshot?.assignments.find((assignment) => assignment.id === relatedAssignmentId)?.state, "queued");
+        assert.deepEqual(snapshot?.status.activeAssignmentIds, [ctx.assignmentId, relatedAssignmentId]);
+        assert.equal(
+          snapshot?.status.currentObjective,
+          `Retry assignment ${ctx.assignmentId}: ${ctx.projection.assignments.get(ctx.assignmentId)?.objective}`
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+      }
+    },
+    {
+      name: "snapshot-fallback malformed hidden leases are cleaned without hydrating when boundary proof is unusable",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        await ctx.store.syncSnapshotFromEvents();
+        const hiddenAssignmentId = await appendAssignmentBeyondSnapshotBoundary(ctx);
+        await ctx.store.writeTextArtifact(
+          `adapters/matrix/runs/${hiddenAssignmentId}.lease.json`,
+          "{\"broken\":\n"
+        );
+        await corruptSnapshotBoundary(ctx.store);
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+        const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
+
+        assert.equal(result.projection.assignments.has(hiddenAssignmentId), false);
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.staleReasonCode, "malformed_lease_artifact");
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "snapshot-fallback completed-run repair preserves snapshot-owned assignments and status",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        const relatedAssignmentId = await appendActiveAssignment(ctx);
+        const timestamp = nowIso();
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "status.updated",
+          payload: {
+            status: {
+              ...ctx.projection.status,
+              activeAssignmentIds: [ctx.assignmentId, relatedAssignmentId],
+              currentObjective: "Continue visible work while the second assignment stays queued.",
+              lastDurableOutputAt: timestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await ctx.adapter.runStore.write(
+          completedResultRecord(ctx.assignmentId, "completed", "Recovered snapshot-fallback result.")
+        );
+        await corruptSnapshotBoundary(ctx.store);
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+        const snapshot = await ctx.store.loadSnapshot();
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "completed");
+        assert.equal(result.projection.assignments.get(relatedAssignmentId)?.state, "queued");
+        assert.deepEqual(result.projection.status.activeAssignmentIds, [relatedAssignmentId]);
+        assert.equal(
+          result.projection.status.currentObjective,
+          "Continue visible work while the second assignment stays queued."
+        );
+        assert.equal(snapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state, "completed");
+        assert.equal(snapshot?.assignments.find((assignment) => assignment.id === relatedAssignmentId)?.state, "queued");
+        assert.deepEqual(snapshot?.status.activeAssignmentIds, [relatedAssignmentId]);
+        assert.equal(
+          snapshot?.status.currentObjective,
+          "Continue visible work while the second assignment stays queued."
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+      }
+    },
+    {
+      name: "status path hydrates snapshot-fallback decisions before runnable selection",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        await ctx.store.syncSnapshotFromEvents();
+        const record = completedDecisionRecord(ctx.assignmentId, "Need operator confirmation before proceeding.");
+        assert.equal(record.terminalOutcome?.kind, "decision");
+        const decision = record.terminalOutcome.decision;
+        await ctx.adapter.runStore.write(record);
+        const recoveryTimestamp = decision.createdAt;
+        for (const event of [
+          {
+            eventId: randomUUID(),
+            sessionId: ctx.projection.sessionId,
+            timestamp: recoveryTimestamp,
+            type: "decision.created" as const,
+            payload: {
+              decision: {
+                decisionId: decision.decisionId ?? randomUUID(),
+                assignmentId: ctx.assignmentId,
+                requesterId: decision.requesterId,
+                blockerSummary: decision.blockerSummary,
+                options: decision.options.map((option) => ({ ...option })),
+                recommendedOption: decision.recommendedOption,
+                state: decision.state,
+                createdAt: decision.createdAt
+              }
+            }
+          },
+          {
+            eventId: randomUUID(),
+            sessionId: ctx.projection.sessionId,
+            timestamp: recoveryTimestamp,
+            type: "assignment.updated" as const,
+            payload: {
+              assignmentId: ctx.assignmentId,
+              patch: {
+                state: "blocked" as const,
+                updatedAt: recoveryTimestamp
+              }
+            }
+          },
+          {
+            eventId: randomUUID(),
+            sessionId: ctx.projection.sessionId,
+            timestamp: recoveryTimestamp,
+            type: "status.updated" as const,
+            payload: {
+              status: {
+                ...ctx.projection.status,
+                activeAssignmentIds: [ctx.assignmentId],
+                currentObjective: "Resolve the recovered decision before continuing.",
+                lastDurableOutputAt: recoveryTimestamp
+              }
+            }
+          }
+        ]) {
+          await ctx.store.appendEvent(event);
+        }
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp: nowIso(),
+          type: "assignment.updated",
+          payload: {
+            assignmentId: randomUUID(),
+            patch: {
+              state: "queued",
+              updatedAt: nowIso()
+            }
+          }
+        });
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+
+        assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+        assert.equal(result.projection.decisions.size, 1);
+        assert.equal([...result.projection.decisions.values()][0]?.state, "open");
+        assert.equal(
+          result.projection.status.currentObjective,
+          "Resolve the recovered decision before continuing."
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.throws(
+          () => getRunnableAssignment(result.projection),
+          /is blocked and cannot be run|Resolve decision/
+        );
+      }
+    },
+    {
       name: "resume path recovers a durable completed decision before brief shaping",
       run: async () => {
         const adapter = new BriefingMatrixAdapter();
@@ -690,6 +1468,146 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
           await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
           undefined
         );
+      }
+    },
+    {
+      name: "run path surfaces a recovered completed result instead of rerun error",
+      run: async () => {
+        const adapter = new ExecutionSentinelMatrixAdapter({
+          runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,
+          runLeasePath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.lease.json`,
+          lastRunPath: () => "adapters/matrix/last-run.json"
+        });
+        const ctx = await createMatrixContext(adapter);
+        await ctx.adapter.runStore.write(
+          completedResultRecord(ctx.assignmentId, "completed", "Recovered completed result.")
+        );
+        await ctx.store.writeJsonArtifact(
+          `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z")
+        );
+
+        const run = await runRuntime(ctx.store, ctx.adapter);
+
+        assert.equal(run.assignment.id, ctx.assignmentId);
+        assert.equal(run.execution.outcome.kind, "result");
+        assert.equal(run.execution.outcome.capture.status, "completed");
+        assert.equal(run.execution.outcome.capture.summary, "Recovered completed result.");
+        assert.equal(run.projectionBefore.assignments.get(ctx.assignmentId)?.state, "completed");
+        assert.equal(run.projectionAfter.assignments.get(ctx.assignmentId)?.state, "completed");
+        assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
+        assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(adapter.executeAssignmentCount, 0);
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "run path surfaces a recovered completed decision instead of blocked rerun error",
+      run: async () => {
+        const adapter = new ExecutionSentinelMatrixAdapter({
+          runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,
+          runLeasePath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.lease.json`,
+          lastRunPath: () => "adapters/matrix/last-run.json"
+        });
+        const ctx = await createMatrixContext(adapter);
+        await ctx.adapter.runStore.write(
+          completedDecisionRecord(ctx.assignmentId, "Need operator confirmation before proceeding.")
+        );
+        await ctx.store.writeJsonArtifact(
+          `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z")
+        );
+
+        const run = await runRuntime(ctx.store, ctx.adapter);
+
+        assert.equal(run.assignment.id, ctx.assignmentId);
+        assert.equal(run.execution.outcome.kind, "decision");
+        assert.equal(run.execution.outcome.capture.blockerSummary, "Need operator confirmation before proceeding.");
+        assert.equal(run.execution.outcome.capture.recommendedOption, "wait");
+        assert.equal(run.projectionBefore.assignments.get(ctx.assignmentId)?.state, "blocked");
+        assert.equal(run.projectionAfter.assignments.get(ctx.assignmentId)?.state, "blocked");
+        assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [ctx.assignmentId]);
+        assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(adapter.executeAssignmentCount, 0);
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "run path keeps the active blocked error ahead of unrelated recovered results",
+      run: async () => {
+        const adapter = new ExecutionSentinelMatrixAdapter({
+          runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,
+          runLeasePath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.lease.json`,
+          lastRunPath: () => "adapters/matrix/last-run.json"
+        });
+        const ctx = await createMatrixContext(adapter);
+        const recoveredAssignmentId = await appendActiveAssignment(ctx);
+        const timestamp = nowIso();
+
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "assignment.updated",
+          payload: {
+            assignmentId: ctx.assignmentId,
+            patch: {
+              state: "blocked",
+              updatedAt: timestamp
+            }
+          }
+        });
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "decision.created",
+          payload: {
+            decision: {
+              decisionId: randomUUID(),
+              assignmentId: ctx.assignmentId,
+              requesterId: "matrix-host",
+              blockerSummary: "Need input before continuing the active assignment.",
+              options: [{ id: "wait", label: "Wait", summary: "Pause until guidance arrives." }],
+              recommendedOption: "wait",
+              state: "open",
+              createdAt: timestamp
+            }
+          }
+        });
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp,
+          type: "status.updated",
+          payload: {
+            status: {
+              ...ctx.projection.status,
+              activeAssignmentIds: [ctx.assignmentId],
+              currentObjective: "Resolve the active blocked assignment first.",
+              lastDurableOutputAt: timestamp
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await ctx.adapter.runStore.write(
+          completedResultRecord(recoveredAssignmentId, "completed", "Recovered hidden completed result.")
+        );
+
+        await assert.rejects(
+          runRuntime(ctx.store, ctx.adapter),
+          /Assignment .* is blocked and cannot be run\. Resolve decision .* first\./
+        );
+        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(adapter.executeAssignmentCount, 0);
       }
     },
     {
@@ -959,6 +1877,74 @@ test("host-run recovery matrix repairs missing stale status convergence after qu
   assert.ok(!thirdRecovery.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
 });
 
+test("host-run recovery matrix uses snapshot truth when stale recovery lines become malformed", async () => {
+  const ctx = await createMatrixContext();
+  const staleRecord = runningRecord(ctx.assignmentId, "2000-01-01T00:00:00.000Z");
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, staleRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", staleRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, staleRecord);
+
+  const originalReconcileStaleRun = ctx.adapter.reconcileStaleRun.bind(ctx.adapter);
+  let reconcileAttempts = 0;
+  ctx.adapter.reconcileStaleRun = async (store, record) => {
+    reconcileAttempts += 1;
+    if (reconcileAttempts === 1) {
+      throw new Error("simulated stale cleanup failure");
+    }
+    await originalReconcileStaleRun(store, record);
+  };
+
+  await assert.rejects(
+    reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection),
+    /Host run reconciliation failed to clear the active lease for assignment/
+  );
+
+  const repairedSnapshot = await ctx.store.loadSnapshot();
+  assert.equal(repairedSnapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state, "queued");
+  assert.match(
+    repairedSnapshot?.status.currentObjective ?? "",
+    new RegExp(`^Retry assignment ${ctx.assignmentId}:`)
+  );
+
+  const eventLines = (await readFile(ctx.store.eventsPath, "utf8")).trimEnd().split("\n");
+  eventLines[eventLines.length - 2] = "{\"broken\":";
+  eventLines[eventLines.length - 1] = "{\"broken\":";
+  await writeFile(ctx.store.eventsPath, `${eventLines.join("\n")}\n`, "utf8");
+
+  const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  assert.equal(loaded.snapshotFallback, true);
+
+  const retried = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+    snapshotFallback: loaded.snapshotFallback
+  });
+  const replayable = await ctx.store.loadReplayableEvents();
+  const replayableQueuedTransitionCount = replayable.events.filter(
+    (event) =>
+      event.type === "assignment.updated" &&
+      event.payload.assignmentId === ctx.assignmentId &&
+      event.payload.patch.state === "queued"
+  ).length;
+  const replayableStatusCount = replayable.events.filter(
+    (event) =>
+      event.type === "status.updated" &&
+      event.payload.status.currentObjective.startsWith(`Retry assignment ${ctx.assignmentId}:`)
+  ).length;
+
+  assert.equal(reconcileAttempts, 2);
+  assert.equal(retried.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+  assert.match(
+    retried.projection.status.currentObjective,
+    new RegExp(`^Retry assignment ${ctx.assignmentId}:`)
+  );
+  assert.ok(!retried.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(replayableQueuedTransitionCount, 0);
+  assert.equal(replayableStatusCount, 0);
+  assert.equal(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
+  );
+});
+
 test("host-run recovery matrix keeps completed-run reconciliation idempotent", async (t) => {
   const cases = [
     {
@@ -1171,40 +2157,296 @@ test("host-run recovery matrix retries completed-run cleanup after the outcome i
   await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
   await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
 
-  const originalReconcileStaleRun = ctx.adapter.reconcileStaleRun.bind(ctx.adapter);
-  let reconcileAttempts = 0;
-  (ctx.adapter as MatrixAdapter).reconcileStaleRun = async (store, record) => {
-    reconcileAttempts += 1;
-    if (reconcileAttempts === 1) {
-      throw new Error("simulated completed-run cleanup failure");
-    }
-    await originalReconcileStaleRun(store, record);
+  (ctx.adapter as MatrixAdapter).reconcileStaleRun = async () => {
+    throw new Error("simulated completed-run cleanup failure");
   };
 
-  const firstRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection);
-  const firstEventCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted");
+  await assert.rejects(
+    reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection),
+    /Host run reconciliation failed to clear the active lease for assignment/
+  );
   const firstLeaseContents = await ctx.store.readTextArtifact(
     `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
     "matrix lease"
   );
-  const secondRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, firstRecovery.projection);
-  const secondEventCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted");
-  const leaseAfterSecondRecovery = await ctx.store.readTextArtifact(
-    `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
-    "matrix lease"
+  assert.notEqual(firstLeaseContents, undefined);
+});
+
+test("host-run recovery matrix flushes completed-decision snapshot before cleanup on retry when recovery events are already durable", async () => {
+  const ctx = await createMatrixContext();
+  await ctx.adapter.runStore.write(
+    completedDecisionRecord(ctx.assignmentId, "Need operator confirmation before proceeding.")
   );
 
-  assert.ok(firstRecovery.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
-  assert.ok(firstRecovery.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
-  assert.equal(firstEventCount, 1);
-  assert.equal(secondEventCount, firstEventCount);
-  assert.equal(reconcileAttempts, 2);
-  assert.notEqual(firstLeaseContents, undefined);
-  assert.equal(secondRecovery.projection.results.size, 1);
-  assert.equal(secondRecovery.projection.assignments.get(ctx.assignmentId)?.state, "completed");
-  assert.deepEqual(secondRecovery.projection.status.activeAssignmentIds, []);
-  assert.equal(leaseAfterSecondRecovery, undefined);
+  const originalWriteSnapshot = ctx.store.writeSnapshot.bind(ctx.store);
+  let failedWriteSnapshot = false;
+  (ctx.store as RuntimeStore & {
+    writeSnapshot: RuntimeStore["writeSnapshot"];
+  }).writeSnapshot = async (snapshot) => {
+    if (!failedWriteSnapshot) {
+      failedWriteSnapshot = true;
+      throw new Error("simulated snapshot write failure");
+    }
+    await originalWriteSnapshot(snapshot);
+  };
+
+  await assert.rejects(
+    reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection),
+    /simulated snapshot write failure/
+  );
+
+  (ctx.store as RuntimeStore & {
+    writeSnapshot: RuntimeStore["writeSnapshot"];
+  }).writeSnapshot = originalWriteSnapshot;
+
+  const originalReconcileStaleRun = ctx.adapter.reconcileStaleRun.bind(ctx.adapter);
+  ctx.adapter.reconcileStaleRun = async (store, record) => {
+    const snapshot = await ctx.store.loadSnapshot();
+    assert.equal(
+      snapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state,
+      "blocked"
+    );
+    assert.deepEqual(snapshot?.status.activeAssignmentIds, [ctx.assignmentId]);
+    await originalReconcileStaleRun(store, record);
+  };
+
+  const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  assert.equal(retried.snapshotFallback, false);
+
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
+    snapshotFallback: retried.snapshotFallback
+  });
+  const snapshot = await ctx.store.loadSnapshot();
+  const recoveredDecisionCount = await countRecoveredOutcomeEvents(
+    ctx.store,
+    ctx.assignmentId,
+    "decision.created"
+  );
+
+  assert.equal(recoveredDecisionCount, 1);
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+  assert.equal(
+    snapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state,
+    "blocked"
+  );
+  assert.deepEqual(snapshot?.status.activeAssignmentIds, [ctx.assignmentId]);
 });
+
+test("host-run recovery matrix retries snapshot-fallback completed-run repair without duplicating recovery events", async () => {
+  const ctx = await createMatrixContext();
+  await ctx.store.syncSnapshotFromEvents();
+  const completedRecord = completedResultRecord(
+    ctx.assignmentId,
+    "completed",
+    "Recovered completed result."
+  );
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const eventLines = (await readFile(ctx.store.eventsPath, "utf8")).trimEnd().split("\n");
+  eventLines.push(
+    JSON.stringify({
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: nowIso(),
+      type: "assignment.updated",
+      payload: {
+        assignmentId: randomUUID(),
+        patch: {
+          state: "queued",
+          updatedAt: nowIso()
+        }
+      }
+    })
+  );
+  await writeFile(ctx.store.eventsPath, `${eventLines.join("\n")}\n`, "utf8");
+
+  const originalWriteSnapshot = ctx.store.writeSnapshot.bind(ctx.store);
+  let failedWriteSnapshot = false;
+  (ctx.store as RuntimeStore & {
+    writeSnapshot: RuntimeStore["writeSnapshot"];
+  }).writeSnapshot = async (snapshot) => {
+    if (!failedWriteSnapshot) {
+      failedWriteSnapshot = true;
+      throw new Error("simulated snapshot write failure");
+    }
+    await originalWriteSnapshot(snapshot);
+  };
+
+  const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  assert.equal(loaded.snapshotFallback, true);
+
+  await assert.rejects(
+    reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+      snapshotFallback: loaded.snapshotFallback
+    }),
+    /simulated snapshot write failure/
+  );
+
+  (ctx.store as RuntimeStore & {
+    writeSnapshot: RuntimeStore["writeSnapshot"];
+  }).writeSnapshot = originalWriteSnapshot;
+
+  const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
+    snapshotFallback: retried.snapshotFallback
+  });
+  const recoveredEventCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted");
+
+  assert.equal(recoveredEventCount, 1);
+  assert.equal(recovered.projection.results.size, 1);
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "completed");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, []);
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+});
+
+test("host-run recovery matrix replays completed results when snapshot-boundary proof is unusable", async () => {
+  const ctx = await createMatrixContext();
+  await ctx.store.syncSnapshotFromEvents();
+  const completedRecord = completedResultRecord(
+    ctx.assignmentId,
+    "completed",
+    "Recovered completed result."
+  );
+  const completedAt = completedRecord.completedAt!;
+  const terminalOutcome = completedRecord.terminalOutcome;
+  assert.equal(terminalOutcome?.kind, "result");
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const eventLines = (await readFile(ctx.store.eventsPath, "utf8")).trimEnd().split("\n");
+  eventLines.push(
+    JSON.stringify({
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: completedAt,
+      type: "result.submitted",
+      payload: {
+        result: {
+          resultId: terminalOutcome.result.resultId ?? randomUUID(),
+          assignmentId: ctx.assignmentId,
+          producerId: "matrix-host",
+          status: "completed",
+          summary: "Recovered completed result.",
+          changedFiles: [],
+          createdAt: completedAt
+        }
+      }
+    }),
+    JSON.stringify({
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: completedAt,
+      type: "assignment.updated",
+      payload: {
+        assignmentId: ctx.assignmentId,
+        patch: {
+          state: "completed",
+          updatedAt: completedAt
+        }
+      }
+    }),
+    JSON.stringify({
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: completedAt,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...ctx.projection.status,
+          activeMode: "idle",
+          currentObjective: "Await the next assignment.",
+          activeAssignmentIds: [],
+          lastDurableOutputAt: completedAt,
+          resumeReady: true
+        }
+      }
+    })
+  );
+  await writeFile(ctx.store.eventsPath, `${eventLines.join("\n")}\n`, "utf8");
+  await corruptSnapshotBoundary(ctx.store);
+
+  const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  assert.equal(loaded.snapshotFallback, true);
+
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+    snapshotFallback: loaded.snapshotFallback
+  });
+  const repairedSnapshot = await ctx.store.loadSnapshot();
+
+  assert.equal(recovered.projection.results.size, 1);
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "completed");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, []);
+  assert.equal(repairedSnapshot?.results.length, 1);
+  assert.equal(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
+  );
+});
+
+test("host-run recovery matrix repairs stale snapshot before cleanup on retry when stale recovery events are already durable", async () => {
+  const ctx = await createMatrixContext();
+  await ctx.store.syncSnapshotFromEvents();
+  await ctx.adapter.runStore.write({
+    assignmentId: ctx.assignmentId,
+    state: "completed",
+    startedAt: nowIso(),
+    completedAt: nowIso(),
+    staleAt: nowIso(),
+    staleReasonCode: "expired_lease",
+    staleReason: "Run lease expired at 2000-01-01T00:00:00.000Z."
+  });
+
+  const originalWriteSnapshot = ctx.store.writeSnapshot.bind(ctx.store);
+  let failedWriteSnapshot = false;
+  (ctx.store as RuntimeStore & {
+    writeSnapshot: RuntimeStore["writeSnapshot"];
+  }).writeSnapshot = async (snapshot) => {
+    if (!failedWriteSnapshot) {
+      failedWriteSnapshot = true;
+      throw new Error("simulated snapshot write failure");
+    }
+    await originalWriteSnapshot(snapshot);
+  };
+
+  await assert.rejects(
+    reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection),
+    /simulated snapshot write failure/
+  );
+
+  (ctx.store as RuntimeStore & {
+    writeSnapshot: RuntimeStore["writeSnapshot"];
+  }).writeSnapshot = originalWriteSnapshot;
+
+  const originalReconcileStaleRun = ctx.adapter.reconcileStaleRun.bind(ctx.adapter);
+  ctx.adapter.reconcileStaleRun = async (store, record) => {
+    const snapshot = await ctx.store.loadSnapshot();
+    assert.equal(
+      snapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state,
+      "completed"
+    );
+    assert.deepEqual(snapshot?.status.activeAssignmentIds, []);
+    assert.equal(snapshot?.status.currentObjective, "Await the next assignment.");
+    await originalReconcileStaleRun(store, record);
+  };
+
+  const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  assert.equal(retried.snapshotFallback, false);
+
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
+    snapshotFallback: retried.snapshotFallback
+  });
+  const snapshot = await ctx.store.loadSnapshot();
+
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+  assert.equal(snapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state, "queued");
+  assert.deepEqual(snapshot?.status.activeAssignmentIds, [ctx.assignmentId]);
+});
+
 test("host-run recovery matrix retries malformed lease cleanup without duplicating queued transitions", async () => {
   const ctx = await createMatrixContext();
   await ctx.store.writeTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "{");
@@ -1219,8 +2461,14 @@ test("host-run recovery matrix retries malformed lease cleanup without duplicati
     await originalReconcileStaleRun(store, record);
   };
 
-  const firstRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection);
-  const secondRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, firstRecovery.projection);
+  await assert.rejects(
+    reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection),
+    /Host run reconciliation failed to clear the active lease for assignment/
+  );
+  const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  const secondRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
+    snapshotFallback: retried.snapshotFallback
+  });
   const events = await ctx.store.loadEvents();
   const queuedTransitionCount = events.filter(
     (event) =>
@@ -1229,11 +2477,7 @@ test("host-run recovery matrix retries malformed lease cleanup without duplicati
       event.payload.patch.state === "queued"
   ).length;
 
-  assert.ok(firstRecovery.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
-  assert.ok(firstRecovery.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
-  assert.equal(firstRecovery.projection.assignments.get(ctx.assignmentId)?.state, "queued");
   assert.equal(secondRecovery.projection.assignments.get(ctx.assignmentId)?.state, "queued");
-  assert.ok(!secondRecovery.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(reconcileAttempts, 2);
   assert.equal(queuedTransitionCount, 1);
   assert.equal(
@@ -1241,6 +2485,40 @@ test("host-run recovery matrix retries malformed lease cleanup without duplicati
     undefined
   );
 });
+
+test("host-run recovery matrix verifies stale cleanup against adapter-defined lease paths", async () => {
+  const customArtifacts = {
+    runRecordPath: (assignmentId: string) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId: string) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+
+  class LeakyLeaseMatrixAdapter extends MatrixAdapter {
+    constructor() {
+      super(customArtifacts);
+    }
+
+    override async reconcileStaleRun(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void> {
+      this.bindStore(store);
+      await store.writeJsonArtifact(customArtifacts.runRecordPath(record.assignmentId), record);
+      await store.writeJsonArtifact(customArtifacts.lastRunPath(), record);
+    }
+  }
+
+  const adapter = new LeakyLeaseMatrixAdapter();
+  const ctx = await createMatrixContext(adapter);
+  await adapter.runStore.write(runningRecord(ctx.assignmentId, "2000-01-01T00:00:00.000Z"));
+
+  await assert.rejects(
+    reconcileActiveRuns(ctx.store, adapter, ctx.projection),
+    /Host run reconciliation failed to clear the active lease for assignment/
+  );
+  assert.notEqual(
+    await ctx.store.readTextArtifact(customArtifacts.runLeasePath(ctx.assignmentId), "custom matrix lease"),
+    undefined
+  );
+});
+
 interface MatrixContext {
   store: RuntimeStore;
   projection: RuntimeProjection;
@@ -1300,6 +2578,11 @@ class MatrixAdapter implements HostAdapter {
     return record;
   }
 
+  async hasRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<boolean> {
+    this.bindStore(store);
+    return this.runStore.hasLease(assignmentId);
+  }
+
   async releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
     this.bindStore(store);
     await this.runStore.release(assignmentId);
@@ -1313,6 +2596,11 @@ class MatrixAdapter implements HostAdapter {
   async inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined> {
     this.bindStore(store);
     return this.runStore.inspect(assignmentId);
+  }
+
+  async inspectRuns(store: RuntimeArtifactStore): Promise<HostRunRecord[]> {
+    this.bindStore(store);
+    return this.runStore.inspectAll();
   }
 
   normalizeResult(capture: HostResultCapture): ResultPacket {
@@ -1651,6 +2939,57 @@ async function appendActiveAssignment(ctx: MatrixContext): Promise<string> {
   await ctx.store.syncSnapshotFromEvents();
   ctx.projection = await loadOperatorProjection(ctx.store);
   return secondAssignmentId;
+}
+
+async function appendAssignmentBeyondSnapshotBoundary(ctx: MatrixContext): Promise<string> {
+  const assignmentId = randomUUID();
+  const timestamp = nowIso();
+  await ctx.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: ctx.projection.sessionId,
+    timestamp,
+    type: "assignment.created",
+    payload: {
+      assignment: {
+        id: assignmentId,
+        parentTaskId: "task-hidden-beyond-snapshot",
+        workflow: "milestone-2",
+        ownerType: "host",
+        ownerId: "matrix",
+        objective: "Hidden assignment beyond the snapshot boundary.",
+        writeScope: ["README.md"],
+        requiredOutputs: ["result"],
+        state: "queued",
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }
+    }
+  });
+  return assignmentId;
+}
+
+async function corruptSnapshotBoundary(store: RuntimeStore): Promise<void> {
+  const snapshot = await store.loadSnapshot();
+  assert.ok(snapshot?.lastEventId, "expected a snapshot boundary before corruption");
+  const eventLines = (await readFile(store.eventsPath, "utf8")).trimEnd().split("\n");
+  const boundaryIndex = eventLines.findIndex((line) => {
+    const parsed = JSON.parse(line) as { eventId?: string };
+    return parsed.eventId === snapshot.lastEventId;
+  });
+  assert.ok(boundaryIndex >= 0, "expected to find the snapshot boundary event");
+  eventLines[boundaryIndex] = "{\"broken\":";
+  await writeFile(store.eventsPath, `${eventLines.join("\n")}\n`, "utf8");
+}
+
+async function removeAssignmentFromSnapshot(store: RuntimeStore, assignmentId: string): Promise<void> {
+  const snapshot = await store.loadSnapshot();
+  assert.ok(snapshot, "expected a snapshot before degrading it");
+  snapshot.assignments = snapshot.assignments.filter((assignment) => assignment.id !== assignmentId);
+  snapshot.status = {
+    ...snapshot.status,
+    activeAssignmentIds: snapshot.status.activeAssignmentIds.filter((id) => id !== assignmentId)
+  };
+  await store.writeSnapshot(snapshot);
 }
 
 function runningRecord(assignmentId: string, leaseExpiresAt: string): HostRunRecord {

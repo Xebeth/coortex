@@ -2,7 +2,8 @@ import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
-import type { HostAdapter, HostExecutionOutcome } from "../adapters/contract.js";
+import type { HostAdapter, HostExecutionOutcome, TaskEnvelope } from "../adapters/contract.js";
+import type { Assignment, DecisionPacket, ResultPacket } from "../core/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
@@ -45,6 +46,7 @@ export interface RunRuntimeResult {
   assignment: ReturnType<typeof getRunnableAssignment>;
   envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>;
   execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>;
+  recoveredOutcome: boolean;
   diagnostics: CommandDiagnostic[];
 }
 
@@ -121,9 +123,14 @@ export async function resumeRuntime(
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
 
-  const { projection, diagnostics } = await loadOperatorProjectionWithDiagnostics(store);
-  const reconciled = await reconcileActiveRuns(store, adapter, projection);
-  diagnostics.push(...reconciled.diagnostics);
+  const reconciled = await loadReconciledProjectionWithDiagnostics(store, adapter);
+  const authoritativeLeaseAssignmentId = reconciled.activeLeases[0];
+  if (authoritativeLeaseAssignmentId) {
+    throw new Error(
+      `Assignment ${authoritativeLeaseAssignmentId} already has an active host run lease.`
+    );
+  }
+  const diagnostics = [...reconciled.diagnostics];
   const effectiveProjection = reconciled.projection;
   const brief = buildRecoveryBrief(effectiveProjection);
   if (brief.activeAssignments.length === 0) {
@@ -137,7 +144,7 @@ export async function resumeRuntime(
     store,
     adapter.normalizeTelemetry({
       eventType: "resume.requested",
-      taskId: projection.sessionId,
+      taskId: effectiveProjection.sessionId,
       metadata: {
         envelopeChars: envelope.estimatedChars,
         trimApplied: envelope.trimApplied,
@@ -169,7 +176,8 @@ export async function runRuntime(
   const reconciled = await reconcileActiveRuns(
     store,
     adapter,
-    projectionBeforeResult.projection
+    projectionBeforeResult.projection,
+    { snapshotFallback: projectionBeforeResult.snapshotFallback }
   );
   projectionBeforeResult.diagnostics.push(...reconciled.diagnostics);
   const projectionBefore = reconciled.projection;
@@ -177,13 +185,34 @@ export async function runRuntime(
     const assignmentId = reconciled.activeLeases[0]!;
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
-  const assignment = getRunnableAssignment(projectionBefore);
+  let diagnostics: CommandDiagnostic[] = [...projectionBeforeResult.diagnostics];
+  let assignment: ReturnType<typeof getRunnableAssignment>;
+  try {
+    assignment = getRunnableAssignment(projectionBefore);
+  } catch (error) {
+    const recoveredOutcome = synthesizeRecoveredExecutionFromReconciliation(
+      adapter,
+      projectionBeforeResult.projection,
+      projectionBefore
+    );
+    if (!recoveredOutcome) {
+      throw error;
+    }
+    return {
+      projectionBefore,
+      projectionAfter: projectionBefore,
+      assignment: recoveredOutcome.assignment,
+      envelope: recoveredOutcome.envelope,
+      execution: recoveredOutcome.execution,
+      recoveredOutcome: true,
+      diagnostics
+    };
+  }
   const claimedRun = await adapter.claimRunLease(store, projectionBefore, assignment.id);
   let executionStarted = false;
   let launchedProjection: Awaited<ReturnType<typeof loadOperatorProjection>> | undefined;
   let envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>> | undefined;
   let execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>> | undefined;
-  let diagnostics: CommandDiagnostic[] = [...projectionBeforeResult.diagnostics];
   try {
     const envelopeProjection = projectionForRunnableAssignment(projectionBefore, assignment.id);
     const brief = buildRecoveryBrief(envelopeProjection);
@@ -232,16 +261,16 @@ export async function runRuntime(
       assignment,
       envelope,
       execution,
+      recoveredOutcome: false,
       diagnostics
     };
   } catch (error) {
     if (!executionStarted) {
       await adapter.releaseRunLease(store, assignment.id);
     } else if (launchedProjection && envelope) {
-      const recoveredExecution =
-        execution && isRecoverableCompletedExecution(execution)
-          ? execution
-          : synthesizeRecoveredExecution(await adapter.inspectRun(store, assignment.id));
+      const recoveredExecution = synthesizeRecoveredExecution(
+        await adapter.inspectRun(store, assignment.id)
+      );
       if (recoveredExecution) {
         const recovered = await loadReconciledProjectionWithDiagnostics(store, adapter);
         diagnostics.push(
@@ -259,6 +288,7 @@ export async function runRuntime(
           assignment,
           envelope,
           execution: recoveredExecution,
+          recoveredOutcome: false,
           diagnostics
         };
       }
@@ -277,12 +307,6 @@ export async function inspectRuntimeRun(
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
   return adapter.inspectRun(store, assignmentId);
-}
-
-function isRecoverableCompletedExecution(
-  execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>
-): boolean {
-  return isRecoverableCompletedRunRecord(execution.run);
 }
 
 function synthesizeRecoveredExecution(
@@ -332,4 +356,277 @@ function synthesizeRecoveredExecution(
 
 function isRecoverableCompletedRunRecord(record: { state: string; terminalOutcome?: unknown }): boolean {
   return record.state === "completed" && Boolean(record.terminalOutcome);
+}
+
+function synthesizeRecoveredExecutionFromReconciliation(
+  adapter: HostAdapter,
+  projectionBeforeReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  projectionAfterReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>
+): {
+  assignment: Assignment;
+  envelope: TaskEnvelope;
+  execution: HostExecutionOutcome;
+} | undefined {
+  const recoveredDecision = findRecoveredDecisionCandidate(
+    projectionBeforeReconciliation,
+    projectionAfterReconciliation
+  );
+  if (recoveredDecision) {
+    return {
+      assignment: recoveredDecision.assignment,
+      envelope: buildRecoveredExecutionEnvelope(
+        adapter,
+        projectionAfterReconciliation,
+        recoveredDecision.assignment
+      ),
+      execution: {
+        outcome: {
+          kind: "decision",
+          capture: {
+            assignmentId: recoveredDecision.assignment.id,
+            requesterId: recoveredDecision.decision.requesterId,
+            blockerSummary: recoveredDecision.decision.blockerSummary,
+            options: recoveredDecision.decision.options.map((option) => ({ ...option })),
+            recommendedOption: recoveredDecision.decision.recommendedOption,
+            state: recoveredDecision.decision.state,
+            createdAt: recoveredDecision.decision.createdAt,
+            decisionId: recoveredDecision.decision.decisionId
+          }
+        },
+        run: {
+          assignmentId: recoveredDecision.assignment.id,
+          state: "completed",
+          startedAt: recoveredDecision.decision.createdAt,
+          completedAt: recoveredDecision.decision.createdAt,
+          outcomeKind: "decision",
+          summary: recoveredDecision.decision.blockerSummary,
+          terminalOutcome: {
+            kind: "decision",
+            decision: {
+              decisionId: recoveredDecision.decision.decisionId,
+              requesterId: recoveredDecision.decision.requesterId,
+              blockerSummary: recoveredDecision.decision.blockerSummary,
+              options: recoveredDecision.decision.options.map((option) => ({ ...option })),
+              recommendedOption: recoveredDecision.decision.recommendedOption,
+              state: recoveredDecision.decision.state,
+              createdAt: recoveredDecision.decision.createdAt
+            }
+          }
+        }
+      }
+    };
+  }
+
+  if (projectionAfterReconciliation.status.activeAssignmentIds.length > 0) {
+    return undefined;
+  }
+
+  const recoveredResult = findRecoveredResultCandidate(
+    projectionBeforeReconciliation,
+    projectionAfterReconciliation
+  );
+  if (!recoveredResult) {
+    return undefined;
+  }
+
+  return {
+    assignment: recoveredResult.assignment,
+    envelope: buildRecoveredExecutionEnvelope(
+      adapter,
+      projectionAfterReconciliation,
+      recoveredResult.assignment
+    ),
+    execution: {
+      outcome: {
+        kind: "result",
+        capture: {
+          assignmentId: recoveredResult.assignment.id,
+          producerId: recoveredResult.result.producerId,
+          status: recoveredResult.result.status,
+          summary: recoveredResult.result.summary,
+          changedFiles: [...recoveredResult.result.changedFiles],
+          createdAt: recoveredResult.result.createdAt,
+          resultId: recoveredResult.result.resultId
+        }
+      },
+      run: {
+        assignmentId: recoveredResult.assignment.id,
+        state: "completed",
+        startedAt: recoveredResult.result.createdAt,
+        completedAt: recoveredResult.result.createdAt,
+        outcomeKind: "result",
+        resultStatus: recoveredResult.result.status,
+        summary: recoveredResult.result.summary,
+        terminalOutcome: {
+          kind: "result",
+          result: {
+            resultId: recoveredResult.result.resultId,
+            producerId: recoveredResult.result.producerId,
+            status: recoveredResult.result.status,
+            summary: recoveredResult.result.summary,
+            changedFiles: [...recoveredResult.result.changedFiles],
+            createdAt: recoveredResult.result.createdAt
+          }
+        }
+      }
+    }
+  };
+}
+
+function findRecoveredDecisionCandidate(
+  projectionBeforeReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  projectionAfterReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>
+): {
+  assignment: Assignment;
+  decision: DecisionPacket;
+} | undefined {
+  for (const assignmentId of projectionAfterReconciliation.status.activeAssignmentIds) {
+    const assignment = projectionAfterReconciliation.assignments.get(assignmentId);
+    if (!assignment || assignment.state !== "blocked") {
+      continue;
+    }
+    const decision = findLatestOpenDecision(projectionAfterReconciliation, assignment.id);
+    if (!decision) {
+      continue;
+    }
+    const beforeAssignment = projectionBeforeReconciliation.assignments.get(assignment.id);
+    if (
+      beforeAssignment?.state !== assignment.state ||
+      projectionBeforeReconciliation.status.activeAssignmentIds.includes(assignment.id) !==
+        projectionAfterReconciliation.status.activeAssignmentIds.includes(assignment.id) ||
+      !hasMatchingDecision(projectionBeforeReconciliation, decision)
+    ) {
+      return { assignment, decision };
+    }
+  }
+
+  return undefined;
+}
+
+function findRecoveredResultCandidate(
+  projectionBeforeReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  projectionAfterReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>
+): {
+  assignment: Assignment;
+  result: ResultPacket;
+} | undefined {
+  let candidate:
+    | {
+        assignment: Assignment;
+        result: ResultPacket;
+      }
+    | undefined;
+
+  for (const assignment of projectionAfterReconciliation.assignments.values()) {
+    if (assignment.state !== "completed" && assignment.state !== "failed") {
+      continue;
+    }
+    const result = findLatestTerminalResult(projectionAfterReconciliation, assignment.id);
+    if (!result) {
+      continue;
+    }
+    const beforeAssignment = projectionBeforeReconciliation.assignments.get(assignment.id);
+    if (
+      beforeAssignment?.state === assignment.state &&
+      projectionBeforeReconciliation.status.activeAssignmentIds.includes(assignment.id) ===
+        projectionAfterReconciliation.status.activeAssignmentIds.includes(assignment.id) &&
+      hasMatchingResult(projectionBeforeReconciliation, result)
+    ) {
+      continue;
+    }
+    if (!candidate || candidate.result.createdAt < result.createdAt) {
+      candidate = { assignment, result };
+    }
+  }
+
+  return candidate;
+}
+
+function buildRecoveredExecutionEnvelope(
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignment: Assignment
+): TaskEnvelope {
+  const brief = buildRecoveryBrief(projection);
+  return {
+    host: adapter.host,
+    adapter: adapter.id,
+    objective: assignment.objective,
+    writeScope: [...assignment.writeScope],
+    requiredOutputs: [...assignment.requiredOutputs],
+    recoveryBrief: brief,
+    recentResults: brief.lastDurableResults.map((result) => ({
+      resultId: result.resultId,
+      summary: result.summary,
+      trimmed: !!result.trimmed,
+      ...(result.reference ? { reference: result.reference } : {})
+    })),
+    metadata: {
+      activeMode: projection.status.activeMode,
+      activeAssignmentId: assignment.id,
+      unresolvedDecisionCount: brief.unresolvedDecisions.length,
+      recoveredOutcome: true
+    },
+    estimatedChars: 0,
+    trimApplied: false,
+    trimmedFields: []
+  };
+}
+
+function findLatestOpenDecision(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string
+): DecisionPacket | undefined {
+  return [...projection.decisions.values()]
+    .filter((decision) => decision.assignmentId === assignmentId && decision.state === "open")
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1);
+}
+
+function findLatestTerminalResult(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string
+): ResultPacket | undefined {
+  return [...projection.results.values()]
+    .filter(
+      (result) =>
+        result.assignmentId === assignmentId &&
+        (result.status === "completed" || result.status === "failed")
+    )
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1);
+}
+
+function hasMatchingDecision(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  decision: DecisionPacket
+): boolean {
+  return [...projection.decisions.values()].some((candidate) =>
+    candidate.assignmentId === decision.assignmentId &&
+    (
+      candidate.decisionId === decision.decisionId ||
+      (
+        candidate.blockerSummary === decision.blockerSummary &&
+        candidate.recommendedOption === decision.recommendedOption &&
+        candidate.createdAt === decision.createdAt
+      )
+    )
+  );
+}
+
+function hasMatchingResult(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  result: ResultPacket
+): boolean {
+  return [...projection.results.values()].some((candidate) =>
+    candidate.assignmentId === result.assignmentId &&
+    (
+      candidate.resultId === result.resultId ||
+      (
+        candidate.status === result.status &&
+        candidate.summary === result.summary &&
+        candidate.createdAt === result.createdAt
+      )
+    )
+  );
 }

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { basename, dirname } from "node:path";
 
 import type { RuntimeArtifactStore } from "./contract.js";
 import type { HostRunRecord } from "../core/types.js";
@@ -34,12 +35,9 @@ export class HostRunStore {
       const leaseRecord = await this.readLeaseRecord(assignmentId);
       return normalizeInspectedRun(selectAuthoritativeRunRecord(runRecord, leaseRecord));
     }
-    const lastRun = await this.store.readJsonArtifact<HostRunRecord>(
-      this.artifacts.lastRunPath(),
-      `${this.adapterId} run record`
-    );
+    const lastRun = await this.readLastRunPointer();
     if (!lastRun?.assignmentId) {
-      return lastRun;
+      return undefined;
     }
     return this.inspect(lastRun.assignmentId);
   }
@@ -73,13 +71,19 @@ export class HostRunStore {
   async release(assignmentId: string): Promise<void> {
     await this.store.deleteArtifact(this.artifacts.runLeasePath(assignmentId));
     await this.store.deleteArtifact(this.artifacts.runRecordPath(assignmentId));
-    const lastRun = await this.store.readJsonArtifact<HostRunRecord>(
-      this.artifacts.lastRunPath(),
-      `${this.adapterId} run record`
-    );
+    const lastRun = await this.readLastRunPointer();
     if (lastRun?.assignmentId === assignmentId && lastRun.state === "running") {
       await this.store.deleteArtifact(this.artifacts.lastRunPath());
     }
+  }
+
+  async hasLease(assignmentId: string): Promise<boolean> {
+    return (
+      (await this.store.readTextArtifact(
+        this.artifacts.runLeasePath(assignmentId),
+        `${this.adapterId} run lease`
+      )) !== undefined
+    );
   }
 
   async write(record: HostRunRecord): Promise<void> {
@@ -118,6 +122,17 @@ export class HostRunStore {
     }
   }
 
+  async inspectAll(): Promise<HostRunRecord[]> {
+    const records: HostRunRecord[] = [];
+    for (const assignmentId of await this.listInspectableAssignmentIds()) {
+      const record = await this.inspect(assignmentId);
+      if (record?.assignmentId === assignmentId) {
+        records.push(record);
+      }
+    }
+    return records;
+  }
+
   private async cleanupClaimFailure(assignmentId: string): Promise<Error | undefined> {
     const cleanupErrors: string[] = [];
     const leaseError = await this.tryDeleteArtifact(
@@ -134,22 +149,15 @@ export class HostRunStore {
     if (recordError) {
       cleanupErrors.push(recordError.message);
     }
-    try {
-      const lastRun = await this.store.readJsonArtifact<HostRunRecord>(
+    const lastRun = await this.readLastRunPointer();
+    if (lastRun?.assignmentId === assignmentId && lastRun.state === "running") {
+      const lastRunError = await this.tryDeleteArtifact(
         this.artifacts.lastRunPath(),
         `${this.adapterId} run record`
       );
-      if (lastRun?.assignmentId === assignmentId && lastRun.state === "running") {
-        const lastRunError = await this.tryDeleteArtifact(
-          this.artifacts.lastRunPath(),
-          `${this.adapterId} run record`
-        );
-        if (lastRunError) {
-          cleanupErrors.push(lastRunError.message);
-        }
+      if (lastRunError) {
+        cleanupErrors.push(lastRunError.message);
       }
-    } catch (error) {
-      cleanupErrors.push(error instanceof Error ? error.message : String(error));
     }
     if (cleanupErrors.length === 0) {
       return undefined;
@@ -192,6 +200,62 @@ export class HostRunStore {
           : createMalformedLeaseRecord(assignmentId, content);
       } catch {
         return createMalformedLeaseRecord(assignmentId, content);
+      }
+    }
+  }
+
+  private async listInspectableAssignmentIds(): Promise<string[]> {
+    const assignmentIds = new Set<string>();
+    const runRecordPattern = createAssignmentArtifactPattern(
+      this.artifacts.runRecordPath(ASSIGNMENT_ID_TOKEN)
+    );
+    const leasePattern = createAssignmentArtifactPattern(
+      this.artifacts.runLeasePath(ASSIGNMENT_ID_TOKEN)
+    );
+
+    if (runRecordPattern) {
+      for (const relativePath of await listArtifacts(this.store, runRecordPattern.directory)) {
+        if (leasePattern && matchAssignmentId(relativePath, leasePattern)) {
+          continue;
+        }
+        const assignmentId = matchAssignmentId(relativePath, runRecordPattern);
+        if (assignmentId) {
+          assignmentIds.add(assignmentId);
+        }
+      }
+    }
+
+    if (leasePattern) {
+      for (const relativePath of await listArtifacts(this.store, leasePattern.directory)) {
+        const assignmentId = matchAssignmentId(relativePath, leasePattern);
+        if (assignmentId) {
+          assignmentIds.add(assignmentId);
+        }
+      }
+    }
+    const lastRun = await this.readLastRunPointer();
+    if (lastRun?.assignmentId) {
+      assignmentIds.add(lastRun.assignmentId);
+    }
+    return [...assignmentIds].sort((left, right) => left.localeCompare(right));
+  }
+
+  private async readLastRunPointer(): Promise<HostRunRecord | undefined> {
+    const relativePath = this.artifacts.lastRunPath();
+    try {
+      return await this.store.readJsonArtifact<HostRunRecord>(
+        relativePath,
+        `${this.adapterId} run record`
+      );
+    } catch {
+      const content = await this.store.readTextArtifact(relativePath, `${this.adapterId} run record`);
+      if (content === undefined) {
+        return undefined;
+      }
+      try {
+        return parseJson<HostRunRecord>(content, `${this.adapterId} run record`);
+      } catch {
+        return undefined;
       }
     }
   }
@@ -249,4 +313,52 @@ function normalizeInspectedRun(record: HostRunRecord | undefined): HostRunRecord
 
 function isAlreadyExists(error: unknown): boolean {
   return !!error && typeof error === "object" && "code" in error && error.code === "EEXIST";
+}
+
+const ASSIGNMENT_ID_TOKEN = "__coortex_assignment_id__";
+
+function createAssignmentArtifactPattern(relativePath: string):
+  | {
+      directory: string;
+      prefix: string;
+      suffix: string;
+    }
+  | undefined {
+  const fileName = basename(relativePath);
+  const markerIndex = fileName.indexOf(ASSIGNMENT_ID_TOKEN);
+  if (markerIndex === -1) {
+    return undefined;
+  }
+  return {
+    directory: dirname(relativePath),
+    prefix: fileName.slice(0, markerIndex),
+    suffix: fileName.slice(markerIndex + ASSIGNMENT_ID_TOKEN.length)
+  };
+}
+
+function matchAssignmentId(
+  relativePath: string,
+  pattern: {
+    prefix: string;
+    suffix: string;
+  }
+): string | undefined {
+  const fileName = basename(relativePath);
+  if (!fileName.startsWith(pattern.prefix) || !fileName.endsWith(pattern.suffix)) {
+    return undefined;
+  }
+  return fileName.slice(pattern.prefix.length, fileName.length - pattern.suffix.length);
+}
+
+async function listArtifacts(store: RuntimeArtifactStore, relativeDir: string): Promise<string[]> {
+  if (!hasArtifactListing(store)) {
+    return [];
+  }
+  return store.listArtifacts(relativeDir);
+}
+
+function hasArtifactListing(
+  store: RuntimeArtifactStore
+): store is RuntimeArtifactStore & { listArtifacts(relativeDir: string): Promise<string[]> } {
+  return "listArtifacts" in store && typeof store.listArtifacts === "function";
 }

@@ -122,10 +122,12 @@ export interface HostAdapter {
     projection: RuntimeProjection,
     assignmentId: string
   ): Promise<HostRunRecord>;
+  hasRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<boolean>;
   releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void>;
   reconcileStaleRun(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void>;
   cancelActiveRun?(signal?: "graceful" | "force"): Promise<void>;
   inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined>;
+  inspectRuns(store: RuntimeArtifactStore): Promise<HostRunRecord[]>;
   normalizeResult(capture: HostResultCapture): ResultPacket;
   normalizeDecision(capture: HostDecisionCapture): DecisionPacket;
   normalizeTelemetry(capture: HostTelemetryCapture): Omit<TelemetryEvent, "timestamp">;

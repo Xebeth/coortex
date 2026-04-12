@@ -276,6 +276,10 @@ export class CodexAdapter implements HostAdapter {
     return runningRecord;
   }
 
+  async hasRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<boolean> {
+    return this.runStore(store).hasLease(assignmentId);
+  }
+
   async releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
     await this.runStore(store).release(assignmentId);
   }
@@ -289,6 +293,10 @@ export class CodexAdapter implements HostAdapter {
     assignmentId?: string
   ): Promise<HostRunRecord | undefined> {
     return this.runStore(store).inspect(assignmentId);
+  }
+
+  async inspectRuns(store: RuntimeArtifactStore): Promise<HostRunRecord[]> {
+    return this.runStore(store).inspectAll();
   }
 
   normalizeResult(capture: HostResultCapture): ResultPacket {

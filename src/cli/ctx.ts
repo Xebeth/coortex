@@ -127,7 +127,8 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     return;
   }
 
-  const { projection, diagnostics } = await loadReconciledProjectionWithDiagnostics(store, adapter);
+  const { projection, diagnostics, activeLeases, hiddenActiveLeases } =
+    await loadReconciledProjectionWithDiagnostics(store, adapter);
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
@@ -139,10 +140,26 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   console.log(`Adapter: ${projection.status.activeAdapter}`);
   console.log(`Last durable output: ${projection.status.lastDurableOutputAt || "n/a"}`);
   console.log(`Active assignments: ${activeAssignments.length}`);
+  if (activeLeases.length > 0) {
+    console.log(`Authoritative host leases: ${activeLeases.length}`);
+  }
   console.log(`Results: ${projection.results.size}`);
   console.log(`Open decisions: ${openDecisions.length}`);
   for (const assignment of activeAssignments) {
     console.log(`- ${assignment.id} ${assignment.state} ${assignment.objective}`);
+  }
+  for (const assignmentId of activeLeases) {
+    if (hiddenActiveLeases.includes(assignmentId)) {
+      console.log(`- ${assignmentId} active host run lease outside the current projection`);
+      continue;
+    }
+    if (!projection.status.activeAssignmentIds.includes(assignmentId)) {
+      console.log(
+        `- ${assignmentId} active host run lease within the current projection but outside the current active assignment set`
+      );
+      continue;
+    }
+    console.log(`- ${assignmentId} active host run lease on the current active assignment`);
   }
   printDiagnostics(diagnostics);
 }
@@ -179,11 +196,13 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
   try {
     const runPromise = runRuntime(store, adapter);
     runSettled = runPromise.then(() => undefined, () => undefined);
-    const { assignment, execution, diagnostics } = await runPromise;
+    const { assignment, execution, diagnostics, recoveredOutcome } = await runPromise;
     const nativeRunId = getNativeRunId(execution.run);
 
-    console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
-    if (nativeRunId) {
+    if (!recoveredOutcome) {
+      console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
+    }
+    if (nativeRunId && !recoveredOutcome) {
       console.log(`Host run: ${nativeRunId}`);
     }
     if (execution.outcome.kind === "decision") {

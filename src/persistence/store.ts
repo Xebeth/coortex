@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { validateRuntimeConfig } from "../config/schema.js";
@@ -131,6 +131,7 @@ export class RuntimeStore {
   async loadProjectionWithRecovery(): Promise<{
     projection: RuntimeProjection;
     warning?: string;
+    snapshotFallback: boolean;
   }> {
     const snapshot = await this.loadSnapshot();
     const { events, warning } = await this.loadReplayableEvents();
@@ -140,19 +141,22 @@ export class RuntimeStore {
         if (replayed) {
           return {
             projection: replayed,
-            warning: `${warning} Rebuilt runtime state from ${this.snapshotPath} plus replayable events after ${snapshot.lastEventId ?? "the snapshot boundary"}.`
+            warning: `${warning} Rebuilt runtime state from ${this.snapshotPath} plus replayable events after ${snapshot.lastEventId ?? "the snapshot boundary"}.`,
+            snapshotFallback: false
           };
         }
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return {
           projection: fromSnapshot(snapshot),
-          warning: `${warning} Event replay after ${this.snapshotPath} could not rebuild runtime state; fell back to ${this.snapshotPath}. ${detail}`.trim()
+          warning: `${warning} Event replay after ${this.snapshotPath} could not rebuild runtime state; fell back to ${this.snapshotPath}. ${detail}`.trim(),
+          snapshotFallback: true
         };
       }
       return {
         projection: fromSnapshot(snapshot),
-        warning: `${warning} Fell back to ${this.snapshotPath} to avoid rewriting rolled-back salvaged state.`
+        warning: `${warning} Fell back to ${this.snapshotPath} to avoid rewriting rolled-back salvaged state.`,
+        snapshotFallback: true
       };
     }
     if (events.length > 0) {
@@ -162,7 +166,7 @@ export class RuntimeStore {
       }
       try {
         const projection = projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
-        return warning ? { projection, warning } : { projection };
+        return warning ? { projection, warning, snapshotFallback: false } : { projection, snapshotFallback: false };
       } catch (error) {
         if (!snapshot) {
           throw error;
@@ -171,14 +175,15 @@ export class RuntimeStore {
         const fallbackWarning = `${warning ?? ""} Event replay could not rebuild runtime state; fell back to ${this.snapshotPath}. ${detail}`.trim();
         return {
           projection: fromSnapshot(snapshot),
-          warning: fallbackWarning
+          warning: fallbackWarning,
+          snapshotFallback: true
         };
       }
     }
     if (snapshot) {
       return warning
-        ? { projection: fromSnapshot(snapshot), warning }
-        : { projection: fromSnapshot(snapshot) };
+        ? { projection: fromSnapshot(snapshot), warning, snapshotFallback: false }
+        : { projection: fromSnapshot(snapshot), snapshotFallback: false };
     }
     throw new Error(`No persisted runtime state found at ${this.rootDir}`);
   }
@@ -263,6 +268,21 @@ export class RuntimeStore {
     return fullPath;
   }
 
+  async listArtifacts(relativeDir: string): Promise<string[]> {
+    try {
+      const entries = await readdir(join(this.rootDir, relativeDir), { withFileTypes: true });
+      return entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => join(relativeDir, entry.name))
+        .sort((left, right) => left.localeCompare(right));
+    } catch (error) {
+      if (isMissingError(error)) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
   async deleteArtifact(relativePath: string): Promise<void> {
     await rm(join(this.rootDir, relativePath), { force: true });
   }
@@ -286,4 +306,8 @@ function replayEventsAfterSnapshot(
     applyRuntimeEvent(projection, event);
   }
   return projection;
+}
+
+function isMissingError(error: unknown): boolean {
+  return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
 }

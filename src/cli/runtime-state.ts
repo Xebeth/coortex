@@ -9,11 +9,13 @@ export async function loadOperatorProjection(store: RuntimeStore) {
 export async function loadOperatorProjectionWithDiagnostics(store: RuntimeStore): Promise<{
   projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
   diagnostics: CommandDiagnostic[];
+  snapshotFallback: boolean;
 }> {
-  const { projection, warning } = await store.loadProjectionWithRecovery();
+  const { projection, warning, snapshotFallback } = await store.loadProjectionWithRecovery();
   return {
     projection,
-    diagnostics: diagnosticsFromWarning(warning, "event-log-salvaged")
+    diagnostics: diagnosticsFromWarning(warning, "event-log-salvaged"),
+    snapshotFallback
   };
 }
 
