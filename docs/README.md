@@ -34,3 +34,11 @@ Non-reference material is kept out of the root docs surface:
   - external evaluations and adapter research
 - `docs/archive/`
   - one-off handoff notes and superseded planning material
+
+## Active plans
+
+Active implementation plans live under `docs/plans/`.
+
+Current active plan:
+
+- `plans/milestone-3-workflow-design.md`
