@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -11,6 +11,226 @@ const liveCodexEnv = {
   ...process.env,
   COORTEX_CODEX_DANGEROUS_BYPASS: "1"
 };
+
+async function runCliCommand(
+  cliPath: string,
+  command: string,
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+  }
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, command], {
+      cwd: options.cwd,
+      env: options.env
+    });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolve({
+        exitCode: code ?? 1,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
+async function createCompletedDecisionRecoverySetup(options?: { includeLeftoverLease?: boolean }) {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-decision-status-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+  };
+  const assignmentId = snapshot.assignments[0]!.id;
+  const startedAt = new Date(Date.now() - 120_000).toISOString();
+  const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const completedRecord = {
+    assignmentId,
+    state: "completed",
+    adapterData: {
+      nativeRunId: "thread-cli-completed-decision"
+    },
+    startedAt,
+    completedAt,
+    outcomeKind: "decision",
+    summary: "Need operator confirmation before proceeding.",
+    terminalOutcome: {
+      kind: "decision",
+      decision: {
+        decisionId: "decision-cli-completed-status",
+        requesterId: "codex",
+        blockerSummary: "Need operator confirmation before proceeding.",
+        options: [
+          { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+          { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+        ],
+        recommendedOption: "wait",
+        state: "open",
+        createdAt: completedAt
+      }
+    }
+  };
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  if (options?.includeLeftoverLease) {
+    const leftoverLease = {
+      assignmentId,
+      state: "running",
+      adapterData: {
+        nativeRunId: "thread-cli-leftover-decision-lease"
+      },
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    };
+    await writeFile(
+      join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+      JSON.stringify(leftoverLease, null, 2),
+      "utf8"
+    );
+  }
+
+  return { projectRoot, cliPath, runtimeDir, assignmentId, completedAt };
+}
+
+async function createCompletedResultRecoverySetup() {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-result-status-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+  };
+  const assignmentId = snapshot.assignments[0]!.id;
+  const startedAt = new Date(Date.now() - 120_000).toISOString();
+  const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const completedRecord = {
+    assignmentId,
+    state: "completed",
+    adapterData: {
+      nativeRunId: "thread-cli-completed-result"
+    },
+    startedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered completed host run for command recovery.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "result-cli-completed-recovery",
+        assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered completed host run for command recovery.",
+        changedFiles: ["src/cli/ctx.ts"],
+        createdAt: completedAt
+      }
+    }
+  };
+  const leftoverLease = {
+    assignmentId,
+    state: "running",
+    adapterData: {
+      nativeRunId: "thread-cli-leftover-result-lease"
+    },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+    JSON.stringify(leftoverLease, null, 2),
+    "utf8"
+  );
+
+  return { projectRoot, cliPath, runtimeDir, assignmentId, completedAt };
+}
+
+async function countRecoveredOutcomeEvents(
+  runtimeDir: string,
+  assignmentId: string,
+  eventType: "result.submitted" | "decision.created"
+): Promise<number> {
+  const events = (await readFile(join(runtimeDir, "runtime", "events.ndjson"), "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      type: string;
+      payload: { result?: { assignmentId: string }; decision?: { assignmentId: string } };
+    });
+
+  if (eventType === "result.submitted") {
+    return events.filter(
+      (event) => event.type === "result.submitted" && event.payload.result?.assignmentId === assignmentId
+    ).length;
+  }
+
+  return events.filter(
+    (event) => event.type === "decision.created" && event.payload.decision?.assignmentId === assignmentId
+  ).length;
+}
+
+async function countQueuedAssignmentUpdatedEvents(runtimeDir: string, assignmentId: string): Promise<number> {
+  const events = (await readFile(join(runtimeDir, "runtime", "events.ndjson"), "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      type: string;
+      payload: { assignmentId?: string; patch?: { state?: string } };
+    });
+
+  return events.filter(
+    (event) =>
+      event.type === "assignment.updated" &&
+      event.payload.assignmentId === assignmentId &&
+      event.payload.patch?.state === "queued"
+  ).length;
+}
 
 test("ctx init, status, resume, run, inspect, and doctor work against persisted runtime state", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-"));
@@ -121,6 +341,78 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   assert.match(telemetry, /"inputTokens":44/);
 });
 
+test("ctx run exits 0 and records a decision outcome from a fixture", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-decision-run-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const fixturePath = join(projectRoot, "codex-decision-fixture.json");
+
+  await writeFile(
+    fixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [{ type: "thread.started", thread_id: "thread-cli-decision-1" }],
+        lastMessage: {
+          outcomeType: "decision",
+          resultStatus: "",
+          resultSummary: "",
+          changedFiles: [],
+          blockerSummary: "Need operator guidance before proceeding.",
+          decisionOptions: [
+            { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+            { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+          ],
+          recommendedOption: "wait"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const env = {
+    ...process.env,
+    COORTEX_CODEX_EXEC_FIXTURE: fixturePath
+  };
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+
+  const run = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot,
+    env
+  });
+  assert.equal(run.exitCode, 0);
+  assert.match(run.stdout, /Executed assignment/);
+  assert.match(run.stdout, /Host run: thread-cli-decision-1/);
+  assert.match(run.stdout, /Decision: Need operator guidance before proceeding\./);
+  assert.match(run.stdout, /Recommended option: wait/);
+
+  const snapshot = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{
+      assignmentId: string;
+      blockerSummary: string;
+      recommendedOption: string;
+      state: string;
+    }>;
+    status: { activeAssignmentIds: string[] };
+  };
+
+  assert.equal(snapshot.assignments[0]?.state, "blocked");
+  assert.equal(snapshot.assignments[0]?.id, snapshot.status.activeAssignmentIds[0]);
+  assert.equal(snapshot.decisions.length, 1);
+  assert.equal(snapshot.decisions[0]?.assignmentId, snapshot.assignments[0]?.id);
+  assert.equal(snapshot.decisions[0]?.state, "open");
+  assert.equal(snapshot.decisions[0]?.blockerSummary, "Need operator guidance before proceeding.");
+  assert.equal(snapshot.decisions[0]?.recommendedOption, "wait");
+});
+
 test("ctx status and resume recover from snapshot when the event log is missing", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-snapshot-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -181,6 +473,11 @@ test("ctx status reconciles stale host run leases before reporting active work",
     JSON.stringify(staleRecord, null, 2),
     "utf8"
   );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
 
   const status = await execFileAsync(process.execPath, [cliPath, "status"], {
     cwd: projectRoot
@@ -194,6 +491,509 @@ test("ctx status reconciles stale host run leases before reporting active work",
   assert.match(status.stderr, /WARNING stale-run-reconciled/);
   assert.match(status.stdout, new RegExp(`- ${assignmentId} queued `));
   assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
+test("ctx status recovers a completed host run and clears a leftover lease", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-status-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    results: Array<{ status: string; summary: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+  const assignmentId = snapshot.assignments[0]!.id;
+  const startedAt = new Date(Date.now() - 120_000).toISOString();
+  const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const completedRecord = {
+    assignmentId,
+    state: "completed",
+    adapterData: {
+      nativeRunId: "thread-cli-completed-status"
+    },
+    startedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered completed host run for ctx status.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "result-cli-completed-status",
+        assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered completed host run for ctx status.",
+        changedFiles: ["src/cli/ctx.ts"],
+        createdAt: completedAt
+      }
+    }
+  };
+  const leftoverLease = {
+    assignmentId,
+    state: "running",
+    adapterData: {
+      nativeRunId: "thread-cli-leftover-lease"
+    },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+    JSON.stringify(leftoverLease, null, 2),
+    "utf8"
+  );
+
+  const status = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+
+  assert.match(status.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(status.stderr, /WARNING stale-run-reconciled/);
+  assert.match(status.stdout, /Active assignments: 0/);
+  assert.match(status.stdout, /Results: 1/);
+  assert.match(status.stdout, /Open decisions: 0/);
+  assert.match(status.stdout, /Objective: Await the next assignment\./);
+  assert.doesNotMatch(status.stdout, new RegExp(`- ${assignmentId} queued `));
+  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
+  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.equal(repairedSnapshot.results.length, 1);
+  assert.deepEqual(repairedSnapshot.results[0], {
+    resultId: "result-cli-completed-status",
+    assignmentId,
+    producerId: "codex",
+    status: "completed",
+    summary: "Recovered completed host run for ctx status.",
+    changedFiles: ["src/cli/ctx.ts"],
+    createdAt: completedAt
+  });
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+
+  const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
+
+  const secondStatus = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const secondSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+
+  assert.doesNotMatch(secondStatus.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(secondStatus.stderr, /WARNING stale-run-reconciled/);
+  assert.match(secondStatus.stdout, /Active assignments: 0/);
+  assert.match(secondStatus.stdout, /Results: 1/);
+  assert.match(secondStatus.stdout, /Open decisions: 0/);
+  assert.equal(secondSnapshot.assignments[0]?.state, "completed");
+  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, []);
+  assert.equal(secondSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.equal(secondSnapshot.results.length, 1);
+  assert.deepEqual(secondSnapshot.results[0], {
+    resultId: "result-cli-completed-status",
+    assignmentId,
+    producerId: "codex",
+    status: "completed",
+    summary: "Recovered completed host run for ctx status.",
+    changedFiles: ["src/cli/ctx.ts"],
+    createdAt: completedAt
+  });
+  const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
+  assert.equal(firstRecoveryEventCount, 1);
+  assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
+test("ctx resume recovers a completed host run before reporting no active assignment", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
+    await createCompletedResultRecoverySetup();
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "resume"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /No active assignment is available to resume\./);
+      return true;
+    }
+  );
+
+  const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
+  const firstQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "resume"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /No active assignment is available to resume\./);
+      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
+      assert.doesNotMatch(error.stderr ?? "", /WARNING stale-run-reconciled/);
+      return true;
+    }
+  );
+
+  const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
+  const secondQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+  assert.equal(firstRecoveryEventCount, 1);
+  assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+  assert.equal(firstQueuedTransitionCount, 0);
+  assert.equal(secondQueuedTransitionCount, firstQueuedTransitionCount);
+
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+
+  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
+  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.equal(repairedSnapshot.results.length, 1);
+  assert.deepEqual(repairedSnapshot.results[0], {
+    resultId: "result-cli-completed-recovery",
+    assignmentId,
+    producerId: "codex",
+    status: "completed",
+    summary: "Recovered completed host run for command recovery.",
+    changedFiles: ["src/cli/ctx.ts"],
+    createdAt: completedAt
+  });
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
+test("ctx run recovers a completed host run before reporting no active assignment", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
+    await createCompletedResultRecoverySetup();
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "run"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /No active assignment is available to run\./);
+      return true;
+    }
+  );
+
+  const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
+  const firstQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "run"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /No active assignment is available to run\./);
+      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
+      assert.doesNotMatch(error.stderr ?? "", /WARNING stale-run-reconciled/);
+      return true;
+    }
+  );
+
+  const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
+  const secondQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+  assert.equal(firstRecoveryEventCount, 1);
+  assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+  assert.equal(firstQueuedTransitionCount, 0);
+  assert.equal(secondQueuedTransitionCount, firstQueuedTransitionCount);
+
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+
+  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
+  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.equal(repairedSnapshot.results.length, 1);
+  assert.deepEqual(repairedSnapshot.results[0], {
+    resultId: "result-cli-completed-recovery",
+    assignmentId,
+    producerId: "codex",
+    status: "completed",
+    summary: "Recovered completed host run for command recovery.",
+    changedFiles: ["src/cli/ctx.ts"],
+    createdAt: completedAt
+  });
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
+test("ctx status recovers a completed host decision before further action", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } = await createCompletedDecisionRecoverySetup({
+    includeLeftoverLease: true
+  });
+
+  const status = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; blockerSummary: string; state: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+
+  assert.match(status.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(status.stderr, /WARNING stale-run-reconciled/);
+  assert.match(status.stdout, /Active assignments: 1/);
+  assert.match(status.stdout, /Results: 0/);
+  assert.match(status.stdout, /Open decisions: 1/);
+  assert.match(status.stdout, new RegExp(`- ${assignmentId} blocked `));
+  assert.equal(repairedSnapshot.assignments[0]?.state, "blocked");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.equal(repairedSnapshot.decisions.length, 1);
+  assert.deepEqual(repairedSnapshot.decisions[0], {
+    decisionId: "decision-cli-completed-status",
+    assignmentId,
+    requesterId: "codex",
+    blockerSummary: "Need operator confirmation before proceeding.",
+    options: [
+      { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+      { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+    ],
+    recommendedOption: "wait",
+    state: "open",
+    createdAt: completedAt
+  });
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+
+  const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created");
+
+  const secondStatus = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const secondSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; blockerSummary: string; state: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+
+  assert.doesNotMatch(secondStatus.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(secondStatus.stderr, /WARNING stale-run-reconciled/);
+  assert.match(secondStatus.stdout, /Active assignments: 1/);
+  assert.match(secondStatus.stdout, /Results: 0/);
+  assert.match(secondStatus.stdout, /Open decisions: 1/);
+  assert.match(secondStatus.stdout, new RegExp(`- ${assignmentId} blocked `));
+  assert.equal(secondSnapshot.assignments[0]?.state, "blocked");
+  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.equal(secondSnapshot.decisions.length, 1);
+  assert.deepEqual(secondSnapshot.decisions[0], {
+    decisionId: "decision-cli-completed-status",
+    assignmentId,
+    requesterId: "codex",
+    blockerSummary: "Need operator confirmation before proceeding.",
+    options: [
+      { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+      { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+    ],
+    recommendedOption: "wait",
+    state: "open",
+    createdAt: completedAt
+  });
+  const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created");
+  assert.equal(firstRecoveryEventCount, 1);
+  assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
+test("ctx resume recovers a completed host decision before generating a brief", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } = await createCompletedDecisionRecoverySetup();
+
+  const resume = await execFileAsync(process.execPath, [cliPath, "resume"], {
+    cwd: projectRoot
+  });
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; state: string }>;
+  };
+
+  assert.match(resume.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(resume.stderr, /WARNING stale-run-reconciled/);
+  assert.match(resume.stdout, /Recovery brief generated/);
+  assert.match(resume.stdout, /Resolve decision/);
+  assert.equal(repairedSnapshot.assignments[0]?.id, assignmentId);
+  assert.equal(repairedSnapshot.assignments[0]?.state, "blocked");
+  assert.equal(repairedSnapshot.decisions.length, 1);
+  assert.deepEqual(repairedSnapshot.decisions[0], {
+    decisionId: "decision-cli-completed-status",
+    assignmentId,
+    requesterId: "codex",
+    blockerSummary: "Need operator confirmation before proceeding.",
+    options: [
+      { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+      { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+    ],
+    recommendedOption: "wait",
+    state: "open",
+    createdAt: completedAt
+  });
+
+  const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created");
+  const firstQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+
+  const secondResume = await execFileAsync(process.execPath, [cliPath, "resume"], {
+    cwd: projectRoot
+  });
+  const secondSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; state: string }>;
+  };
+
+  assert.doesNotMatch(secondResume.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(secondResume.stderr, /WARNING stale-run-reconciled/);
+  assert.match(secondResume.stdout, /Recovery brief generated/);
+  assert.match(secondResume.stdout, /Resolve decision/);
+  assert.equal(secondSnapshot.assignments[0]?.id, assignmentId);
+  assert.equal(secondSnapshot.assignments[0]?.state, "blocked");
+  assert.equal(secondSnapshot.decisions.length, 1);
+  assert.deepEqual(secondSnapshot.decisions[0], {
+    decisionId: "decision-cli-completed-status",
+    assignmentId,
+    requesterId: "codex",
+    blockerSummary: "Need operator confirmation before proceeding.",
+    options: [
+      { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+      { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+    ],
+    recommendedOption: "wait",
+    state: "open",
+    createdAt: completedAt
+  });
+  const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created");
+  const secondQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+  assert.equal(firstRecoveryEventCount, 1);
+  assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+  assert.equal(firstQueuedTransitionCount, 0);
+  assert.equal(secondQueuedTransitionCount, firstQueuedTransitionCount);
+});
+
+test("ctx run recovers a completed host decision before refusing rerun", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } = await createCompletedDecisionRecoverySetup();
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "run"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /is blocked and cannot be run/);
+      return true;
+    }
+  );
+
+  const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created");
+  const firstQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "run"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /is blocked and cannot be run/);
+      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
+      assert.doesNotMatch(error.stderr ?? "", /WARNING stale-run-reconciled/);
+      return true;
+    }
+  );
+
+  const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created");
+  const secondQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
+  assert.equal(firstRecoveryEventCount, 1);
+  assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+  assert.equal(firstQueuedTransitionCount, 0);
+  assert.equal(secondQueuedTransitionCount, firstQueuedTransitionCount);
+
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; state: string }>;
+    status: { activeAssignmentIds: string[] };
+  };
+  assert.equal(repairedSnapshot.assignments[0]?.state, "blocked");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.equal(repairedSnapshot.decisions.length, 1);
+  assert.deepEqual(repairedSnapshot.decisions[0], {
+    decisionId: "decision-cli-completed-status",
+    assignmentId,
+    requesterId: "codex",
+    blockerSummary: "Need operator confirmation before proceeding.",
+    options: [
+      { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+      { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+    ],
+    recommendedOption: "wait",
+    state: "open",
+    createdAt: completedAt
+  });
 });
 
 test("ctx status, resume, and doctor salvage malformed logs without rewriting them", async () => {
@@ -320,6 +1120,12 @@ test("ctx run exits non-zero when it persists a failed result", async () => {
     cwd: projectRoot,
     env
   });
+  const snapshotBeforeRun = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+  };
+  const assignmentId = snapshotBeforeRun.assignments[0]!.id;
 
   await assert.rejects(
     execFileAsync(process.execPath, [cliPath, "run"], {
@@ -332,6 +1138,32 @@ test("ctx run exits non-zero when it persists a failed result", async () => {
       return true;
     }
   );
+
+  const snapshot = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{ resultId: string; assignmentId: string; status: string }>;
+    status: { activeAssignmentIds: string[] };
+  };
+  const runRecord = JSON.parse(
+    await readFile(
+      join(projectRoot, ".coortex", "adapters", "codex", "runs", `${assignmentId}.json`),
+      "utf8"
+    )
+  ) as {
+    assignmentId: string;
+    resultStatus: string;
+    terminalOutcome?: { kind: string; result?: { status: string } };
+  };
+
+  assert.equal(snapshot.results.length, 1);
+  assert.equal(snapshot.results[0]?.assignmentId, assignmentId);
+  assert.equal(snapshot.results[0]?.status, "failed");
+  assert.deepEqual(snapshot.status.activeAssignmentIds, []);
+  assert.equal(runRecord.assignmentId, assignmentId);
+  assert.equal(runRecord.resultStatus, "failed");
+  assert.equal(runRecord.terminalOutcome?.kind, "result");
+  assert.equal(runRecord.terminalOutcome?.result?.status, "failed");
 });
 
 test("ctx init reports codex config conflicts by path without echoing file contents", async () => {
@@ -436,11 +1268,18 @@ test("ctx run refuses to rerun a blocked assignment with an unresolved decision"
     cwd: projectRoot,
     env
   });
+  const snapshotBeforeRun = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+  };
+  const assignmentId = snapshotBeforeRun.assignments[0]!.id;
 
-  const firstRun = await execFileAsync(process.execPath, [cliPath, "run"], {
+  const firstRun = await runCliCommand(cliPath, "run", {
     cwd: projectRoot,
     env
   });
+  assert.equal(firstRun.exitCode, 0);
   assert.match(firstRun.stdout, /Decision: Need operator guidance before proceeding\./);
 
   await assert.rejects(
@@ -458,9 +1297,15 @@ test("ctx run refuses to rerun a blocked assignment with an unresolved decision"
   const snapshot = JSON.parse(
     await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
   ) as {
-    decisions: Array<{ blockerSummary: string }>;
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ assignmentId: string; blockerSummary: string; state: string }>;
+    status: { activeAssignmentIds: string[] };
   };
+  assert.equal(snapshot.assignments[0]?.state, "blocked");
+  assert.deepEqual(snapshot.status.activeAssignmentIds, [assignmentId]);
   assert.equal(snapshot.decisions.length, 1);
+  assert.equal(snapshot.decisions[0]?.assignmentId, assignmentId);
+  assert.equal(snapshot.decisions[0]?.state, "open");
 });
 
 test("ctx commands honor the current bypass env var after init", async () => {

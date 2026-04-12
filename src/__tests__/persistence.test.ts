@@ -651,12 +651,16 @@ test("runtime store falls back to snapshot when a salvaged suffix no longer repl
   const lines = (await readFile(store.eventsPath, "utf8")).split("\n").filter(Boolean);
   const corrupted = `${lines.slice(0, 2).join("\n")}\n{"broken":\n${lines.at(-1)}\n`;
   await writeFile(store.eventsPath, `${corrupted}`, "utf8");
+  const snapshotBefore = await readFile(store.snapshotPath, "utf8");
+  const eventsBefore = await readFile(store.eventsPath, "utf8");
 
-  const recovered = await store.loadProjectionWithRecovery();
+  const recovered = await store.syncSnapshotFromEventsWithRecovery();
 
   assert.equal(recovered.projection.decisions.size, 0);
   assert.deepEqual(recovered.projection.status.activeAssignmentIds, [bootstrap.initialAssignmentId]);
   assert.match(recovered.warning ?? "", /fell back to .*snapshot\.json/i);
+  assert.equal(await readFile(store.snapshotPath, "utf8"), snapshotBefore);
+  assert.equal(await readFile(store.eventsPath, "utf8"), eventsBefore);
 });
 
 test("runtime store preserves the snapshot when the event log has no replayable lines", async () => {

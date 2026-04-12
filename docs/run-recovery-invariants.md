@@ -96,10 +96,12 @@ filesystem layout.
 For `inspect`, `status`, `resume`, and `run` reconciliation, the current
 effective host-run state follows these rules:
 
-1. A valid completed run record wins over active-lease metadata for the
-   same assignment, including malformed or stale leftover leases.
-2. Valid active-lease metadata wins over running or stale run-record
-   metadata.
+1. A completed run record with durable `terminalOutcome` data wins over
+   active-lease metadata for the same assignment, including malformed or
+   stale leftover leases.
+2. Valid active-lease metadata wins over stale run-record metadata,
+   including stale-completed records and running records whose lease
+   state is expired, missing, or invalid.
 3. A lease-less running record is treated as stale.
 4. A running record with a missing or invalid lease expiry is treated as
    stale.
@@ -166,19 +168,26 @@ instead of ignoring it as inert metadata.
 
 If a completed run record and a leftover lease both exist for the same
 assignment, the completed run record wins whether the leftover lease is
-still active, already expired, or malformed. Recovery must absorb the
-terminal outcome into runtime truth and then clear the leftover lease;
-it must not requeue the assignment or fall back to stale-run handling.
+still active, already expired, missing an expiry, invalid, or malformed.
+Recovery must absorb the terminal outcome into runtime truth and then
+clear the leftover lease; it must not requeue the assignment or fall
+back to stale-run handling.
 
 Completed-run reconciliation must be idempotent. Once the runtime has
 absorbed the terminal result or decision, later commands must not
 replay it again.
 
+Completed run records without durable `terminalOutcome` data are
+degraded metadata only. `inspect` may surface them, but `status`,
+`resume`, and `run` must not treat them as recoverable terminal
+outcomes. They do not outrank a valid active lease and do not reconcile
+runtime truth on their own.
+
 ### Command consistency
 
 - `ctx status`
-  Must show the same stale-run-reconciled state that `ctx resume` and
-  `ctx run` would see.
+  Must show the same reconciled state that `ctx resume` and `ctx run`
+  would see, including stale-run and completed-run reconciliation.
 
 - `ctx resume`
   Must build its brief from reconciled runtime state.
@@ -241,14 +250,32 @@ rely on ad-hoc regressions alone.
 The test suite should explicitly cover:
 
 - valid active lease
+- valid active lease blocks `ctx run`
+- valid active lease overrides stale run-record metadata
+- `ctx run` narrows multi-active execution to the runnable assignment
+- lease removed before completed record becomes visible
 - expired active lease
 - missing lease expiry
 - invalid lease expiry
 - malformed lease with no run record
 - malformed lease with completed run record
 - lease-only stale state
+- stale reconciliation clears the lease artifact
+- stale-run reconciliation is idempotent across `status`, `resume`, and
+  `run`
+- multiple stale leases preserve latest status updates
 - completed record with leftover lease recovered into runtime truth
+- completed record with malformed leftover lease recovered into runtime
+  truth
+- durable completed decision recovered into runtime truth
+- durable completed decision recovered at the command surface
+- stale and completed reconciliation are visible through the command
+  surfaces that own them
+- completed-run recovery is idempotent for results and decisions
+- outcome-less completed metadata does not drive completed-run
+  reconciliation
 - concurrent run attempts
+- heartbeat persistence failure ends the run
 - queued heartbeat after completion
 - claim-time metadata failure
 - final metadata persistence degradation

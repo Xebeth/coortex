@@ -61,7 +61,7 @@ test("host run store uses adapter-provided artifact roles instead of codex paths
     state: "running",
     startedAt: "2026-04-11T10:00:00.000Z",
     heartbeatAt: "2026-04-11T10:00:00.000Z",
-    leaseExpiresAt: "2026-04-11T10:00:30.000Z"
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
   };
 
   await runStore.claim(runningRecord);
@@ -114,7 +114,17 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
     completedAt: "2026-04-11T10:01:00.000Z",
     outcomeKind: "result",
     resultStatus: "completed",
-    summary
+    summary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "custom-host",
+        status: "completed",
+        summary,
+        changedFiles: [],
+        createdAt: "2026-04-11T10:01:00.000Z"
+      }
+    }
   });
   interface InspectionMatrixCase {
     name: string;
@@ -123,16 +133,147 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
     leaseRecord?: HostRunRecord;
     leaseContent?: string;
     inspectLastRun?: boolean;
+    lastRunRecord?: HostRunRecord;
+    lastRunLeaseRecord?: HostRunRecord;
     expected: Partial<HostRunRecord> & Pick<HostRunRecord, "assignmentId" | "state">;
   }
 
   const cases: InspectionMatrixCase[] = [
+    {
+      name: "expired lease-backed running record becomes stale completed state",
+      assignmentId: "assignment-expired-lease",
+      leaseRecord: runningRecord("assignment-expired-lease", "2000-01-01T00:00:00.000Z"),
+      expected: {
+        ...runningRecord("assignment-expired-lease", "2000-01-01T00:00:00.000Z"),
+        state: "completed",
+        staleReasonCode: "expired_lease",
+        staleReason: "Run lease expired at 2000-01-01T00:00:00.000Z."
+      }
+    },
+    {
+      name: "missing-expiry lease-backed running record becomes stale completed state",
+      assignmentId: "assignment-missing-expiry-lease",
+      leaseRecord: {
+        assignmentId: "assignment-missing-expiry-lease",
+        state: "running",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        heartbeatAt: "2026-04-11T10:00:00.000Z"
+      },
+      expected: {
+        assignmentId: "assignment-missing-expiry-lease",
+        state: "completed",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        heartbeatAt: "2026-04-11T10:00:00.000Z",
+        staleReasonCode: "missing_lease_expiry",
+        staleReason: "Run record remained in running state without a lease expiry."
+      }
+    },
+    {
+      name: "invalid-expiry lease-backed running record becomes stale completed state",
+      assignmentId: "assignment-invalid-expiry-lease",
+      leaseRecord: {
+        ...runningRecord("assignment-invalid-expiry-lease"),
+        leaseExpiresAt: "not-a-timestamp"
+      },
+      expected: {
+        ...runningRecord("assignment-invalid-expiry-lease"),
+        leaseExpiresAt: "not-a-timestamp",
+        state: "completed",
+        staleReasonCode: "invalid_lease_expiry",
+        staleReason: "Run record has an invalid lease expiry: not-a-timestamp."
+      }
+    },
     {
       name: "completed run record wins over a leftover active lease for the same assignment",
       assignmentId: "assignment-active-lease",
       runRecord: completedRecord("assignment-active-lease", "Older completed record"),
       leaseRecord: runningRecord("assignment-active-lease"),
       expected: completedRecord("assignment-active-lease", "Older completed record")
+    },
+    {
+      name: "completed run record wins over a leftover expired lease for the same assignment",
+      assignmentId: "assignment-completed-over-expired-lease",
+      runRecord: completedRecord("assignment-completed-over-expired-lease", "Completed record wins"),
+      leaseRecord: runningRecord(
+        "assignment-completed-over-expired-lease",
+        "2000-01-01T00:00:00.000Z"
+      ),
+      expected: completedRecord("assignment-completed-over-expired-lease", "Completed record wins")
+    },
+    {
+      name: "completed run record wins over a leftover missing-expiry lease for the same assignment",
+      assignmentId: "assignment-completed-over-missing-expiry-lease",
+      runRecord: completedRecord(
+        "assignment-completed-over-missing-expiry-lease",
+        "Completed record wins"
+      ),
+      leaseRecord: {
+        assignmentId: "assignment-completed-over-missing-expiry-lease",
+        state: "running",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        heartbeatAt: "2026-04-11T10:00:00.000Z"
+      },
+      expected: completedRecord(
+        "assignment-completed-over-missing-expiry-lease",
+        "Completed record wins"
+      )
+    },
+    {
+      name: "completed run record wins over a leftover invalid-expiry lease for the same assignment",
+      assignmentId: "assignment-completed-over-invalid-expiry-lease",
+      runRecord: completedRecord(
+        "assignment-completed-over-invalid-expiry-lease",
+        "Completed record wins"
+      ),
+      leaseRecord: {
+        ...runningRecord("assignment-completed-over-invalid-expiry-lease"),
+        leaseExpiresAt: "not-a-timestamp"
+      },
+      expected: completedRecord("assignment-completed-over-invalid-expiry-lease", "Completed record wins")
+    },
+    {
+      name: "valid lease overrides expired running metadata for the same assignment",
+      assignmentId: "assignment-fresh-over-expired",
+      runRecord: runningRecord("assignment-fresh-over-expired", "2000-01-01T00:00:00.000Z"),
+      leaseRecord: runningRecord("assignment-fresh-over-expired"),
+      expected: runningRecord("assignment-fresh-over-expired")
+    },
+    {
+      name: "valid lease overrides missing-expiry running metadata for the same assignment",
+      assignmentId: "assignment-fresh-over-missing-expiry",
+      runRecord: {
+        assignmentId: "assignment-fresh-over-missing-expiry",
+        state: "running",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        heartbeatAt: "2026-04-11T10:00:00.000Z"
+      },
+      leaseRecord: runningRecord("assignment-fresh-over-missing-expiry"),
+      expected: runningRecord("assignment-fresh-over-missing-expiry")
+    },
+    {
+      name: "valid lease overrides invalid-expiry running metadata for the same assignment",
+      assignmentId: "assignment-fresh-over-invalid-expiry",
+      runRecord: {
+        ...runningRecord("assignment-fresh-over-invalid-expiry"),
+        leaseExpiresAt: "not-a-timestamp"
+      },
+      leaseRecord: runningRecord("assignment-fresh-over-invalid-expiry"),
+      expected: runningRecord("assignment-fresh-over-invalid-expiry")
+    },
+    {
+      name: "valid lease overrides stale-completed metadata without a durable terminal outcome",
+      assignmentId: "assignment-fresh-over-stale-completed",
+      runRecord: {
+        assignmentId: "assignment-fresh-over-stale-completed",
+        state: "completed",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        completedAt: "2026-04-11T10:01:00.000Z",
+        staleAt: "2026-04-11T10:01:00.000Z",
+        staleReasonCode: "expired_lease",
+        staleReason: "Run lease expired at 2000-01-01T00:00:00.000Z."
+      },
+      leaseRecord: runningRecord("assignment-fresh-over-stale-completed"),
+      expected: runningRecord("assignment-fresh-over-stale-completed")
     },
     {
       name: "malformed lease without a durable run record becomes stale running state",
@@ -167,9 +308,32 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
       name: "last-run inspection uses the same precedence as assignment-specific inspection",
       assignmentId: "assignment-last-run",
       inspectLastRun: true,
-      runRecord: completedRecord("assignment-last-run", "Older completed record"),
+      runRecord: completedRecord("assignment-last-run", "Assignment-specific completed record"),
       leaseRecord: runningRecord("assignment-last-run"),
-      expected: completedRecord("assignment-last-run", "Older completed record")
+      lastRunRecord: {
+        assignmentId: "assignment-last-run-pointer",
+        state: "running",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        heartbeatAt: "2026-04-11T10:00:00.000Z",
+        leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+        adapterData: { nativeRunId: "native-assignment-last-run-pointer" }
+      },
+      lastRunLeaseRecord: {
+        assignmentId: "assignment-last-run-pointer",
+        state: "running",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        heartbeatAt: "2026-04-11T10:00:00.000Z",
+        leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+        adapterData: { nativeRunId: "native-assignment-last-run-pointer" }
+      },
+      expected: {
+        assignmentId: "assignment-last-run-pointer",
+        state: "running",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        heartbeatAt: "2026-04-11T10:00:00.000Z",
+        leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+        adapterData: { nativeRunId: "native-assignment-last-run-pointer" }
+      }
     }
   ] as const;
 
@@ -180,7 +344,6 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
           artifacts.runRecordPath(testCase.assignmentId),
           testCase.runRecord
         );
-        await store.writeJsonArtifact(artifacts.lastRunPath(), testCase.runRecord);
       }
       if (testCase.leaseRecord) {
         await store.writeJsonArtifact(
@@ -193,13 +356,21 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
           artifacts.runLeasePath(testCase.assignmentId),
           testCase.leaseContent
         );
-        if (!testCase.runRecord) {
-          await store.writeJsonArtifact(artifacts.lastRunPath(), {
-            assignmentId: testCase.assignmentId,
-            state: "running",
-            startedAt: "2026-04-11T10:00:00.000Z"
-          });
-        }
+      }
+      if (testCase.lastRunRecord) {
+        await store.writeJsonArtifact(
+          artifacts.runRecordPath(testCase.lastRunRecord.assignmentId),
+          testCase.lastRunRecord
+        );
+        await store.writeJsonArtifact(artifacts.lastRunPath(), testCase.lastRunRecord);
+      } else if (testCase.runRecord) {
+        await store.writeJsonArtifact(artifacts.lastRunPath(), testCase.runRecord);
+      }
+      if (testCase.lastRunLeaseRecord) {
+        await store.writeJsonArtifact(
+          artifacts.runLeasePath(testCase.lastRunLeaseRecord.assignmentId),
+          testCase.lastRunLeaseRecord
+        );
       }
 
       const inspected = testCase.inspectLastRun
@@ -212,6 +383,10 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
 
       await store.deleteArtifact(artifacts.runRecordPath(testCase.assignmentId));
       await store.deleteArtifact(artifacts.runLeasePath(testCase.assignmentId));
+      if (testCase.lastRunRecord) {
+        await store.deleteArtifact(artifacts.runRecordPath(testCase.lastRunRecord.assignmentId));
+        await store.deleteArtifact(artifacts.runLeasePath(testCase.lastRunRecord.assignmentId));
+      }
       await store.deleteArtifact(artifacts.lastRunPath());
     });
   }
@@ -290,4 +465,65 @@ test("host run store clears the lease when final non-running persistence degrade
 
   assert.match(warning ?? "", /final run record could not be persisted/i);
   assert.equal(await store.readTextArtifact(artifacts.runLeasePath("assignment-warning"), "lease"), undefined);
+});
+
+test("host run store removes the lease before a completed record becomes visible", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-ordering",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+  const completedRecord: HostRunRecord = {
+    assignmentId: "assignment-ordering",
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Completed ordering check.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "custom-host",
+        status: "completed",
+        summary: "Completed ordering check.",
+        changedFiles: [],
+        createdAt: "2026-04-11T10:01:00.000Z"
+      }
+    }
+  };
+
+  await runStore.claim(runningRecord);
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  let observedCompletedWrite = false;
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (
+      relativePath === artifacts.runRecordPath("assignment-ordering") &&
+      typeof value === "object" &&
+      value !== null &&
+      "state" in value &&
+      value.state === "completed"
+    ) {
+      observedCompletedWrite = true;
+      assert.equal(
+        await store.readTextArtifact(artifacts.runLeasePath("assignment-ordering"), "lease"),
+        undefined
+      );
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  await runStore.write(completedRecord);
+
+  assert.equal(observedCompletedWrite, true);
 });
