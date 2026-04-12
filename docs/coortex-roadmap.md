@@ -32,13 +32,19 @@ Completed milestone summaries live under:
 ### Phase 3 — Workflow modules
 
 Objective:
-Move sequencing policy into explicit workflow modules.
+Move sequencing policy into explicit workflow modules while keeping
+workflow progress runtime-owned.
+
+Detailed target:
+- `docs/plans/milestone-3-workflow-modules.md`
 
 Deliver:
-- `plan`
-- `review`
-- `verify`
-- additional workflow modules as needed
+- typed workflow contract and built-in registry
+- built-in default workflow sequence
+- dedicated runtime-owned workflow progress record
+- evidence-gated `plan`, `review`, and `verify` modules
+- workflow-aware `status`, `resume`, and `inspect` surfaces
+- no richer workflow UI or full verification subsystem yet
 
 The runtime remains authoritative.
 
@@ -64,13 +70,15 @@ Deliver:
 ### Phase 5 — Verification and Review
 
 Objective:
-Make completion criteria explicit and durable.
+Extend Milestone 3 workflow gates into an explicit and durable
+verification subsystem.
 
 Deliver:
 - verification requirement model
 - evidence storage
 - completion gating
 - review-oriented result states
+- waivers or override records
 - verification telemetry
 
 ### Phase 6 — Guidance and Artifact Store
