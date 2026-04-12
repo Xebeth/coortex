@@ -9,11 +9,14 @@ export function selectAuthoritativeRunRecord(
   runRecord: HostRunRecord | undefined,
   leaseRecord: HostRunRecord | undefined
 ): HostRunRecord | undefined {
-  if (runRecord?.state === "completed") {
+  if (isTerminalCompletedRunRecord(runRecord)) {
     return runRecord;
   }
   if (leaseRecord?.state === "running") {
     return leaseRecord;
+  }
+  if (runRecord?.state === "completed") {
+    return runRecord;
   }
   if (runRecord?.state === "running" && !leaseRecord) {
     return {
@@ -29,6 +32,12 @@ export function selectAuthoritativeRunRecord(
   return leaseRecord;
 }
 
+function isTerminalCompletedRunRecord(
+  record: HostRunRecord | undefined
+): record is HostRunRecord & { state: "completed"; terminalOutcome: NonNullable<HostRunRecord["terminalOutcome"]> } {
+  return record?.state === "completed" && Boolean(record.terminalOutcome);
+}
+
 export function isRunLeaseExpired(record: HostRunRecord): boolean {
   if (record.state !== "running") {
     return false;
@@ -41,6 +50,18 @@ export function isRunLeaseExpired(record: HostRunRecord): boolean {
     return true;
   }
   return leaseExpiry <= Date.now();
+}
+
+export function describeStaleRunReasonCode(
+  record: HostRunRecord
+): NonNullable<HostRunRecord["staleReasonCode"]> {
+  if (!record.leaseExpiresAt) {
+    return "missing_lease_expiry";
+  }
+  if (!Number.isNaN(Date.parse(record.leaseExpiresAt))) {
+    return "expired_lease";
+  }
+  return "invalid_lease_expiry";
 }
 
 export function describeStaleRunReason(record: HostRunRecord): string {

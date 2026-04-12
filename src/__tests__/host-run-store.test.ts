@@ -287,6 +287,28 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
       }
     },
     {
+      name: "parsed empty-object lease without a durable run record becomes stale running state",
+      assignmentId: "assignment-empty-object-lease",
+      leaseContent: "{}",
+      expected: {
+        assignmentId: "assignment-empty-object-lease",
+        state: "running",
+        staleReasonCode: "malformed_lease_artifact",
+        staleReason: "malformed lease file"
+      }
+    },
+    {
+      name: "parsed null lease without a durable run record becomes stale running state",
+      assignmentId: "assignment-null-lease",
+      leaseContent: "null",
+      expected: {
+        assignmentId: "assignment-null-lease",
+        state: "running",
+        staleReasonCode: "malformed_lease_artifact",
+        staleReason: "malformed lease file"
+      }
+    },
+    {
       name: "completed run record wins over malformed lease metadata",
       assignmentId: "assignment-completed-over-malformed",
       runRecord: completedRecord("assignment-completed-over-malformed", "Completed record wins"),
@@ -425,6 +447,48 @@ test("host run store clears abandoned running artifacts when claim metadata pers
   assert.equal(await store.readJsonArtifact(artifacts.runRecordPath("assignment-2"), "record"), undefined);
 });
 
+test("host run store surfaces lease cleanup failure during claim rollback", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  const originalDeleteArtifact = store.deleteArtifact.bind(store);
+  let writeCount = 0;
+  store.writeJsonArtifact = async (relativePath, value) => {
+    writeCount += 1;
+    if (writeCount === 2) {
+      throw new Error("simulated last-run write failure");
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+  store.deleteArtifact = async (relativePath) => {
+    if (relativePath === artifacts.runLeasePath("assignment-rollback-cleanup")) {
+      throw new Error("simulated lease cleanup failure");
+    }
+    return originalDeleteArtifact(relativePath);
+  };
+
+  await assert.rejects(
+    runStore.claim({
+      assignmentId: "assignment-rollback-cleanup",
+      state: "running",
+      startedAt: "2026-04-11T10:00:00.000Z",
+      heartbeatAt: "2026-04-11T10:00:00.000Z",
+      leaseExpiresAt: "2026-04-11T10:00:30.000Z"
+    }),
+    /rollback cleanup also failed/
+  );
+
+  assert.notEqual(
+    await store.readTextArtifact(artifacts.runLeasePath("assignment-rollback-cleanup"), "lease"),
+    undefined
+  );
+});
+
 test("host run store clears the lease when final non-running persistence degrades to a warning", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -465,6 +529,60 @@ test("host run store clears the lease when final non-running persistence degrade
 
   assert.match(warning ?? "", /final run record could not be persisted/i);
   assert.equal(await store.readTextArtifact(artifacts.runLeasePath("assignment-warning"), "lease"), undefined);
+});
+
+test("host run store escalates final persistence when lease cleanup fails", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-warning-cleanup",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+  const completedRecord: HostRunRecord = {
+    assignmentId: "assignment-warning-cleanup",
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "decision",
+    summary: "Need a human decision."
+  };
+
+  await runStore.claim(runningRecord);
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  const originalDeleteArtifact = store.deleteArtifact.bind(store);
+  let writes = 0;
+  store.writeJsonArtifact = async (relativePath, value) => {
+    writes += 1;
+    if (relativePath === artifacts.lastRunPath() && writes >= 2) {
+      throw new Error("simulated last-run persistence failure");
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+  store.deleteArtifact = async (relativePath) => {
+    if (relativePath === artifacts.runLeasePath("assignment-warning-cleanup")) {
+      throw new Error("simulated lease cleanup failure");
+    }
+    return originalDeleteArtifact(relativePath);
+  };
+
+  await assert.rejects(
+    runStore.persistWarning(completedRecord),
+    /active lease cleanup failed/
+  );
+
+  assert.notEqual(
+    await store.readTextArtifact(artifacts.runLeasePath("assignment-warning-cleanup"), "lease"),
+    undefined
+  );
 });
 
 test("host run store removes the lease before a completed record becomes visible", async () => {

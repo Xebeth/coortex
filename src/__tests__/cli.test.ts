@@ -478,6 +478,9 @@ test("ctx status reconciles stale host run leases before reporting active work",
     JSON.stringify(staleRecord, null, 2),
     "utf8"
   );
+  const eventsPath = join(runtimeDir, "runtime", "events.ndjson");
+  const originalEvents = await readFile(eventsPath, "utf8");
+  await writeFile(eventsPath, `${originalEvents.trimEnd()}\n{"broken":\n`, "utf8");
 
   const status = await execFileAsync(process.execPath, [cliPath, "status"], {
     cwd: projectRoot
@@ -489,6 +492,7 @@ test("ctx status reconciles stale host run leases before reporting active work",
   };
 
   assert.match(status.stderr, /WARNING stale-run-reconciled/);
+  assert.match(status.stderr, /WARNING event-log-salvaged .*skipped malformed line/);
   assert.match(status.stdout, new RegExp(`- ${assignmentId} queued `));
   assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
   await assert.rejects(
@@ -853,6 +857,140 @@ test("ctx status recovers a completed host decision before further action", asyn
   const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created");
   assert.equal(firstRecoveryEventCount, 1);
   assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
+test("ctx status does not reopen a resolved recovered decision", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } = await createCompletedDecisionRecoverySetup({
+    includeLeftoverLease: true
+  });
+
+  const firstStatus = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  assert.match(firstStatus.stderr, /WARNING completed-run-reconciled/);
+
+  const firstSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    sessionId: string;
+    assignments: Array<{ id: string; state: string; updatedAt: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; state: string }>;
+    status: {
+      activeMode: string;
+      currentObjective: string;
+      activeAssignmentIds: string[];
+      activeHost: string;
+      activeAdapter: string;
+      lastDurableOutputAt: string;
+      resumeReady: boolean;
+    };
+  };
+  const decisionId = firstSnapshot.decisions[0]!.decisionId;
+  const resolutionTimestamp = new Date().toISOString();
+  const existingEvents = (await readFile(join(runtimeDir, "runtime", "events.ndjson"), "utf8"))
+    .split("\n")
+    .filter(Boolean);
+  existingEvents.push(
+    JSON.stringify({
+      eventId: "decision-resolved-after-recovery",
+      sessionId: firstSnapshot.sessionId,
+      timestamp: resolutionTimestamp,
+      type: "decision.resolved",
+      payload: {
+        decisionId,
+        resolvedAt: resolutionTimestamp,
+        resolutionSummary: "Operator chose to continue after recovery."
+      }
+    }),
+    JSON.stringify({
+      eventId: "assignment-progressed-after-recovery",
+      sessionId: firstSnapshot.sessionId,
+      timestamp: resolutionTimestamp,
+      type: "assignment.updated",
+      payload: {
+        assignmentId,
+        patch: {
+          state: "in_progress",
+          updatedAt: resolutionTimestamp
+        }
+      }
+    }),
+    JSON.stringify({
+      eventId: "status-progressed-after-recovery",
+      sessionId: firstSnapshot.sessionId,
+      timestamp: resolutionTimestamp,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...firstSnapshot.status,
+          currentObjective: "Continue after the recovered decision was resolved.",
+          lastDurableOutputAt: resolutionTimestamp
+        }
+      }
+    })
+  );
+  await writeFile(join(runtimeDir, "runtime", "events.ndjson"), `${existingEvents.join("\n")}\n`, "utf8");
+  await writeFile(
+    join(runtimeDir, "runtime", "snapshot.json"),
+    JSON.stringify(
+      {
+        ...firstSnapshot,
+        assignments: firstSnapshot.assignments.map((assignment) =>
+          assignment.id === assignmentId
+            ? {
+                ...assignment,
+                state: "in_progress",
+                updatedAt: resolutionTimestamp
+              }
+            : assignment
+        ),
+        decisions: firstSnapshot.decisions.map((decision) =>
+          decision.decisionId === decisionId
+            ? {
+                ...decision,
+                state: "resolved",
+                resolvedAt: resolutionTimestamp,
+                resolutionSummary: "Operator chose to continue after recovery."
+              }
+            : decision
+        ),
+        status: {
+          ...firstSnapshot.status,
+          currentObjective: "Continue after the recovered decision was resolved.",
+          lastDurableOutputAt: resolutionTimestamp
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const secondStatus = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const secondSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; state: string; resolvedAt?: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+  };
+
+  assert.doesNotMatch(secondStatus.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(secondStatus.stderr, /WARNING stale-run-reconciled/);
+  assert.match(secondStatus.stdout, /Active assignments: 1/);
+  assert.match(secondStatus.stdout, /Open decisions: 0/);
+  assert.equal(secondSnapshot.assignments[0]?.state, "in_progress");
+  assert.equal(secondSnapshot.decisions.length, 1);
+  assert.equal(secondSnapshot.decisions[0]?.decisionId, decisionId);
+  assert.equal(secondSnapshot.decisions[0]?.state, "resolved");
+  assert.equal(secondSnapshot.decisions[0]?.resolvedAt, resolutionTimestamp);
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 1);
   await assert.rejects(
     readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
     /ENOENT/

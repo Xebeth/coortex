@@ -66,6 +66,9 @@ export async function reconcileActiveRuns(
   let effectiveProjection = projection;
   let changed = false;
   const activeLeases: string[] = [];
+  let queuedTransitions: Map<string, string[]> | undefined;
+  let staleStatusTransitions: Map<string, string[]> | undefined;
+  let handledCompletedRun = false;
 
   for (const assignmentId of projection.status.activeAssignmentIds) {
     const record = await adapter.inspectRun(store, assignmentId);
@@ -76,12 +79,15 @@ export async function reconcileActiveRuns(
     if (record.state === "completed") {
       if (record.staleReasonCode && !record.terminalOutcome) {
         changed = true;
-        const assignmentState = effectiveProjection.assignments.get(assignmentId)?.state;
-        const retryObjectivePrefix = `Retry assignment ${assignmentId}:`;
-        if (
-          assignmentState === "queued" &&
-          effectiveProjection.status.currentObjective.startsWith(retryObjectivePrefix)
-        ) {
+        queuedTransitions ??= await loadQueuedTransitions(store);
+        staleStatusTransitions ??= await loadStaleRecoveryStatusTransitions(store);
+        const staleRecoveryState = getStaleRunRecoveryState(
+          assignmentId,
+          record,
+          queuedTransitions,
+          staleStatusTransitions
+        );
+        if (isStaleRunAlreadyReconciled(effectiveProjection, assignmentId, staleRecoveryState)) {
           try {
             await adapter.reconcileStaleRun(store, record);
           } catch (error) {
@@ -98,8 +104,52 @@ export async function reconcileActiveRuns(
         }
 
         const reconciliation = buildStaleRunReconciliation(effectiveProjection, assignmentId, record);
-        for (const event of reconciliation.events) {
+        const pendingEvents = selectPendingStaleRecoveryEvents(
+          reconciliation.events,
+          staleRecoveryState
+        );
+        if (pendingEvents.length === 0) {
+          try {
+            await adapter.reconcileStaleRun(store, reconciliation.staleRecord);
+          } catch (error) {
+            diagnostics.push(
+              ...diagnosticsFromWarning(
+                `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+                "host-run-persist-failed"
+              )
+            );
+          }
+          continue;
+        }
+
+        changed = true;
+        for (const event of pendingEvents) {
           await store.appendEvent(event);
+        }
+        if (pendingEvents.length !== reconciliation.events.length) {
+          if (!staleRecoveryState.queuedTransitionTimestamp) {
+            queuedTransitions.set(assignmentId, [
+              ...(queuedTransitions.get(assignmentId) ?? []),
+              reconciliation.events[0]!.timestamp
+            ]);
+          }
+          if (!staleRecoveryState.statusTransitionTimestamp) {
+            staleStatusTransitions.set(assignmentId, [
+              ...(staleStatusTransitions.get(assignmentId) ?? []),
+              reconciliation.events[1]!.timestamp
+            ]);
+          }
+        } else {
+          queuedTransitions.set(assignmentId, [
+            ...(queuedTransitions.get(assignmentId) ?? []),
+            reconciliation.events[0]!.timestamp
+          ]);
+          staleStatusTransitions.set(assignmentId, [
+            ...(staleStatusTransitions.get(assignmentId) ?? []),
+            reconciliation.events[1]!.timestamp
+          ]);
         }
         const syncResult = await store.syncSnapshotFromEventsWithRecovery();
         effectiveProjection = syncResult.projection;
@@ -167,13 +217,15 @@ export async function reconcileActiveRuns(
       continue;
     }
 
-    changed = true;
-    const assignmentState = effectiveProjection.assignments.get(assignmentId)?.state;
-    const retryObjectivePrefix = `Retry assignment ${assignmentId}:`;
-    if (
-      assignmentState === "queued" &&
-      effectiveProjection.status.currentObjective.startsWith(retryObjectivePrefix)
-    ) {
+    queuedTransitions ??= await loadQueuedTransitions(store);
+    staleStatusTransitions ??= await loadStaleRecoveryStatusTransitions(store);
+    const staleRecoveryState = getStaleRunRecoveryState(
+      assignmentId,
+      record,
+      queuedTransitions,
+      staleStatusTransitions
+    );
+    if (isStaleRunAlreadyReconciled(effectiveProjection, assignmentId, staleRecoveryState)) {
       const { staleRecord } = buildStaleRunReconciliation(effectiveProjection, assignmentId, record);
       try {
         await adapter.reconcileStaleRun(store, staleRecord);
@@ -191,8 +243,26 @@ export async function reconcileActiveRuns(
     }
 
     const reconciliation = buildStaleRunReconciliation(effectiveProjection, assignmentId, record);
-    for (const event of reconciliation.events) {
+    const pendingEvents = selectPendingStaleRecoveryEvents(reconciliation.events, staleRecoveryState);
+    if (pendingEvents.length === 0) {
+      continue;
+    }
+
+    changed = true;
+    for (const event of pendingEvents) {
       await store.appendEvent(event);
+    }
+    if (!staleRecoveryState.queuedTransitionTimestamp) {
+      queuedTransitions.set(assignmentId, [
+        ...(queuedTransitions.get(assignmentId) ?? []),
+        reconciliation.events[0]!.timestamp
+      ]);
+    }
+    if (!staleRecoveryState.statusTransitionTimestamp) {
+      staleStatusTransitions.set(assignmentId, [
+        ...(staleStatusTransitions.get(assignmentId) ?? []),
+        reconciliation.events[1]!.timestamp
+      ]);
     }
     const syncResult = await store.syncSnapshotFromEventsWithRecovery();
     effectiveProjection = syncResult.projection;
@@ -232,6 +302,102 @@ export async function reconcileActiveRuns(
   };
 }
 
+function isStaleRunAlreadyReconciled(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string,
+  recoveryState: StaleRunRecoveryState
+): boolean {
+  const assignment = projection.assignments.get(assignmentId);
+  return (
+    assignment?.state === "queued" &&
+    Boolean(recoveryState.queuedTransitionTimestamp) &&
+    Boolean(recoveryState.statusTransitionTimestamp)
+  );
+}
+
+async function loadQueuedTransitions(store: RuntimeStore): Promise<Map<string, string[]>> {
+  const queuedTransitions = new Map<string, string[]>();
+  const { events } = await store.loadReplayableEvents();
+  for (const event of events) {
+    if (event.type === "assignment.updated" && event.payload.patch.state === "queued") {
+      queuedTransitions.set(event.payload.assignmentId, [
+        ...(queuedTransitions.get(event.payload.assignmentId) ?? []),
+        event.timestamp
+      ]);
+    }
+  }
+  return queuedTransitions;
+}
+
+async function loadStaleRecoveryStatusTransitions(store: RuntimeStore): Promise<Map<string, string[]>> {
+  const statusTransitions = new Map<string, string[]>();
+  const { events } = await store.loadReplayableEvents();
+  for (const event of events) {
+    if (event.type !== "status.updated") {
+      continue;
+    }
+    const match = /^Retry assignment ([^:]+): /.exec(event.payload.status.currentObjective);
+    if (!match) {
+      continue;
+    }
+    const assignmentId = match[1]!;
+    if (!event.payload.status.activeAssignmentIds.includes(assignmentId)) {
+      continue;
+    }
+    statusTransitions.set(assignmentId, [...(statusTransitions.get(assignmentId) ?? []), event.timestamp]);
+  }
+  return statusTransitions;
+}
+
+interface StaleRunRecoveryState {
+  queuedTransitionTimestamp: string | undefined;
+  statusTransitionTimestamp: string | undefined;
+}
+
+function getStaleRunRecoveryState(
+  assignmentId: string,
+  record: HostRunRecord,
+  queuedTransitions: Map<string, string[]>,
+  staleStatusTransitions: Map<string, string[]>
+): StaleRunRecoveryState {
+  const startedAt = Date.parse(record.startedAt);
+  if (!Number.isFinite(startedAt)) {
+    return {
+      queuedTransitionTimestamp: undefined,
+      statusTransitionTimestamp: undefined
+    };
+  }
+
+  const queuedTransitionTimestamp = (queuedTransitions.get(assignmentId) ?? []).find(
+    (timestamp) => Date.parse(timestamp) >= startedAt
+  );
+  const statusTransitionTimestamp = (staleStatusTransitions.get(assignmentId) ?? []).find(
+    (timestamp) => Date.parse(timestamp) >= startedAt
+  );
+
+  return {
+    queuedTransitionTimestamp,
+    statusTransitionTimestamp
+  };
+}
+
+function selectPendingStaleRecoveryEvents(
+  events: RuntimeEvent[],
+  recoveryState: StaleRunRecoveryState
+): RuntimeEvent[] {
+  const pendingEvents: RuntimeEvent[] = [];
+  const [assignmentEvent, statusEvent] = events;
+
+  if (!recoveryState.queuedTransitionTimestamp) {
+    pendingEvents.push(assignmentEvent!);
+  }
+  if (!recoveryState.statusTransitionTimestamp) {
+    pendingEvents.push(statusEvent!);
+  }
+
+  return pendingEvents;
+}
+
 function buildCompletedRunReconciliation(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   record: HostRunRecord
@@ -262,8 +428,21 @@ function hasRecoveredCompletedOutcome(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   record: HostRunRecord
 ): boolean {
-  if (!record.terminalOutcome) {
+  const terminalOutcome = record.terminalOutcome;
+  if (!terminalOutcome) {
     return false;
+  }
+  if (terminalOutcome.kind === "decision") {
+    return [...projection.decisions.values()].some((decision) => {
+      if (decision.assignmentId !== record.assignmentId) {
+        return false;
+      }
+      return terminalOutcome.decision.decisionId
+        ? decision.decisionId === terminalOutcome.decision.decisionId
+        : decision.blockerSummary === terminalOutcome.decision.blockerSummary &&
+            decision.recommendedOption === terminalOutcome.decision.recommendedOption &&
+            decision.createdAt === terminalOutcome.decision.createdAt;
+    });
   }
   const assignment = projection.assignments.get(record.assignmentId);
   const expectedAssignmentState = nextAssignmentStateFromRecord(record);
@@ -284,32 +463,17 @@ function hasRecoveredCompletedOutcome(
   ) {
     return false;
   }
-  if (record.terminalOutcome.kind === "result") {
-    return [...projection.results.values()].some((result) => {
-      if (record.terminalOutcome?.kind !== "result") {
-        return false;
-      }
-      return (
-        result.assignmentId === record.assignmentId &&
-        (record.terminalOutcome.result.resultId
-          ? result.resultId === record.terminalOutcome.result.resultId
-          : result.status === record.terminalOutcome.result.status &&
-            result.summary === record.terminalOutcome.result.summary &&
-            result.createdAt === record.terminalOutcome.result.createdAt)
-      );
-    });
-  }
-  return [...projection.decisions.values()].some((decision) => {
-    if (record.terminalOutcome?.kind !== "decision") {
+  return [...projection.results.values()].some((result) => {
+    if (record.terminalOutcome?.kind !== "result") {
       return false;
     }
     return (
-      decision.assignmentId === record.assignmentId &&
-      (record.terminalOutcome.decision.decisionId
-        ? decision.decisionId === record.terminalOutcome.decision.decisionId
-        : decision.blockerSummary === record.terminalOutcome.decision.blockerSummary &&
-          decision.recommendedOption === record.terminalOutcome.decision.recommendedOption &&
-          decision.createdAt === record.terminalOutcome.decision.createdAt)
+      result.assignmentId === record.assignmentId &&
+      (record.terminalOutcome.result.resultId
+        ? result.resultId === record.terminalOutcome.result.resultId
+        : result.status === record.terminalOutcome.result.status &&
+          result.summary === record.terminalOutcome.result.summary &&
+          result.createdAt === record.terminalOutcome.result.createdAt)
     );
   });
 }

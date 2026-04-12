@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
+
 import type { RuntimeArtifactStore } from "./contract.js";
 import type { HostRunRecord } from "../core/types.js";
-import { nowIso } from "../utils/time.js";
 import { parseJson, toPrettyJson } from "../utils/json.js";
-import { selectAuthoritativeRunRecord } from "../core/run-state.js";
+import {
+  describeStaleRunReason,
+  describeStaleRunReasonCode,
+  isRunLeaseExpired,
+  selectAuthoritativeRunRecord
+} from "../core/run-state.js";
 
 export interface HostRunArtifactPaths {
   runRecordPath(assignmentId: string): string;
@@ -26,7 +32,7 @@ export class HostRunStore {
         `${this.adapterId} run record`
       );
       const leaseRecord = await this.readLeaseRecord(assignmentId);
-      return selectAuthoritativeRunRecord(runRecord, leaseRecord);
+      return normalizeInspectedRun(selectAuthoritativeRunRecord(runRecord, leaseRecord));
     }
     const lastRun = await this.store.readJsonArtifact<HostRunRecord>(
       this.artifacts.lastRunPath(),
@@ -53,7 +59,13 @@ export class HostRunStore {
       await this.store.writeJsonArtifact(this.artifacts.runRecordPath(record.assignmentId), record);
       await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), record);
     } catch (error) {
-      await this.release(record.assignmentId).catch(() => undefined);
+      const cleanupError = await this.cleanupClaimFailure(record.assignmentId);
+      if (cleanupError) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Host run claim metadata persistence failed and rollback cleanup also failed for assignment ${record.assignmentId}. ${message} ${cleanupError.message}`
+        );
+      }
       throw error;
     }
   }
@@ -90,35 +102,149 @@ export class HostRunStore {
       return undefined;
     } catch (error) {
       if (record.state !== "running") {
-        await this.store.deleteArtifact(this.artifacts.runLeasePath(record.assignmentId)).catch(() => undefined);
+        const cleanupError = await this.tryDeleteArtifact(
+          this.artifacts.runLeasePath(record.assignmentId),
+          `${this.adapterId} run lease`
+        );
+        if (cleanupError) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `Host run outcome was preserved, but active lease cleanup failed after final run record persistence degraded for assignment ${record.assignmentId}. ${message} ${cleanupError.message}`
+          );
+        }
       }
       const message = error instanceof Error ? error.message : String(error);
       return `Host run outcome was preserved, but the final run record could not be persisted. ${message}`;
     }
   }
 
+  private async cleanupClaimFailure(assignmentId: string): Promise<Error | undefined> {
+    const cleanupErrors: string[] = [];
+    const leaseError = await this.tryDeleteArtifact(
+      this.artifacts.runLeasePath(assignmentId),
+      `${this.adapterId} run lease`
+    );
+    if (leaseError) {
+      cleanupErrors.push(leaseError.message);
+    }
+    const recordError = await this.tryDeleteArtifact(
+      this.artifacts.runRecordPath(assignmentId),
+      `${this.adapterId} run record`
+    );
+    if (recordError) {
+      cleanupErrors.push(recordError.message);
+    }
+    try {
+      const lastRun = await this.store.readJsonArtifact<HostRunRecord>(
+        this.artifacts.lastRunPath(),
+        `${this.adapterId} run record`
+      );
+      if (lastRun?.assignmentId === assignmentId && lastRun.state === "running") {
+        const lastRunError = await this.tryDeleteArtifact(
+          this.artifacts.lastRunPath(),
+          `${this.adapterId} run record`
+        );
+        if (lastRunError) {
+          cleanupErrors.push(lastRunError.message);
+        }
+      }
+    } catch (error) {
+      cleanupErrors.push(error instanceof Error ? error.message : String(error));
+    }
+    if (cleanupErrors.length === 0) {
+      return undefined;
+    }
+    return new Error(cleanupErrors.join(" "));
+  }
+
+  private async tryDeleteArtifact(relativePath: string, label: string): Promise<Error | undefined> {
+    try {
+      await this.store.deleteArtifact(relativePath);
+      return undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return new Error(`${label} cleanup failed: ${message}`);
+    }
+  }
+
   private async readLeaseRecord(assignmentId: string): Promise<HostRunRecord | undefined> {
     const relativePath = this.artifacts.runLeasePath(assignmentId);
     try {
-      return await this.store.readJsonArtifact<HostRunRecord>(relativePath, `${this.adapterId} run lease`);
+      const leaseRecord = await this.store.readJsonArtifact<HostRunRecord>(
+        relativePath,
+        `${this.adapterId} run lease`
+      );
+      if (leaseRecord === undefined) {
+        return undefined;
+      }
+      return isValidLeaseRecord(leaseRecord, assignmentId)
+        ? leaseRecord
+        : createMalformedLeaseRecord(assignmentId, JSON.stringify(leaseRecord));
     } catch {
       const content = await this.store.readTextArtifact(relativePath, `${this.adapterId} run lease`);
       if (content === undefined) {
         return undefined;
       }
       try {
-        return parseJson<HostRunRecord>(content, `${this.adapterId} run lease`);
+        const leaseRecord = parseJson<HostRunRecord>(content, `${this.adapterId} run lease`);
+        return isValidLeaseRecord(leaseRecord, assignmentId)
+          ? leaseRecord
+          : createMalformedLeaseRecord(assignmentId, content);
       } catch {
-        return {
-          assignmentId,
-          state: "running",
-          startedAt: nowIso(),
-          staleReasonCode: "malformed_lease_artifact",
-          staleReason: "malformed lease file"
-        };
+        return createMalformedLeaseRecord(assignmentId, content);
       }
     }
   }
+}
+
+function isValidLeaseRecord(record: unknown, assignmentId: string): record is HostRunRecord {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return false;
+  }
+  const leaseRecord = record as Partial<HostRunRecord>;
+  return (
+    leaseRecord.assignmentId === assignmentId &&
+    leaseRecord.state === "running" &&
+    typeof leaseRecord.startedAt === "string" &&
+    leaseRecord.startedAt.length > 0
+  );
+}
+
+function createMalformedLeaseRecord(assignmentId: string, leaseIdentity: string): HostRunRecord {
+  return {
+    assignmentId,
+    state: "running",
+    startedAt: malformedLeaseStartedAt(leaseIdentity),
+    staleReasonCode: "malformed_lease_artifact",
+    staleReason: "malformed lease file"
+  };
+}
+
+function malformedLeaseStartedAt(leaseIdentity: string): string {
+  const hash = createHash("sha256").update(leaseIdentity).digest("hex");
+  const offsetMs = Number.parseInt(hash.slice(0, 12), 16) % MALFORMED_LEASE_IDENTITY_WINDOW_MS;
+  return new Date(MALFORMED_LEASE_IDENTITY_BASE_MS + offsetMs).toISOString();
+}
+
+const MALFORMED_LEASE_IDENTITY_BASE_MS = Date.UTC(1970, 0, 1);
+const MALFORMED_LEASE_IDENTITY_WINDOW_MS = 20 * 365 * 24 * 60 * 60 * 1000;
+
+function normalizeInspectedRun(record: HostRunRecord | undefined): HostRunRecord | undefined {
+  if (!record || record.state !== "running") {
+    return record;
+  }
+  if (record.staleReasonCode === "malformed_lease_artifact") {
+    return record;
+  }
+  if (!isRunLeaseExpired(record)) {
+    return record;
+  }
+  return {
+    ...record,
+    state: "completed",
+    staleReasonCode: record.staleReasonCode ?? describeStaleRunReasonCode(record),
+    staleReason: record.staleReason ?? describeStaleRunReason(record)
+  };
 }
 
 function isAlreadyExists(error: unknown): boolean {

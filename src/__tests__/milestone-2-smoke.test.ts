@@ -1317,6 +1317,21 @@ test("milestone-2 smoke: stale reconciliation is idempotent after the first reco
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, staleRecord);
 
   const firstResume = await resumeRuntime(setup.store, setup.adapter);
+  const driftTimestamp = new Date().toISOString();
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: firstResume.projection.sessionId,
+    timestamp: driftTimestamp,
+    type: "status.updated",
+    payload: {
+      status: {
+        ...firstResume.projection.status,
+        currentObjective: "Operator updated the status after stale reconciliation.",
+        lastDurableOutputAt: driftTimestamp
+      }
+    }
+  });
+  await setup.store.syncSnapshotFromEvents();
   const secondResume = await resumeRuntime(setup.store, setup.adapter);
   const statusResult = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
   const run = await runRuntime(setup.store, setup.adapter);
@@ -1336,6 +1351,10 @@ test("milestone-2 smoke: stale reconciliation is idempotent after the first reco
   assert.ok(firstResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.ok(!secondResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(statusResult.projection.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.equal(
+    statusResult.projection.status.currentObjective,
+    "Operator updated the status after stale reconciliation."
+  );
   assert.ok(!statusResult.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(run.execution.outcome.kind, "result");
   assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));

@@ -119,6 +119,8 @@ effective host-run state follows these rules:
   a new run.
 - Initial lease creation must be atomic.
 - Claim-time metadata failure must not leave a live lease behind.
+- If rollback cleanup cannot remove the claimed lease, the claim must
+  fail loudly; it must not silently degrade into a phantom active lease.
 
 ### Running updates
 
@@ -136,6 +138,9 @@ effective host-run state follows these rules:
   before the completed run record becomes visible.
 - Lease cleanup is mandatory even when final run-record persistence
   degrades to a warning.
+- Warning-only degradation is allowed only after lease cleanup is
+  confirmed. If lease cleanup fails, the command must surface a stronger
+  persistence failure than a normal warning.
 
 ---
 
@@ -156,6 +161,15 @@ The operation must be idempotent. Re-running `status`, `resume`, or
 `run` after reconciliation must not repeatedly requeue the same stale
 run.
 
+Idempotence is a runtime-state guarantee, not a `currentObjective`
+string check. Once runtime events have durably moved the assignment back
+to `queued`, later benign `status.updated` drift must not cause the same
+stale host run to be requeued again.
+
+This idempotence applies to the same stale host-run instance. A later
+fresh retry claim that acquires a new lease epoch or run instance and
+then goes stale must emit a new stale reconciliation.
+
 Runtime events and snapshot updates must become durable before adapter
 artifacts are rewritten to their reconciled stale-completed form.
 
@@ -175,7 +189,9 @@ back to stale-run handling.
 
 Completed-run reconciliation must be idempotent. Once the runtime has
 absorbed the terminal result or decision, later commands must not
-replay it again.
+replay it again. Later runtime progression, including resolved
+decisions and updated status text, must not regenerate a previously
+absorbed `result.submitted` or `decision.created`.
 
 Completed run records without durable `terminalOutcome` data are
 degraded metadata only. `inspect` may surface them, but `status`,
@@ -254,6 +270,7 @@ The test suite should explicitly cover:
 - valid active lease overrides stale run-record metadata
 - `ctx run` narrows multi-active execution to the runnable assignment
 - lease removed before completed record becomes visible
+- claim rollback cleanup failure is surfaced
 - expired active lease
 - missing lease expiry
 - invalid lease expiry
@@ -263,7 +280,10 @@ The test suite should explicitly cover:
 - stale reconciliation clears the lease artifact
 - stale-run reconciliation is idempotent across `status`, `resume`, and
   `run`
+- a later fresh stale retry emits a new stale reconciliation
 - multiple stale leases preserve latest status updates
+- final non-running persistence only degrades to a warning after lease
+  cleanup succeeds
 - completed record with leftover lease recovered into runtime truth
 - completed record with malformed leftover lease recovered into runtime
   truth
