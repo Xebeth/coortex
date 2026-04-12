@@ -10,6 +10,7 @@ It should be read alongside:
 - `docs/run-recovery-invariants.md`
 - `docs/runtime-state-model.md`
 - `docs/codex-profile-integration.md`
+- `docs/completed/milestone-2.md`
 
 ---
 

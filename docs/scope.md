@@ -9,7 +9,8 @@ The system is designed as a **host-agnostic coordination core** with **host-spec
 For the longer-term target, see:
 
 - `docs/coortex-ideal-spec.md`
-- `docs/coortex-milestone-1-plan.md`
+- `docs/completed/milestone-1.md`
+- `docs/completed/milestone-2.md`
 - `docs/coortex-roadmap.md`
 
 ---

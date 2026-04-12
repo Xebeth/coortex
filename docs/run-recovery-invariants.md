@@ -34,7 +34,7 @@ Related documents:
 - `docs/runtime-state-model.md`
 - `docs/architecture.md`
 - `docs/telemetry.md`
-- `docs/implementation-phases.md`
+- `docs/coortex-roadmap.md`
 - `docs/codex-run-recovery-mapping.md`
 
 ---

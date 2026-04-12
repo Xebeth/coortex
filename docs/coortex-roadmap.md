@@ -2,7 +2,8 @@
 
 ## Purpose
 
-This roadmap describes the work required after the first milestone to reach the full Coortex target.
+This roadmap describes the implementation sequence for Coortex from
+the current repository state toward the longer-term target.
 
 The architecture assumes:
 
@@ -12,119 +13,40 @@ The architecture assumes:
 - durable recovery
 - modular workflows and extension layers
 
----
+## Current state
 
-## Phase 1 — Milestone 1: Core + Reference Adapter
+The first two milestones are complete in the current repository:
 
-Deliver:
+- Milestone 1 established the host-agnostic runtime-first foundation
+  and the reference adapter boundary.
+- Milestone 2 added real Codex-backed execution plus the recovery
+  hardening needed to make that path routine and durable.
 
-- core runtime
-- persistence
-- recovery brief
-- trimming
-- telemetry scaffold
-- adapter contract
-- one reference host adapter
+Completed milestone summaries live under:
 
-This phase proves the runtime-first architecture.
+- `docs/completed/milestone-1.md`
+- `docs/completed/milestone-2.md`
 
----
+## Near-term sequence
 
-## Phase 2 — Real Execution Path
-
-Status:
-Implemented in the current repository.
+### Phase 3 — Workflow modules
 
 Objective:
-Move from foundational scaffolding to real task execution through the reference adapter.
-
-Deliver:
-- real host-driven task execution
-- result/decision capture in real runs
-- better usage/token collection where the host exposes it
-- stronger bounded-envelope discipline in real execution
-
----
-
-## Phase 3 — Recovery Hardening
-
-Status:
-Implemented in the current repository.
-
-Objective:
-Make interruption handling robust enough for routine development use.
-
-Deliver:
-- lease and heartbeat model
-- stale-claim reconciliation
-- idempotent restart behavior
-- stronger recovery telemetry
-- resume/requeue policy
-
----
-
-## Phase 4 — Verification and Review
-
-Objective:
-Make completion criteria explicit and durable.
-
-Deliver:
-- verification requirement model
-- evidence storage
-- completion gating
-- review-oriented result states
-- verification telemetry
-
----
-
-## Phase 5 — Guidance and Artifact Store
-
-Objective:
-Add targeted guidance retrieval and a typed artifact store.
-
-Deliver:
-- project guidance retrieval
-- codebase map fragments
-- project commands/conventions
-- artifact storage for large outputs and evidence
-- retrieval-by-reference model
-
----
-
-## Phase 6 — History Management and Compaction
-
-Objective:
-Extend the initial trimming layer into a fuller context-management subsystem.
-
-Deliver:
-- history compaction
-- bounded recent-history retention
-- compaction triggers at soft working limits
-- compaction telemetry
-- regression checks for token growth
-
----
-
-## Phase 7 — Workflow Modules
-
-Objective:
-Move orchestration policy into explicit workflow modules.
+Move sequencing policy into explicit workflow modules.
 
 Deliver:
 - `plan`
 - `review`
 - `verify`
-- team-oriented workflows
-- optional persistent completion workflow
+- additional workflow modules as needed
 
 The runtime remains authoritative.
 
----
-
-## Phase 8 — Additional Host Adapters
+### Phase 4 — Additional host adapters
 
 Objective:
-Add at least one more host adapter to prove the architecture is genuinely host-agnostic.
+Add at least one more host adapter to prove the architecture is
+genuinely host-agnostic.
 
 Possible hosts:
 - OpenCode
@@ -137,9 +59,45 @@ Deliver:
 - adapter-specific telemetry normalization
 - adapter-specific integration docs
 
----
+## Longer-term direction
 
-## Phase 9 — Safety, Approvals, and HITL
+### Phase 5 — Verification and Review
+
+Objective:
+Make completion criteria explicit and durable.
+
+Deliver:
+- verification requirement model
+- evidence storage
+- completion gating
+- review-oriented result states
+- verification telemetry
+
+### Phase 6 — Guidance and Artifact Store
+
+Objective:
+Add targeted guidance retrieval and a typed artifact store.
+
+Deliver:
+- project guidance retrieval
+- codebase map fragments
+- project commands/conventions
+- artifact storage for large outputs and evidence
+- retrieval-by-reference model
+
+### Phase 7 — History Management and Compaction
+
+Objective:
+Extend the initial trimming layer into a fuller context-management subsystem.
+
+Deliver:
+- history compaction
+- bounded recent-history retention
+- compaction triggers at soft working limits
+- compaction telemetry
+- regression checks for token growth
+
+### Phase 8 — Safety, Approvals, and HITL
 
 Objective:
 Add explicit governance and human checkpoints.
@@ -151,9 +109,7 @@ Deliver:
 - pause/resume-on-approval
 - approval telemetry
 
----
-
-## Phase 10 — Hooks and Plugins
+### Phase 9 — Hooks and Plugins
 
 Objective:
 Add optional extension surfaces without compromising the core.
@@ -164,9 +120,7 @@ Deliver:
 - optional skills packs
 - optional MCP/app/guidance integrations
 
----
-
-## Phase 11 — Observability and Evaluation
+### Phase 10 — Observability and Evaluation
 
 Objective:
 Make the system measurable as a harness.
@@ -179,9 +133,7 @@ Deliver:
 - recovery effectiveness metrics
 - adapter comparison metrics
 
----
-
-## Phase 12 — Branching and Long-Running Work
+### Phase 11 — Branching and Long-Running Work
 
 Objective:
 Support explicit fork/branch semantics for long-lived work.
@@ -192,9 +144,7 @@ Deliver:
 - branch-aware recovery
 - branch comparison or reconciliation support
 
----
-
-## Phase 13 — Security and Retention Hardening
+### Phase 12 — Security and Retention Hardening
 
 Objective:
 Add stronger data-handling and retention rules.
@@ -206,9 +156,7 @@ Deliver:
 - protected or encrypted storage options where needed
 - trust-boundary rules for external adapter/plugin/tool data
 
----
-
-## Priority Order
+## Priority order
 
 The recommended order remains:
 
@@ -219,12 +167,14 @@ The recommended order remains:
 5. telemetry
 6. adapter contract
 7. one reference adapter
-8. workflows
-9. second adapter
-10. governance
-11. extension surfaces
-12. richer observability
-13. long-running branch semantics
-14. security hardening
+8. real execution and recovery hardening
+9. workflows
+10. second adapter
+11. governance
+12. extension surfaces
+13. richer observability
+14. long-running branch semantics
+15. security hardening
 
-This ordering keeps the core architecture stable while adapter breadth grows gradually.
+This ordering keeps the core architecture stable while adapter breadth
+and operational complexity grow gradually.

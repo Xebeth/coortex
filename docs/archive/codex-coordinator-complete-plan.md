@@ -7,7 +7,7 @@ This document provides a consolidated implementation plan for Coortex after the 
 It should be read together with:
 
 - `docs/coortex-ideal-spec.md`
-- `docs/coortex-milestone-1-plan.md`
+- `docs/completed/milestone-1.md`
 - `docs/coortex-roadmap.md`
 
 ---

@@ -48,26 +48,31 @@ The first implementation milestone builds the core and one reference host adapte
 
 Start here:
 
+- `docs/README.md`
 - `docs/scope.md`
 - `docs/architecture.md`
 - `docs/module-boundaries.md`
 - `docs/runtime-state-model.md`
 - `docs/run-recovery-invariants.md`
 - `docs/codex-run-recovery-mapping.md`
-- `docs/implementation-phases.md`
+- `docs/coortex-roadmap.md`
 
 Reference documents:
 
 - `docs/coortex-ideal-spec.md`
-- `docs/coortex-milestone-1-plan.md`
-- `docs/coortex-roadmap.md`
+- `docs/completed/milestone-1.md`
+- `docs/completed/milestone-2.md`
 
 Host-specific and migration documents:
 
 - `docs/codex-profile-integration.md`
 - `docs/host-adapters.md`
-- `docs/opencode-adapter-findings.md`
-- `docs/omx-fork-developer-handoff-plan.md`
+
+Research and archive:
+
+- `docs/research/opencode-adapter-findings.md`
+- `docs/archive/omx-fork-developer-handoff-plan.md`
+- `docs/archive/codex-coordinator-complete-plan.md`
 
 ## Design summary
 
@@ -126,6 +131,8 @@ The adapter/runtime path now includes:
 Repository tests enforce the Milestone 1 module map, guard key boundary rules, and validate the Milestone 2 execution slice through:
 
 - the standard automated suite
+- a focused Milestone 2 smoke suite under `src/__tests__/milestone-2-smoke.test.ts`
+- a broader Milestone 2 integration suite under `src/__tests__/milestone-2-integration.test.ts`
 - a bypass-enabled live Codex smoke path
 - a bypass-enabled Milestone 2 live harness
 - a restricted-mode live test that verifies truthful persisted state without bypass
@@ -179,6 +186,12 @@ Run the milestone test suite:
 
 ```bash
 npm test
+```
+
+Run the focused Milestone 2 smoke gate only:
+
+```bash
+node --test dist/__tests__/milestone-2-smoke.test.js
 ```
 
 Run the live Milestone 2 validation paths:
