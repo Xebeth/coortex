@@ -73,6 +73,7 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   const diagnostics = [...loaded.diagnostics];
   const activeLeases: string[] = [];
   const hiddenActiveLeases: string[] = [];
+  const pendingHiddenCleanups: Array<ReturnType<typeof buildWorkflowHiddenRunCleanup>> = [];
   let recoveredRunRecord: HostRunRecord | undefined;
   const currentAssignmentId = initialWorkflowProgress.currentAssignmentId;
   const inspectedRuns = await adapter.inspectRuns(store);
@@ -92,6 +93,12 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
       await adapter.hasRunLease(store, currentRecord.assignmentId)
     );
   }
+  const inspectedWorkflowRuns = dedupeRunRecords(
+    [...inspectedRuns, ...(currentRecord ? [currentRecord] : [])]
+  );
+  const inspectedWorkflowRunsByAssignmentId = new Map(
+    inspectedWorkflowRuns.map((record) => [record.assignmentId, record] as const)
+  );
 
   for (const record of inspectedRuns) {
     if (record.assignmentId === currentAssignmentId) {
@@ -103,20 +110,11 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
     const handling = deriveWorkflowRunHandling(record, truth);
     switch (handling.kind) {
       case "active_lease":
-        activeLeases.push(record.assignmentId);
-        hiddenActiveLeases.push(record.assignmentId);
         diagnostics.push(createActiveRunDiagnostic(record.assignmentId, record));
         break;
       case "emit_hidden_cleanup": {
         const hiddenCleanup = buildWorkflowHiddenRunCleanup(record);
-        diagnostics.push(
-          ...await emitWorkflowHiddenRunCleanup(
-            store,
-            adapter,
-            projection.sessionId,
-            hiddenCleanup
-          )
-        );
+        pendingHiddenCleanups.push(hiddenCleanup);
         diagnostics.push(
           ...await cleanupRunArtifactsWithDiagnostics(
             store,
@@ -124,6 +122,7 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
             handling.cleanupRecord ?? hiddenCleanup.staleRecord
           )
         );
+        recordHasLease.set(record.assignmentId, false);
         break;
       }
       case "cleanup_only":
@@ -134,6 +133,7 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
             handling.cleanupRecord ?? deriveWorkflowCleanupRecord(record)
           )
         );
+        recordHasLease.set(record.assignmentId, false);
         break;
       case "recover_completed":
       case "ignore":
@@ -152,7 +152,6 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
     : undefined;
 
   if (currentRecord && currentHandling?.kind === "active_lease") {
-    activeLeases.push(currentRecord.assignmentId);
     diagnostics.push(createActiveRunDiagnostic(currentRecord.assignmentId, currentRecord));
   } else if (currentRecord && currentHandling?.kind === "recover_completed") {
     const recoveredEvents = buildWorkflowRecoveredOutcomeEvents(projection.sessionId, currentRecord);
@@ -191,40 +190,21 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
     recordHasLease.set(currentRecord.assignmentId, false);
   }
 
-  let staleRecovery = currentRecord &&
+  const staleRecovery = currentRecord &&
     currentTruthAtLoad?.staleCandidate &&
     !currentTruthAtLoad.hasDurableCurrentOutcome &&
     !currentTruthAtLoad.hasDurableStaleRecovery
     ? buildWorkflowStaleRunRecovery(currentRecord)
     : undefined;
 
-  for (let iteration = 0; iteration < 10; iteration += 1) {
-    const progression = await evaluateWorkflowProgression(projection, store, {
-      timestamp: nowIso(),
-      staleRunFacts:
-        staleRecovery && projection.workflowProgress?.currentAssignmentId === staleRecovery.staleRecord.assignmentId
-          ? [{ assignmentId: staleRecovery.staleRecord.assignmentId, staleAt: staleRecovery.staleRecord.staleAt ?? nowIso() }]
-          : []
-    });
-    if (progression.events.length > 0) {
-      const persisted = await persistWorkflowEvents(
-        store,
-        projection,
-        progression.events,
-        loaded.snapshotFallback
-      );
-      projection = persisted.projection;
-      diagnostics.push(...persisted.diagnostics);
-      continue;
-    }
-    const syncedStatus = await syncWorkflowStatus(store, projection, loaded.snapshotFallback);
-    if (syncedStatus.changed) {
-      projection = syncedStatus.projection;
-      diagnostics.push(...syncedStatus.diagnostics);
-      continue;
-    }
-    break;
-  }
+  const initialConvergence = await convergeWorkflowProjection(
+    store,
+    projection,
+    loaded.snapshotFallback,
+    staleRecovery
+  );
+  projection = initialConvergence.projection;
+  diagnostics.push(...initialConvergence.diagnostics);
 
   const currentTruthAfterConvergence = currentRecord
     ? deriveWorkflowRunTruth(projection, currentRecord, {
@@ -249,6 +229,36 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
       diagnostics.push(...await cleanupRunArtifactsWithDiagnostics(store, adapter, staleRecovery.staleRecord));
     }
   }
+
+  const currentRunReconciliation = await reconcileCurrentWorkflowRunAfterConvergence(
+    store,
+    adapter,
+    projection,
+    loaded.snapshotFallback,
+    inspectedWorkflowRunsByAssignmentId,
+    recordHasLease
+  );
+  projection = currentRunReconciliation.projection;
+  diagnostics.push(...currentRunReconciliation.diagnostics);
+  recoveredRunRecord = currentRunReconciliation.recoveredRunRecord ?? recoveredRunRecord;
+
+  for (const cleanup of pendingHiddenCleanups) {
+    if (projection.workflowProgress?.currentAssignmentId === cleanup.staleRecord.assignmentId) {
+      continue;
+    }
+    diagnostics.push(
+      ...await emitWorkflowHiddenRunCleanup(store, adapter, projection.sessionId, cleanup)
+    );
+  }
+
+  const finalLeaseClassification = await classifyWorkflowLeaseVisibility(
+    store,
+    adapter,
+    projection,
+    [...inspectedWorkflowRunsByAssignmentId.values()]
+  );
+  activeLeases.push(...finalLeaseClassification.activeLeases);
+  hiddenActiveLeases.push(...finalLeaseClassification.hiddenActiveLeases);
 
   return {
     projection,
@@ -319,6 +329,240 @@ async function cleanupRunArtifactsWithDiagnostics(
         "host-run-persist-failed"
       )
     : [];
+}
+
+async function classifyWorkflowLeaseVisibility(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>,
+  records: HostRunRecord[]
+): Promise<{
+  activeLeases: string[];
+  hiddenActiveLeases: string[];
+}> {
+  const activeLeases: string[] = [];
+  const hiddenActiveLeases: string[] = [];
+  for (const record of records) {
+    const truth = deriveWorkflowRunTruth(projection, record, {
+      hasLeaseArtifact: await adapter.hasRunLease(store, record.assignmentId)
+    });
+    if (!truth.activeLease) {
+      continue;
+    }
+    activeLeases.push(record.assignmentId);
+    if (!truth.isCurrentAssignment) {
+      hiddenActiveLeases.push(record.assignmentId);
+    }
+  }
+  return {
+    activeLeases,
+    hiddenActiveLeases
+  };
+}
+
+async function reconcileCurrentWorkflowRunAfterConvergence(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>,
+  snapshotFallback: boolean,
+  inspectedRunsByAssignmentId: Map<string, HostRunRecord>,
+  recordHasLease: Map<string, boolean>
+): Promise<{
+  projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
+  diagnostics: CommandDiagnostic[];
+  recoveredRunRecord?: HostRunRecord;
+}> {
+  const diagnostics: CommandDiagnostic[] = [];
+  let effectiveProjection = projection;
+  let recoveredRunRecord: HostRunRecord | undefined;
+  const reconciledAssignmentIds = new Set<string>();
+
+  for (let iteration = 0; iteration < 10; iteration += 1) {
+    const currentAssignmentId = effectiveProjection.workflowProgress?.currentAssignmentId;
+    if (!currentAssignmentId || reconciledAssignmentIds.has(currentAssignmentId)) {
+      break;
+    }
+    reconciledAssignmentIds.add(currentAssignmentId);
+    const currentRecord = await resolveWorkflowRunRecord(
+      store,
+      adapter,
+      currentAssignmentId,
+      inspectedRunsByAssignmentId,
+      recordHasLease
+    );
+    if (!currentRecord) {
+      break;
+    }
+
+    const currentTruthBefore = deriveWorkflowRunTruth(effectiveProjection, currentRecord, {
+      hasLeaseArtifact: recordHasLease.get(currentAssignmentId) ?? false
+    });
+    const currentHandling = deriveWorkflowRunHandling(currentRecord, currentTruthBefore);
+    let projectionChanged = false;
+
+    if (currentHandling.kind === "recover_completed") {
+      const recoveredEvents = buildWorkflowRecoveredOutcomeEvents(
+        effectiveProjection.sessionId,
+        currentRecord
+      );
+      if (recoveredEvents.length > 0) {
+        const persisted = await persistWorkflowEvents(
+          store,
+          effectiveProjection,
+          recoveredEvents,
+          snapshotFallback
+        );
+        effectiveProjection = persisted.projection;
+        diagnostics.push(...persisted.diagnostics);
+        diagnostics.push({
+          level: "warning",
+          code: "completed-run-reconciled",
+          message: `Recovered completed host outcome for assignment ${currentRecord.assignmentId} after runtime event persistence was interrupted.`
+        });
+        recoveredRunRecord = currentRecord;
+        projectionChanged = true;
+      }
+      diagnostics.push(
+        ...await cleanupRunArtifactsWithDiagnostics(
+          store,
+          adapter,
+          currentHandling.cleanupRecord ?? deriveWorkflowCleanupRecord(currentRecord)
+        )
+      );
+      recordHasLease.set(currentRecord.assignmentId, false);
+    } else if (currentHandling.kind === "cleanup_only") {
+      diagnostics.push(
+        ...await cleanupRunArtifactsWithDiagnostics(
+          store,
+          adapter,
+          currentHandling.cleanupRecord ?? deriveWorkflowCleanupRecord(currentRecord)
+        )
+      );
+      recordHasLease.set(currentRecord.assignmentId, false);
+    }
+
+    const staleRecovery = currentTruthBefore.staleCandidate &&
+      !currentTruthBefore.hasDurableCurrentOutcome &&
+      !currentTruthBefore.hasDurableStaleRecovery
+      ? buildWorkflowStaleRunRecovery(currentRecord)
+      : undefined;
+
+    if (projectionChanged || staleRecovery) {
+      const converged = await convergeWorkflowProjection(
+        store,
+        effectiveProjection,
+        snapshotFallback,
+        staleRecovery
+      );
+      effectiveProjection = converged.projection;
+      diagnostics.push(...converged.diagnostics);
+    }
+
+    if (staleRecovery) {
+      const currentTruthAfter = deriveWorkflowRunTruth(effectiveProjection, currentRecord, {
+        hasLeaseArtifact:
+          recordHasLease.get(currentRecord.assignmentId)
+            ?? await adapter.hasRunLease(store, currentRecord.assignmentId)
+      });
+      if (shouldEmitCurrentWorkflowStaleReconciliation(currentTruthBefore, currentTruthAfter)) {
+        diagnostics.push(
+          ...await emitWorkflowStaleReconciliation(
+            store,
+            adapter,
+            effectiveProjection.sessionId,
+            staleRecovery
+          )
+        );
+        diagnostics.push(
+          ...await cleanupRunArtifactsWithDiagnostics(store, adapter, staleRecovery.staleRecord)
+        );
+        recordHasLease.set(currentRecord.assignmentId, false);
+      } else if (shouldCleanupWorkflowRunArtifacts(currentTruthAfter)) {
+        diagnostics.push(
+          ...await cleanupRunArtifactsWithDiagnostics(store, adapter, staleRecovery.staleRecord)
+        );
+        recordHasLease.set(currentRecord.assignmentId, false);
+      }
+    }
+
+    if (!projectionChanged && !staleRecovery) {
+      break;
+    }
+  }
+
+  return {
+    projection: effectiveProjection,
+    diagnostics,
+    ...(recoveredRunRecord ? { recoveredRunRecord } : {})
+  };
+}
+
+async function resolveWorkflowRunRecord(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId: string,
+  inspectedRunsByAssignmentId: Map<string, HostRunRecord>,
+  recordHasLease: Map<string, boolean>
+): Promise<HostRunRecord | undefined> {
+  let record = inspectedRunsByAssignmentId.get(assignmentId);
+  if (!record) {
+    record = await adapter.inspectRun(store, assignmentId);
+    if (record) {
+      inspectedRunsByAssignmentId.set(assignmentId, record);
+    }
+  }
+  if (record && !recordHasLease.has(assignmentId)) {
+    recordHasLease.set(assignmentId, await adapter.hasRunLease(store, assignmentId));
+  }
+  return record;
+}
+
+async function convergeWorkflowProjection(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>,
+  snapshotFallback: boolean,
+  staleRecovery?: ReturnType<typeof buildWorkflowStaleRunRecovery>
+): Promise<{
+  projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
+  diagnostics: CommandDiagnostic[];
+}> {
+  let effectiveProjection = projection;
+  const diagnostics: CommandDiagnostic[] = [];
+  for (let iteration = 0; iteration < 10; iteration += 1) {
+    const progression = await evaluateWorkflowProgression(effectiveProjection, store, {
+      timestamp: nowIso(),
+      staleRunFacts:
+        staleRecovery &&
+        effectiveProjection.workflowProgress?.currentAssignmentId === staleRecovery.staleRecord.assignmentId
+          ? [{
+              assignmentId: staleRecovery.staleRecord.assignmentId,
+              staleAt: staleRecovery.staleRecord.staleAt ?? nowIso()
+            }]
+          : []
+    });
+    if (progression.events.length > 0) {
+      const persisted = await persistWorkflowEvents(
+        store,
+        effectiveProjection,
+        progression.events,
+        snapshotFallback
+      );
+      effectiveProjection = persisted.projection;
+      diagnostics.push(...persisted.diagnostics);
+      continue;
+    }
+    const syncedStatus = await syncWorkflowStatus(store, effectiveProjection, snapshotFallback);
+    if (syncedStatus.changed) {
+      effectiveProjection = syncedStatus.projection;
+      diagnostics.push(...syncedStatus.diagnostics);
+      continue;
+    }
+    break;
+  }
+  return {
+    projection: effectiveProjection,
+    diagnostics
+  };
 }
 
 async function persistWorkflowEvents(
@@ -417,6 +661,16 @@ function hasEquivalentStatus(
   right: Awaited<ReturnType<RuntimeStore["loadProjection"]>>["status"]
 ): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function dedupeRunRecords(records: HostRunRecord[]): HostRunRecord[] {
+  const byAssignmentId = new Map<string, HostRunRecord>();
+  for (const record of records) {
+    if (!byAssignmentId.has(record.assignmentId)) {
+      byAssignmentId.set(record.assignmentId, record);
+    }
+  }
+  return [...byAssignmentId.values()];
 }
 
 function deriveWorkflowStatusTimestamp(

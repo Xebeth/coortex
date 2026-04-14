@@ -8,7 +8,13 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 import { RuntimeStore } from "../persistence/store.js";
+import type { RuntimeEvent } from "../core/events.js";
 import type { HostRunRecord } from "../core/types.js";
+import {
+  evaluateWorkflowProgression,
+  workflowArtifactPath
+} from "../workflows/index.js";
+import type { WorkflowArtifactDocument } from "../workflows/types.js";
 
 const execFileAsync = promisify(execFile);
 const liveCodexEnv = {
@@ -64,6 +70,68 @@ function workflowAttemptFromSnapshot(snapshot: {
     workflowCycle: snapshot.workflowProgress.workflowCycle,
     moduleId: snapshot.workflowProgress.currentModuleId,
     moduleAttempt: snapshot.workflowProgress.currentModuleAttempt
+  };
+}
+
+async function appendWorkflowModuleProgression(
+  store: RuntimeStore,
+  input: {
+    artifact: WorkflowArtifactDocument;
+    resultId: string;
+    summary: string;
+    createdAt: string;
+    progressionAt: string;
+    omitEventTypes?: RuntimeEvent["type"][];
+  }
+): Promise<{
+  createdAssignmentId?: string;
+}> {
+  await store.writeJsonArtifact(
+    workflowArtifactPath(
+      input.artifact.workflowId,
+      input.artifact.workflowCycle,
+      input.artifact.moduleId,
+      input.artifact.assignmentId,
+      input.artifact.moduleAttempt
+    ),
+    input.artifact
+  );
+  const projection = await store.loadProjection();
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp: input.createdAt,
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: input.resultId,
+        assignmentId: input.artifact.assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary: input.summary,
+        changedFiles: [],
+        createdAt: input.createdAt
+      }
+    }
+  });
+  const progressedProjection = await store.loadProjection();
+  const progression = await evaluateWorkflowProgression(progressedProjection, store, {
+    timestamp: input.progressionAt
+  });
+  const omittedEventTypes = new Set(input.omitEventTypes ?? []);
+  for (const event of progression.events) {
+    if (omittedEventTypes.has(event.type)) {
+      continue;
+    }
+    await store.appendEvent(event);
+  }
+  await store.syncSnapshotFromEvents();
+  const createdAssignmentId = progression.events.find(
+    (event): event is Extract<RuntimeEvent, { type: "assignment.created" }> =>
+      event.type === "assignment.created"
+  )?.payload.assignment.id;
+  return {
+    ...(createdAssignmentId ? { createdAssignmentId } : {})
   };
 }
 
@@ -1963,6 +2031,177 @@ test("ctx status and resume surface in-projection authoritative lease blockers",
     new RegExp(`Assignment ${authoritativeAssignmentId} already has an active host run lease\\.`)
   );
   assert.equal(finalEnvelope, initialEnvelope);
+});
+
+test("ctx status reports interrupted-transition active leases against the converged current assignment", async () => {
+  for (const scenario of ["advance", "rewind"] as const) {
+    const projectRoot = await mkdtemp(
+      join(tmpdir(), `coortex-cli-interrupted-transition-active-lease-${scenario}-`)
+    );
+    const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+    const store = RuntimeStore.forProject(projectRoot);
+
+    await execFileAsync(process.execPath, [cliPath, "init"], {
+      cwd: projectRoot
+    });
+
+    const runtimeDir = join(projectRoot, ".coortex");
+    const initialSnapshot = JSON.parse(
+      await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+    ) as {
+      assignments: Array<{ id: string }>;
+      workflowProgress: {
+        currentAssignmentId: string | null;
+      };
+    };
+
+    let expectedAssignmentId: string | undefined;
+    let expectedWorkflowAttempt: NonNullable<HostRunRecord["workflowAttempt"]> | undefined;
+
+    if (scenario === "advance") {
+      const planAssignmentId = initialSnapshot.assignments[0]!.id;
+      const interrupted = await appendWorkflowModuleProgression(store, {
+        artifact: {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "plan",
+          moduleAttempt: 1,
+          assignmentId: planAssignmentId,
+          createdAt: "2026-04-19T09:01:00.000Z",
+          payload: {
+            planSummary: "Plan ready for review.",
+            implementationSteps: ["Reuse the pre-created review assignment."],
+            reviewEvidenceSummary: "Interrupted advance should converge onto the review assignment with the active lease."
+          }
+        },
+        resultId: "cli-status-interrupted-advance-plan",
+        summary: "Plan completed before transition persistence finished.",
+        createdAt: "2026-04-19T09:01:00.000Z",
+        progressionAt: "2026-04-19T09:01:01.000Z",
+        omitEventTypes: ["workflow.transition.applied"]
+      });
+      expectedAssignmentId = interrupted.createdAssignmentId;
+      expectedWorkflowAttempt = {
+        workflowId: "default",
+        workflowCycle: 1,
+        moduleId: "review",
+        moduleAttempt: 1
+      };
+    } else {
+      const planAssignmentId = initialSnapshot.assignments[0]!.id;
+      await appendWorkflowModuleProgression(store, {
+        artifact: {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "plan",
+          moduleAttempt: 1,
+          assignmentId: planAssignmentId,
+          createdAt: "2026-04-19T10:01:00.000Z",
+          payload: {
+            planSummary: "Plan complete.",
+            implementationSteps: ["Advance to review."],
+            reviewEvidenceSummary: "Ready for review."
+          }
+        },
+        resultId: "cli-status-interrupted-rewind-plan",
+        summary: "Plan completed.",
+        createdAt: "2026-04-19T10:01:00.000Z",
+        progressionAt: "2026-04-19T10:01:01.000Z"
+      });
+      const afterPlanSnapshot = await store.loadSnapshot();
+      const reviewAssignmentId = afterPlanSnapshot?.workflowProgress?.currentAssignmentId;
+      assert.ok(reviewAssignmentId, "expected review assignment after plan advancement");
+      await appendWorkflowModuleProgression(store, {
+        artifact: {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "review",
+          moduleAttempt: 1,
+          assignmentId: reviewAssignmentId,
+          createdAt: "2026-04-19T10:03:00.000Z",
+          payload: {
+            verdict: "approved",
+            rationaleSummary: "Review approved."
+          }
+        },
+        resultId: "cli-status-interrupted-rewind-review",
+        summary: "Review completed.",
+        createdAt: "2026-04-19T10:03:00.000Z",
+        progressionAt: "2026-04-19T10:03:01.000Z"
+      });
+      const afterReviewSnapshot = await store.loadSnapshot();
+      const verifyAssignmentId = afterReviewSnapshot?.workflowProgress?.currentAssignmentId;
+      assert.ok(verifyAssignmentId, "expected verify assignment after review advancement");
+      const interrupted = await appendWorkflowModuleProgression(store, {
+        artifact: {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "verify",
+          moduleAttempt: 1,
+          assignmentId: verifyAssignmentId,
+          createdAt: "2026-04-19T10:05:00.000Z",
+          payload: {
+            verdict: "failed",
+            verificationSummary: "Verification failed and should rewind to review.",
+            evidenceResultIds: ["cli-status-interrupted-rewind-review"]
+          }
+        },
+        resultId: "cli-status-interrupted-rewind-verify",
+        summary: "Verification failed before transition persistence finished.",
+        createdAt: "2026-04-19T10:05:00.000Z",
+        progressionAt: "2026-04-19T10:05:01.000Z",
+        omitEventTypes: ["workflow.transition.applied"]
+      });
+      expectedAssignmentId = interrupted.createdAssignmentId;
+      expectedWorkflowAttempt = {
+        workflowId: "default",
+        workflowCycle: 2,
+        moduleId: "review",
+        moduleAttempt: 1
+      };
+    }
+
+    assert.ok(expectedAssignmentId, "expected interrupted transition to pre-create the next assignment");
+    assert.ok(expectedWorkflowAttempt, "expected workflow attempt identity for the active lease");
+    const activeLease: HostRunRecord = {
+      assignmentId: expectedAssignmentId,
+      state: "running",
+      workflowAttempt: expectedWorkflowAttempt,
+      adapterData: {
+        nativeRunId: `thread-cli-interrupted-${scenario}-active-lease`
+      },
+      startedAt: new Date(Date.now() - 60_000).toISOString(),
+      heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    };
+    await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+    await writeFile(
+      join(runtimeDir, "adapters", "codex", "runs", `${expectedAssignmentId}.json`),
+      JSON.stringify(activeLease, null, 2),
+      "utf8"
+    );
+    await writeFile(
+      join(runtimeDir, "adapters", "codex", "runs", `${expectedAssignmentId}.lease.json`),
+      JSON.stringify(activeLease, null, 2),
+      "utf8"
+    );
+
+    const status = await runCliCommand(cliPath, "status", {
+      cwd: projectRoot
+    });
+
+    assert.equal(status.exitCode, 0);
+    assert.match(status.stderr, /WARNING active-run-present .*active host run lease/);
+    assert.match(status.stdout, /Authoritative host leases: 1/);
+    assert.match(
+      status.stdout,
+      new RegExp(`- ${expectedAssignmentId} active host run lease on the current active assignment`)
+    );
+    assert.doesNotMatch(
+      status.stdout,
+      new RegExp(`- ${expectedAssignmentId} active host run lease outside the current projection`)
+    );
+  }
 });
 
 test("ctx status recovers a completed host run and requeues the workflow module", async () => {
