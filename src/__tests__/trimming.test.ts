@@ -5,10 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { buildTaskEnvelope } from "../hosts/codex/adapter/envelope.js";
+import { buildCodexExecutionPrompt } from "../hosts/codex/adapter/prompt.js";
+import { buildRecoveryBrief } from "../recovery/brief.js";
 import { createEmptyProjection } from "../projections/runtime-projection.js";
-import type { Assignment, RecoveryBrief, RuntimeStatus } from "../core/types.js";
+import type { Assignment, RecoveryBrief, RuntimeStatus, WorkflowSummary } from "../core/types.js";
 import { RuntimeStore } from "../persistence/store.js";
 import type { RuntimeConfig } from "../config/types.js";
+import { deriveWorkflowSummary } from "../workflows/index.js";
 
 test("task envelope trims oversized result summaries, writes artifacts, and stays bounded", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-envelope-"));
@@ -96,3 +99,316 @@ test("task envelope trims oversized result summaries, writes artifacts, and stay
   );
   assert.equal(artifact.trim(), "x".repeat(1_000));
 });
+
+test("task envelope mirrors the writable workflow artifact and keeps read artifacts read-only", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-envelope-workflow-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId: "session-workflow",
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: "2026-04-13T00:00:00.000Z"
+  };
+  await store.initialize(config);
+
+  const projection = createEmptyProjection("session-workflow", projectRoot, "codex");
+  const assignment: Assignment = {
+    id: "assignment-workflow",
+    parentTaskId: "session-workflow",
+    workflow: "default",
+    ownerType: "runtime",
+    ownerId: "codex:bootstrap",
+    objective: "Produce the plan artifact.",
+    writeScope: ["src/", "docs/"],
+    requiredOutputs: ["planSummary"],
+    state: "queued",
+    createdAt: "2026-04-13T00:00:00.000Z",
+    updatedAt: "2026-04-13T00:00:00.000Z"
+  };
+  const status: RuntimeStatus = {
+    activeMode: "solo",
+    currentObjective: assignment.objective,
+    activeAssignmentIds: [assignment.id],
+    activeHost: "codex",
+    activeAdapter: "codex",
+    lastDurableOutputAt: "2026-04-13T00:00:00.000Z",
+    resumeReady: true
+  };
+  projection.assignments.set(assignment.id, assignment);
+  projection.status = status;
+
+  const brief: RecoveryBrief = {
+    activeObjective: assignment.objective,
+    activeAssignments: [
+      {
+        id: assignment.id,
+        objective: assignment.objective,
+        state: assignment.state,
+        writeScope: assignment.writeScope,
+        requiredOutputs: assignment.requiredOutputs
+      }
+    ],
+    lastDurableResults: [],
+    unresolvedDecisions: [],
+    nextRequiredAction: `Start plan assignment ${assignment.id}: ${assignment.objective}`,
+    generatedAt: "2026-04-13T00:00:00.000Z"
+  };
+  const workflow: WorkflowSummary = {
+    id: "default",
+    currentModuleId: "plan",
+    currentModuleState: "queued",
+    workflowCycle: 1,
+    currentAssignmentId: assignment.id,
+    outputArtifact:
+      ".coortex/runtime/workflows/default/cycles/1/plan/assignment-workflow/attempt-1.json",
+    readArtifacts: [
+      ".coortex/runtime/workflows/default/cycles/1/review/review-assignment/attempt-1.json",
+      ".coortex/artifacts/results/referenced-evidence.txt"
+    ],
+    rerunEligible: true,
+    blockerReason: null,
+    lastGateOutcome: "blocked",
+    lastDurableAdvancement: "Rerun plan attempt 1."
+  };
+
+  const envelope = await buildTaskEnvelope(store, projection, brief, {
+    host: "codex",
+    adapter: "codex",
+    maxChars: 4_000,
+    workflow
+  });
+  const prompt = buildCodexExecutionPrompt(envelope);
+  const outputArtifact = workflow.outputArtifact;
+  const readArtifact = workflow.readArtifacts[0];
+  const referencedEvidence = workflow.readArtifacts[1];
+
+  assert.ok(outputArtifact, "expected a workflow output artifact");
+  assert.ok(readArtifact, "expected a workflow read artifact");
+  assert.ok(referencedEvidence, "expected a referenced runtime evidence artifact");
+
+  assert.ok(envelope.writeScope.includes("src/"));
+  assert.ok(envelope.writeScope.includes("docs/"));
+  assert.ok(envelope.writeScope.includes(outputArtifact));
+  assert.ok(!envelope.writeScope.includes(readArtifact));
+  assert.ok(!envelope.writeScope.includes(referencedEvidence));
+  assert.deepEqual(envelope.workflow, workflow);
+  assert.match(
+    prompt,
+    new RegExp(`Write the workflow artifact to ${escapeForRegExp(outputArtifact)}`)
+  );
+  assert.match(
+    prompt,
+    new RegExp(`Use workflow\\.readArtifacts as read-only inputs: ${escapeForRegExp(readArtifact)}`)
+  );
+  assert.match(
+    prompt,
+    new RegExp(escapeForRegExp(referencedEvidence))
+  );
+  assert.doesNotMatch(
+    prompt,
+    new RegExp(`Write the workflow artifact to ${escapeForRegExp(readArtifact)}`)
+  );
+  assert.doesNotMatch(
+    prompt,
+    new RegExp(`Write the workflow artifact to ${escapeForRegExp(referencedEvidence)}`)
+  );
+});
+
+test("task envelope prefers workflow current assignment over stale status selectors", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-envelope-workflow-selector-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId: "session-workflow-selector",
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: "2026-04-18T00:00:00.000Z"
+  };
+  await store.initialize(config);
+
+  const projection = createEmptyProjection("session-workflow-selector", projectRoot, "codex");
+  const workflowAssignment: Assignment = {
+    id: "assignment-workflow-current",
+    parentTaskId: "session-workflow-selector",
+    workflow: "default",
+    ownerType: "runtime",
+    ownerId: "codex:bootstrap",
+    objective: "Produce the workflow plan artifact.",
+    writeScope: ["src/", "docs/"],
+    requiredOutputs: ["planSummary"],
+    state: "queued",
+    createdAt: "2026-04-18T00:00:00.000Z",
+    updatedAt: "2026-04-18T00:00:00.000Z"
+  };
+  const staleStatusAssignment: Assignment = {
+    id: "assignment-status-stale",
+    parentTaskId: "session-workflow-selector",
+    workflow: "default",
+    ownerType: "runtime",
+    ownerId: "codex:bootstrap",
+    objective: "Old stale assignment that should not leak into the envelope.",
+    writeScope: ["tests/"],
+    requiredOutputs: ["staleOutput"],
+    state: "queued",
+    createdAt: "2026-04-18T00:00:00.000Z",
+    updatedAt: "2026-04-18T00:00:00.000Z"
+  };
+  projection.assignments.set(workflowAssignment.id, workflowAssignment);
+  projection.assignments.set(staleStatusAssignment.id, staleStatusAssignment);
+  projection.status = {
+    activeMode: "solo",
+    currentObjective: staleStatusAssignment.objective,
+    activeAssignmentIds: [staleStatusAssignment.id],
+    activeHost: "codex",
+    activeAdapter: "codex",
+    lastDurableOutputAt: "2026-04-18T00:00:00.000Z",
+    resumeReady: true
+  };
+  projection.workflowProgress = {
+    workflowId: "default",
+    orderedModuleIds: ["plan", "review", "verify"],
+    currentModuleId: "plan",
+    workflowCycle: 1,
+    currentAssignmentId: workflowAssignment.id,
+    currentModuleAttempt: 1,
+    modules: {
+      plan: {
+        moduleId: "plan",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId: workflowAssignment.id,
+        moduleState: "queued",
+        sourceResultIds: [],
+        sourceDecisionIds: [],
+        artifactReferences: [],
+        enteredAt: "2026-04-18T00:00:00.000Z"
+      }
+    }
+  };
+
+  const brief = buildRecoveryBrief(projection);
+  const workflow = deriveWorkflowSummary(projection);
+  assert.ok(workflow, "expected workflow summary");
+  const envelope = await buildTaskEnvelope(store, projection, brief, {
+    host: "codex",
+    adapter: "codex",
+    maxChars: 4_000,
+    workflow
+  });
+
+  assert.deepEqual(brief.activeAssignments.map((assignment) => assignment.id), [workflowAssignment.id]);
+  assert.equal(envelope.objective, workflowAssignment.objective);
+  assert.equal(envelope.metadata.activeAssignmentId, workflowAssignment.id);
+  assert.deepEqual(envelope.requiredOutputs, workflowAssignment.requiredOutputs);
+  assert.ok(envelope.writeScope.includes("src/"));
+  assert.ok(envelope.writeScope.includes("docs/"));
+  assert.ok(!envelope.writeScope.includes("tests/"));
+  assert.ok(envelope.writeScope.includes(workflow.outputArtifact!));
+});
+
+test("task envelope trims oversized workflow explanatory strings before the budget hard-fails", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-envelope-workflow-trim-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId: "session-workflow-trim",
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: "2026-04-14T00:00:00.000Z"
+  };
+  await store.initialize(config);
+
+  const projection = createEmptyProjection("session-workflow-trim", projectRoot, "codex");
+  const assignment: Assignment = {
+    id: "assignment-workflow-trim",
+    parentTaskId: "session-workflow-trim",
+    workflow: "default",
+    ownerType: "runtime",
+    ownerId: "codex:bootstrap",
+    objective: "Repair the blocked workflow state.",
+    writeScope: ["src/", "docs/"],
+    requiredOutputs: ["planSummary"],
+    state: "queued",
+    createdAt: "2026-04-14T00:00:00.000Z",
+    updatedAt: "2026-04-14T00:00:00.000Z"
+  };
+  const status: RuntimeStatus = {
+    activeMode: "solo",
+    currentObjective: assignment.objective,
+    activeAssignmentIds: [assignment.id],
+    activeHost: "codex",
+    activeAdapter: "codex",
+    lastDurableOutputAt: "2026-04-14T00:00:00.000Z",
+    resumeReady: true
+  };
+  projection.assignments.set(assignment.id, assignment);
+  projection.status = status;
+
+  const blockerReason = "Need more evidence. ".repeat(260);
+  const lastDurableAdvancement = "Advanced workflow context. ".repeat(220);
+  const brief: RecoveryBrief = {
+    activeObjective: assignment.objective,
+    activeAssignments: [
+      {
+        id: assignment.id,
+        objective: assignment.objective,
+        state: assignment.state,
+        writeScope: assignment.writeScope,
+        requiredOutputs: assignment.requiredOutputs
+      }
+    ],
+    lastDurableResults: [],
+    unresolvedDecisions: [],
+    nextRequiredAction: blockerReason,
+    generatedAt: "2026-04-14T00:00:00.000Z"
+  };
+  const workflow: WorkflowSummary = {
+    id: "default",
+    currentModuleId: "review",
+    currentModuleState: "blocked",
+    workflowCycle: 1,
+    currentAssignmentId: assignment.id,
+    outputArtifact:
+      ".coortex/runtime/workflows/default/cycles/1/review/assignment-workflow-trim/attempt-1.json",
+    readArtifacts: [
+      ".coortex/runtime/workflows/default/cycles/1/plan/plan-assignment/attempt-1.json"
+    ],
+    rerunEligible: false,
+    blockerReason,
+    lastGateOutcome: "blocked",
+    lastDurableAdvancement
+  };
+
+  const envelope = await buildTaskEnvelope(store, projection, brief, {
+    host: "codex",
+    adapter: "codex",
+    maxChars: 4_000,
+    workflow
+  });
+  const blockerField = envelope.trimmedFields.find((field) => field.label === "workflow:blockerReason");
+  const advancementField = envelope.trimmedFields.find(
+    (field) => field.label === "workflow:lastDurableAdvancement"
+  );
+
+  assert.equal(envelope.trimApplied, true);
+  assert.ok(envelope.estimatedChars <= 4_000);
+  assert.ok(blockerField, "expected blockerReason compaction metadata");
+  assert.ok(advancementField, "expected lastDurableAdvancement compaction metadata");
+  assert.match(envelope.workflow?.blockerReason ?? "", /\.\.\.\[trimmed\]$/);
+  assert.match(envelope.workflow?.lastDurableAdvancement ?? "", /\.\.\.\[trimmed\]$/);
+  assert.equal(envelope.recoveryBrief.nextRequiredAction, envelope.workflow?.blockerReason);
+
+  const blockerArtifact = await readFile(join(projectRoot, blockerField!.reference), "utf8");
+  const advancementArtifact = await readFile(join(projectRoot, advancementField!.reference), "utf8");
+
+  assert.equal(blockerArtifact.trim(), blockerReason.trim());
+  assert.equal(advancementArtifact.trim(), lastDurableAdvancement.trim());
+});
+
+function escapeForRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

@@ -21,6 +21,7 @@ The runtime owns:
 - result packets
 - decision packets
 - lifecycle state
+- workflow progress
 - verification state
 - recovery state
 
@@ -28,7 +29,8 @@ The runtime owns:
 Host adapters translate between Coortex and a host. They do not own orchestration truth.
 
 ### 3. Workflows define policy
-Workflow modules define sequencing and policy. They do not own durable state.
+Workflow modules define sequencing and policy from normalized runtime
+truth. They do not own durable state or persistence orchestration.
 
 ### 4. Telemetry is normalized
 Host-native telemetry should be converted into a common Coortex telemetry model.
@@ -71,6 +73,7 @@ Responsibilities:
 - derive current status
 - derive current assignment views
 - derive recovery inputs
+- replay workflow progress
 - support status surfaces
 
 Must not become authoritative over runtime truth.
@@ -82,6 +85,8 @@ Responsibilities:
 - rebuild actionable current state
 - derive compact recovery brief
 - derive stale/requeue decisions from runtime-owned state
+- shape stale/completed reconciliation facts for the shared CLI load
+  path
 
 Must not rely on transcript history as primary truth.
 
@@ -89,12 +94,13 @@ Must not rely on transcript history as primary truth.
 Own policy modules.
 
 Responsibilities:
-- phases
+- built-in module registry and sequence
 - assignment emission rules
-- completion semantics
-- workflow-specific hints
+- gate evaluation and transition selection
+- workflow summary derivation
+- single-active-assignment workflow policy
 
-Must not own persistence or truth.
+Must not own persistence, command orchestration, or truth.
 
 ## `adapters`
 Own adapter contracts and shared adapter interfaces.
@@ -166,11 +172,14 @@ Own operator-facing commands.
 
 Responsibilities:
 - initialization
+- shared workflow-aware load/reconcile for `status`, `resume`,
+  `inspect`, and `run`
 - status
 - doctor/validation
-- resume/status surfaces
+- resume/status/inspect surfaces
 - persist recovery-side mutations when operator commands reconcile
   durable state
+- persist workflow-convergence mutations implied by durable truth
 
 Must remain thin.
 

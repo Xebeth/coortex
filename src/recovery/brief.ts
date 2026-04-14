@@ -1,9 +1,15 @@
 import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
+import { deriveWorkflowOperatorGuidance } from "../core/workflow-guidance.js";
 
 export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief {
-  const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
-    projection.status.activeAssignmentIds.includes(assignment.id)
-  );
+  const workflowGuidance = projection.workflowProgress
+    ? deriveWorkflowOperatorGuidance(projection)
+    : null;
+  const activeAssignments = workflowGuidance
+    ? workflowGuidance.currentAssignment ? [workflowGuidance.currentAssignment] : []
+    : [...projection.assignments.values()].filter((assignment) =>
+        projection.status.activeAssignmentIds.includes(assignment.id)
+      );
   const recentResults = [...projection.results.values()]
     .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
     .slice(0, 3)
@@ -25,7 +31,7 @@ export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief
     }));
 
   return {
-    activeObjective: projection.status.currentObjective,
+    activeObjective: workflowGuidance?.currentObjective ?? projection.status.currentObjective,
     activeAssignments: activeAssignments.map((assignment) => ({
       id: assignment.id,
       objective: assignment.objective,
@@ -35,7 +41,8 @@ export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief
     })),
     lastDurableResults: recentResults,
     unresolvedDecisions,
-    nextRequiredAction: determineNextAction(activeAssignments, unresolvedDecisions),
+    nextRequiredAction: workflowGuidance?.nextRequiredAction
+      ?? determineNextAction(activeAssignments, unresolvedDecisions),
     generatedAt: deriveGeneratedAt(projection)
   };
 }

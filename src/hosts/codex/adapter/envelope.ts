@@ -1,4 +1,8 @@
-import type { RecoveryBrief, RuntimeProjection } from "../../../core/types.js";
+import type {
+  RecoveryBrief,
+  RuntimeProjection,
+  WorkflowSummary
+} from "../../../core/types.js";
 import type {
   RuntimeArtifactStore,
   TaskEnvelope,
@@ -11,6 +15,7 @@ export interface EnvelopeOptions {
   maxChars?: number;
   resultSummaryLimit?: number;
   artifactDir?: string;
+  workflow?: WorkflowSummary | null;
 }
 
 export async function buildTaskEnvelope(
@@ -19,11 +24,24 @@ export async function buildTaskEnvelope(
   brief: RecoveryBrief,
   options: EnvelopeOptions
 ): Promise<TaskEnvelope> {
-  const activeAssignment = projection.status.activeAssignmentIds
-    .map((assignmentId) => projection.assignments.get(assignmentId))
-    .find((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));
+  const activeAssignment = options.workflow
+    ? options.workflow.currentAssignmentId
+      ? projection.assignments.get(options.workflow.currentAssignmentId)
+      : undefined
+    : projection.status.activeAssignmentIds
+        .map((assignmentId) => projection.assignments.get(assignmentId))
+        .find((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));
+  const workflowOnlyEnvelope =
+    !activeAssignment && options.workflow?.currentAssignmentId === null
+      ? {
+          objective: brief.activeObjective,
+          writeScope: options.workflow.outputArtifact ? [options.workflow.outputArtifact] : [],
+          requiredOutputs: [] as string[],
+          activeAssignmentId: null as string | null
+        }
+      : undefined;
 
-  if (!activeAssignment) {
+  if (!activeAssignment && !workflowOnlyEnvelope) {
     throw new Error("Cannot build envelope without an active assignment.");
   }
 
@@ -101,21 +119,35 @@ export async function buildTaskEnvelope(
     return entry;
   });
 
+  const compactedWorkflow = options.workflow
+    ? await compactWorkflowSummary(store, options.workflow, trimmedFields)
+    : undefined;
+  const nextRequiredAction = compactedWorkflow?.originalBlockerReason === brief.nextRequiredAction
+    ? (compactedWorkflow.workflow.blockerReason ?? brief.nextRequiredAction)
+    : brief.nextRequiredAction;
+
   let envelope: TaskEnvelope = {
     host: options.host,
     adapter: options.adapter,
-    objective: activeAssignment.objective,
-    writeScope: activeAssignment.writeScope,
-    requiredOutputs: activeAssignment.requiredOutputs,
+    objective: activeAssignment?.objective ?? workflowOnlyEnvelope!.objective,
+    writeScope: [
+      ...(activeAssignment?.writeScope ?? workflowOnlyEnvelope!.writeScope),
+      ...(activeAssignment && compactedWorkflow?.workflow.outputArtifact
+        ? [compactedWorkflow.workflow.outputArtifact]
+        : [])
+    ],
+    requiredOutputs: activeAssignment?.requiredOutputs ?? workflowOnlyEnvelope!.requiredOutputs,
     recoveryBrief: {
       ...brief,
+      nextRequiredAction,
       lastDurableResults: compactResults,
       unresolvedDecisions: compactDecisions
     },
+    ...(compactedWorkflow ? { workflow: compactedWorkflow.workflow } : {}),
     recentResults,
     metadata: {
       activeMode: projection.status.activeMode,
-      activeAssignmentId: activeAssignment.id,
+      activeAssignmentId: activeAssignment?.id ?? workflowOnlyEnvelope!.activeAssignmentId,
       unresolvedDecisionCount: brief.unresolvedDecisions.length
     },
     estimatedChars: 0,
@@ -131,6 +163,64 @@ export async function buildTaskEnvelope(
   }
 
   return envelope;
+}
+
+async function compactWorkflowSummary(
+  store: RuntimeArtifactStore,
+  workflow: WorkflowSummary,
+  trimmedFields: TrimmedField[]
+): Promise<{
+  workflow: WorkflowSummary;
+  originalBlockerReason: string | null;
+}> {
+  const compacted: WorkflowSummary = {
+    ...workflow,
+    readArtifacts: [...workflow.readArtifacts]
+  };
+  const originalBlockerReason = workflow.blockerReason;
+
+  if (workflow.blockerReason) {
+    const trimmed = await trimTextToArtifact(
+      store,
+      workflowTextArtifactPath(workflow, "blocker-reason"),
+      workflow.blockerReason,
+      300,
+      workflowTextReference(workflow, "blocker-reason")
+    );
+    if (trimmed.trimmed) {
+      compacted.blockerReason = trimmed.value;
+      trimmedFields.push({
+        label: "workflow:blockerReason",
+        originalChars: trimmed.originalChars,
+        keptChars: trimmed.value.length,
+        reference: trimmed.reference
+      });
+    }
+  }
+
+  if (workflow.lastDurableAdvancement) {
+    const trimmed = await trimTextToArtifact(
+      store,
+      workflowTextArtifactPath(workflow, "last-durable-advancement"),
+      workflow.lastDurableAdvancement,
+      300,
+      workflowTextReference(workflow, "last-durable-advancement")
+    );
+    if (trimmed.trimmed) {
+      compacted.lastDurableAdvancement = trimmed.value;
+      trimmedFields.push({
+        label: "workflow:lastDurableAdvancement",
+        originalChars: trimmed.originalChars,
+        keptChars: trimmed.value.length,
+        reference: trimmed.reference
+      });
+    }
+  }
+
+  return {
+    workflow: compacted,
+    originalBlockerReason
+  };
 }
 
 async function trimTextToArtifact(
@@ -220,4 +310,18 @@ function withEstimatedChars(envelope: TaskEnvelope): TaskEnvelope {
       estimatedChars: 0
     }).length
   };
+}
+
+function workflowTextArtifactPath(
+  workflow: WorkflowSummary,
+  suffix: "blocker-reason" | "last-durable-advancement"
+): string {
+  return `artifacts/workflows/${workflow.id}/cycle-${workflow.workflowCycle}/${workflow.currentModuleId}/${suffix}.txt`;
+}
+
+function workflowTextReference(
+  workflow: WorkflowSummary,
+  suffix: "blocker-reason" | "last-durable-advancement"
+): string {
+  return `.coortex/${workflowTextArtifactPath(workflow, suffix)}`;
 }

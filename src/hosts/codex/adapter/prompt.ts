@@ -15,10 +15,22 @@ export interface CodexStructuredOutcome {
 }
 
 export function buildCodexExecutionPrompt(envelope: TaskEnvelope): string {
+  const workflowLines = envelope.workflow
+    ? [
+        `Workflow module: ${envelope.workflow.currentModuleId}.`,
+        envelope.workflow.outputArtifact
+          ? `Write the workflow artifact to ${envelope.workflow.outputArtifact}. This path is writable because it is mirrored into writeScope.`
+          : "No writable workflow artifact target is active.",
+        envelope.workflow.readArtifacts.length > 0
+          ? `Use workflow.readArtifacts as read-only inputs: ${envelope.workflow.readArtifacts.join(", ")}.`
+          : "There are no read-only workflow artifacts for this assignment."
+      ]
+    : [];
   return [
     "You are executing a Coortex assignment through the Codex host adapter.",
     "Treat the bounded envelope below as the runtime-owned source of truth.",
     "Stay within the provided write scope.",
+    ...workflowLines,
     "If you can make progress safely, do the work and return a result outcome.",
     "If you are blocked on missing information, an irreversible choice, or an external dependency, return a decision outcome.",
     "Always return structured data that matches the provided schema.",

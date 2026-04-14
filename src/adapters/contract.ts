@@ -1,4 +1,4 @@
-import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
+import type { RecoveryBrief, RuntimeProjection, WorkflowSummary } from "../core/types.js";
 import type { DecisionPacket, HostRunRecord, ResultPacket } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
 
@@ -40,6 +40,7 @@ export interface TaskEnvelope {
   writeScope: string[];
   requiredOutputs: string[];
   recoveryBrief: RecoveryBrief;
+  workflow?: WorkflowSummary;
   recentResults: Array<{
     resultId: string;
     summary: string;
@@ -109,7 +110,10 @@ export interface HostAdapter {
   buildResumeEnvelope(
     store: RuntimeArtifactStore,
     projection: RuntimeProjection,
-    brief: RecoveryBrief
+    brief: RecoveryBrief,
+    options?: {
+      workflow?: WorkflowSummary | null;
+    }
   ): Promise<TaskEnvelope>;
   executeAssignment(
     store: RuntimeArtifactStore,

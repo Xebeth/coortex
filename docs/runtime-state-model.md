@@ -84,7 +84,59 @@ Suggested fields:
 - `last_durable_output_at`
 - `resume_ready`
 
-## 5. Recovery Brief
+## 5. Workflow Progress
+
+Workflow progress is the durable runtime-owned checkpoint for workflow
+mode.
+
+Required fields:
+
+- `workflow_id`
+- `ordered_module_ids`
+- `current_module_id`
+- `workflow_cycle`
+- `current_assignment_id`
+- `current_module_attempt`
+- `modules`
+
+Common optional fields:
+
+- `last_gate`
+- `last_transition`
+
+Module progress entries must be sufficient to recover the current
+module, current attempt, durable evidence references, and last gate
+evaluation without inferring workflow truth from status text alone.
+
+## 6. Workflow Summary
+
+Workflow summary is a **derived** workflow-facing view, not a durable
+record.
+
+It is rebuilt from `WorkflowProgress`, assignments, decisions, results,
+and workflow guidance. The runtime exposes it through:
+
+- `TaskEnvelope.workflow` on resume and run surfaces
+- `ctx inspect` as the public workflow inspection shape
+
+Common fields:
+
+- `id`
+- `current_module_id`
+- `current_module_state`
+- `workflow_cycle`
+- `current_assignment_id`
+- `output_artifact`
+- `read_artifacts`
+- `rerun_eligible`
+- `blocker_reason`
+- `last_gate_outcome`
+- `last_durable_advancement`
+
+This summary must stay derived from durable runtime truth rather than
+becoming a second persisted workflow record.
+
+## 7. Recovery Brief
 
 The recovery brief is the compact summary used to resume work.
 
@@ -98,7 +150,7 @@ Required contents:
 
 It must be compact enough to fit inside a bounded task envelope.
 
-## 6. Host Run Record
+## 8. Host Run Record
 
 The host run record is the durable, host-agnostic summary of one
 assignment execution attempt.
@@ -111,6 +163,7 @@ Required fields:
 
 Common optional fields:
 
+- `workflow_attempt`
 - `heartbeat_at`
 - `lease_expires_at`
 - `stale_at`
@@ -123,6 +176,23 @@ Common optional fields:
 Host-native identifiers or extra metadata should be treated as adapter
 extensions over this base shape rather than part of the core
 run-lifecycle model.
+
+For workflow-mode executions, `workflow_attempt` is part of the required
+contract, not a best-effort hint. Its durable shape is:
+
+- `workflow_id`
+- `workflow_cycle`
+- `module_id`
+- `module_attempt`
+
+The implementation currently serializes that nested object as
+`workflowAttempt` with camelCase child fields in `HostRunRecord`.
+
+Same-assignment reruns must use that explicit attempt identity to
+distinguish attempt 1 from attempt 2. Workflow-mode run records that
+lack `workflow_attempt` are invalid or incomplete workflow metadata and
+must not infer attempt ownership from `started_at`, `completed_at`, or
+terminal outcome timestamps.
 
 ---
 
@@ -157,12 +227,21 @@ Representative events:
 - result submitted
 - decision created
 - decision resolved
+- workflow initialized
+- workflow artifact claimed
+- workflow gate recorded
+- workflow transition applied
 - status updated
 
 ### Derived persistence artifacts
 
 `events.ndjson` is the authoritative durable log and should remain
-append-only during normal read/status/resume inspection paths.
+append-only during normal status, resume, inspect, and run paths.
+
+Workflow-aware load/reconcile may append convergence events during those
+operator commands when durable state already implies missing workflow
+gates, transitions, assignments, or workflow-derived status. It must do
+so by appending new events, not by rewriting prior history.
 
 `snapshot.json` and generated recovery artifacts such as
 `last-resume-envelope.json` are derived caches. Rewriting them during
