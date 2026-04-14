@@ -90,12 +90,12 @@ That means:
 
 ## Near-term implementation focus
 
-Milestone 2 is now complete in the current repository. The next implementation milestone is workflow modules, beginning with explicit sequencing surfaces such as:
+Milestone 2 is complete, but the current branch focus is an additional
+Milestone 2 hardening slice for explicit session attachment and the
+reference-host integration boundary.
 
-- `plan`
-- `review`
-- `verify`
-- additional workflow modules as needed
+Milestone 3 workflow work continues on its own branch and resumes after
+that lower-layer hardening lands.
 
 ## Milestone 2 status
 

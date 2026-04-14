@@ -29,6 +29,21 @@ Completed milestone summaries live under:
 
 ## Near-term sequence
 
+### Immediate prerequisite — Milestone 2 session-attachment hardening
+
+Before Phase 3 resumes, the reference-host integration boundary needs
+an additional Milestone 2 hardening slice.
+
+Focus:
+- explicit session attachment for Coortex-managed host sessions
+- no ambient repo-local runtime authority
+- no foreign claim of attached assignments
+- no duplicate assignment issuance across attached sessions
+- provenance for runtime initialization and host activation
+
+Detailed target:
+- `docs/plans/milestone-2-session-attachment-hardening.md`
+
 ### Phase 3 — Workflow modules
 
 Objective:

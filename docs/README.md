@@ -26,6 +26,12 @@ Completed milestone summaries live under `docs/completed/`:
 
 These are factual milestone summaries, not active plans.
 
+## Active plans
+
+Active branch or milestone plans live under `docs/plans/`:
+
+- `plans/milestone-2-session-attachment-hardening.md`
+
 ## Research and archive
 
 Non-reference material is kept out of the root docs surface:
