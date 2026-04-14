@@ -12,8 +12,10 @@ In the current implementation:
 
 - `core` owns the base host-run state model and generic run-state rules
 - `recovery` owns pure stale-run derivation and brief-shaping logic
-- `cli` owns persistence orchestration when reconciliation mutates
-  durable state
+- `workflows` owns workflow progression, gate evaluation, assignment
+  shaping, and workflow summary derivation from normalized runtime truth
+- `cli` owns the shared workflow-aware load/reconcile seam and
+  persistence orchestration when reconciliation mutates durable state
 - `adapters` owns shared host-run record and lease-backed persistence
   helpers plus shared execution-session coordination
 - host adapters supply host-specific metadata parsing and execution
@@ -193,17 +195,78 @@ replay it again. Later runtime progression, including resolved
 decisions and updated status text, must not regenerate a previously
 absorbed `result.submitted` or `decision.created`.
 
+In workflow mode, if durable runtime truth for the current assignment
+already contains the recovered terminal result or decision, malformed or
+stale leftover run metadata is cleanup-only. Recovery must clear the
+adapter artifacts without requeueing through stale-run handling and
+without appending a duplicate recovered outcome event.
+
+For workflow-mode run records, same-assignment rerun ownership must use
+explicit durable attempt identity:
+
+- `workflowId`
+- `workflowCycle`
+- `moduleId`
+- `moduleAttempt`
+
+That identity must be present on workflow-mode run records and leases.
+It is the ownership discriminator for recovery, inspect visibility,
+active-lease classification, and cleanup. `startedAt`, `completedAt`,
+`staleAt`, and terminal outcome `createdAt` remain lifecycle metadata
+only; they must not be used to infer which workflow attempt owns a
+workflow-mode run record.
+
+If a workflow-mode run record for the current assignment lacks explicit
+attempt identity, the runtime must treat it as invalid or incomplete
+workflow metadata. It may clean the leftover artifacts, but it must not
+recover the outcome, block the current attempt as active, or infer
+same-assignment rerun ownership from timestamps.
+
 Completed run records without durable `terminalOutcome` data are
 degraded metadata only. `inspect` may surface them, but `status`,
 `resume`, and `run` must not treat them as recoverable terminal
 outcomes. They do not outrank a valid active lease and do not reconcile
 runtime truth on their own.
 
+### Workflow-aware load and convergence
+
+When `workflowProgress` is present, `status`, `resume`, `inspect`, and
+`run` must converge through the same workflow-aware load path.
+
+That path must:
+
+1. recover completed or stale host-run state for the current workflow
+   assignment
+2. evaluate workflow gates and transitions from durable runtime truth
+3. append only the missing workflow, assignment, or status events
+   strictly implied by that truth
+4. stop once replayed state is converged
+
+Repeated load calls against already converged workflow state must not
+append duplicate workflow events, recover the same outcome twice, create
+duplicate queued reruns, or emit repeated reconciliation diagnostics for
+the same recovered host run.
+
+Hidden stale workflow artifacts for non-current assignments are
+cleanup-only. They must not be reported as a queued rerun or counted as
+`host.run.stale_reconciled` telemetry unless durable runtime state for
+the current assignment actually reflects a requeue. Operator warnings
+and telemetry for that path must describe hidden artifact cleanup
+truthfully.
+
+When workflow mode is active, workflow-derived status is authoritative
+over later ad hoc status drift. The shared load path must re-sync
+operator-facing status from workflow truth when those views diverge.
+
 ### Command consistency
 
 - `ctx status`
   Must show the same reconciled state that `ctx resume` and `ctx run`
   would see, including stale-run and completed-run reconciliation.
+
+- `ctx inspect`
+  Must read through the same workflow-aware load path and may return
+  workflow context even when no current host run is available.
 
 - `ctx resume`
   Must build its brief from reconciled runtime state.
@@ -212,6 +275,8 @@ runtime truth on their own.
   Must refuse execution if a valid active lease is present.
   When multiple active assignments exist, it must build the envelope and
   recovery brief from the assignment actually being executed.
+  In workflow mode, it must execute only the current workflow
+  assignment.
 
 ---
 

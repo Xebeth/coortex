@@ -158,7 +158,10 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         input.assignmentId,
         input.startedAt,
         completedAt,
-        getNativeRunId(runningRecord)
+        {
+          nativeRunId: getNativeRunId(runningRecord),
+          workflowAttempt: runningRecord.workflowAttempt
+        }
       );
       const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
       return {
@@ -193,7 +196,10 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         input.assignmentId,
         input.startedAt,
         completedAt,
-        completed.nativeRunId
+        {
+          nativeRunId: completed.nativeRunId,
+          workflowAttempt: runningRecord.workflowAttempt
+        }
       );
       const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
 
@@ -225,7 +231,10 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         input.assignmentId,
         input.startedAt,
         completedAt,
-        getNativeRunId(runningRecord)
+        {
+          nativeRunId: getNativeRunId(runningRecord),
+          workflowAttempt: runningRecord.workflowAttempt
+        }
       );
       const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
       return {

@@ -57,7 +57,15 @@ test("host-run session matrix keeps completed state authoritative after a queued
   const runStore = new HostRunStore(store, "matrix", artifacts);
   const startedAt = "2026-04-11T10:00:00.000Z";
   const assignmentId = "assignment-heartbeat";
-  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  const workflowAttempt = {
+    workflowId: "default",
+    workflowCycle: 1,
+    moduleId: "plan",
+    moduleAttempt: 2
+  };
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, {
+    workflowAttempt
+  });
   await runStore.claim(claimedRun);
 
   const originalSetInterval = globalThis.setInterval;
@@ -183,7 +191,9 @@ test("host-run session matrix keeps completed state authoritative after a queued
 
     assert.equal(deriveCompletedCalls, 1);
     assert.equal(execution.run.state, "completed");
+    assert.deepEqual(execution.run.workflowAttempt, workflowAttempt);
     assert.equal(inspected?.state, "completed");
+    assert.deepEqual(inspected?.workflowAttempt, workflowAttempt);
     assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
     const completionWriteIndex = writeEvents.reduce((lastIndex, event, index) => {
       if (

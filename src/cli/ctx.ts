@@ -6,16 +6,18 @@ import { getNativeRunId } from "../core/run-state.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { RuntimeConfig } from "../config/types.js";
+import { deriveWorkflowSummary } from "../workflows/index.js";
 import {
   initRuntime,
+  inspectRuntimeContext,
   inspectRuntimeRun,
-  loadReconciledProjectionWithDiagnostics,
   loadOperatorProjectionWithDiagnostics,
   resumeRuntime,
   runRuntime,
   type CommandDiagnostic
 } from "./commands.js";
 import { createRunCancellationController } from "./run-cancellation.js";
+import { loadWorkflowAwareProjectionWithDiagnostics } from "./runtime-state.js";
 
 async function main(): Promise<void> {
   const [command, assignmentIdArg] = process.argv.slice(2);
@@ -128,17 +130,29 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   }
 
   const { projection, diagnostics, activeLeases, hiddenActiveLeases } =
-    await loadReconciledProjectionWithDiagnostics(store, adapter);
+    await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
   const openDecisions = [...projection.decisions.values()].filter((decision) => decision.state === "open");
+  const workflow = deriveWorkflowSummary(projection);
 
   console.log(`Session: ${projection.sessionId}`);
   console.log(`Objective: ${projection.status.currentObjective}`);
   console.log(`Host: ${projection.status.activeHost}`);
   console.log(`Adapter: ${projection.status.activeAdapter}`);
   console.log(`Last durable output: ${projection.status.lastDurableOutputAt || "n/a"}`);
+  if (workflow) {
+    console.log(`Workflow: ${workflow.id}`);
+    console.log(`Current module: ${workflow.currentModuleId}`);
+    console.log(`Module state: ${workflow.currentModuleState}`);
+    console.log(`Rerun eligible: ${workflow.rerunEligible ? "yes" : "no"}`);
+    console.log(`Last gate: ${workflow.lastGateOutcome ?? "n/a"}`);
+    console.log(`Last advancement: ${workflow.lastDurableAdvancement ?? "n/a"}`);
+    if (workflow.blockerReason) {
+      console.log(`Blocker: ${workflow.blockerReason}`);
+    }
+  }
   console.log(`Active assignments: ${activeAssignments.length}`);
   if (activeLeases.length > 0) {
     console.log(`Authoritative host leases: ${activeLeases.length}`);
@@ -196,11 +210,15 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
   try {
     const runPromise = runRuntime(store, adapter);
     runSettled = runPromise.then(() => undefined, () => undefined);
-    const { assignment, execution, diagnostics, recoveredOutcome } = await runPromise;
+    const { assignment, envelope, execution, diagnostics, recoveredOutcome } = await runPromise;
     const nativeRunId = getNativeRunId(execution.run);
 
     if (!recoveredOutcome) {
       console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
+    }
+    if (envelope.workflow) {
+      console.log(`Workflow: ${envelope.workflow.id}`);
+      console.log(`Module: ${envelope.workflow.currentModuleId}`);
     }
     if (nativeRunId && !recoveredOutcome) {
       console.log(`Host run: ${nativeRunId}`);
@@ -232,14 +250,16 @@ async function inspectCommand(
     return;
   }
 
-  const record = await inspectRuntimeRun(store, adapter, assignmentId);
-  if (!record) {
-    console.log("No recorded host run found.");
+  const inspection = await inspectRuntimeContext(store, adapter, assignmentId);
+  if (!inspection.record) {
+    printDiagnostics(inspection.diagnostics);
+    console.log("No runtime context found.");
     process.exitCode = 1;
     return;
   }
 
-  console.log(toPrettyJson(record).trimEnd());
+  console.log(toPrettyJson(inspection.record).trimEnd());
+  printDiagnostics(inspection.diagnostics);
 }
 
 function printUsage(): void {

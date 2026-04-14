@@ -403,6 +403,9 @@ Milestone 3 durable workflow event model is:
     - `evaluatedAt`
   - replay rule:
     - updates the gate record for that module and cycle
+    - `moduleState` records the pre-transition active state for that
+      attempt; a module does not become durably `completed` until the
+      corresponding `workflow.transition.applied` consumes it
     - later events for the same `workflowId`, `workflowCycle`,
       `moduleId`, `moduleAttempt`, and `assignmentId` replace earlier
       gate detail
@@ -441,13 +444,16 @@ Workflow event idempotence rule for Milestone 3:
 Recovery-proof rule for reused assignment ids:
 
 - workflow-controlled recovery and dedupe must key consumed terminal
-  outcomes by `(assignmentId, moduleAttempt)`, not by `assignmentId`
+  outcomes by explicit workflow attempt identity, not by `assignmentId`
   alone
-- `workflow.transition.applied.appliedAt` marks the start boundary for
-  the destination attempt named by `moduleAttempt`
-- a terminal `result.submitted` or `decision.created` belongs to the
-  latest attempt whose start boundary is less than or equal to the
-  terminal outcome timestamp
+- workflow-mode `HostRunRecord`s must persist the current workflow
+  attempt identity as `{ workflowId, workflowCycle, moduleId,
+  moduleAttempt }`
+- same-assignment rerun ownership for host-run recovery, inspect, and
+  cleanup must compare that explicit identity directly
+- workflow-mode run records that lack explicit attempt identity are
+  invalid/incomplete workflow metadata and must not infer ownership from
+  terminal or lifecycle timestamps
 - a later same-assignment terminal outcome after `rerun_same_module`
   must be treated as new work when it belongs to a higher
   `moduleAttempt`, even if the workflow cycle and assignment id stay the
@@ -552,6 +558,9 @@ Current-module artifact write and claim contract for Milestone 3:
   - `assignmentId`
   - `createdAt`
   - `payload`
+  - optional `payload.runtimeArtifactReferences`, an array of explicit
+    runtime-owned artifact paths using the same project-relative
+    `.coortex/...` form exposed through envelopes
 - the active module learns its output target from
   `workflow.outputArtifact`; the assignment objective may restate it,
   but the path is runtime-owned data, not inferred from prompt text
@@ -581,7 +590,8 @@ Per-module derivation contract:
     - `reviewEvidenceSummary` from the module artifact
   - `artifactReferences` source:
     - the claimed module artifact path plus any runtime-owned artifacts
-      explicitly referenced from that artifact
+      explicitly referenced from
+      `payload.runtimeArtifactReferences`
   - pass rule:
     - latest result is `completed`, no open decision exists, and all
       required module artifact fields are present and non-empty
@@ -602,7 +612,9 @@ Per-module derivation contract:
     - `rationaleSummary` from the module artifact
   - `artifactReferences` source:
     - the claimed module artifact path plus the prior accepted `plan`
-      artifact reference for the same cycle
+      artifact references that remain authoritative for the current
+      cycle, including any explicit runtime-owned references preserved
+      from that accepted `plan` artifact
   - pass rule:
     - latest result is `completed`, no open decision exists, and the
       artifact verdict maps directly to the gate outcome
@@ -623,7 +635,8 @@ Per-module derivation contract:
     - `verificationSummary` from the module artifact
   - `artifactReferences` source:
     - the claimed module artifact path plus any runtime-owned evidence
-      artifacts referenced from it
+      artifacts referenced from
+      `payload.runtimeArtifactReferences`
   - pass rule:
     - latest result is `completed`, no open decision exists, verdict is
       `verified`, and every referenced evidence result id was produced
@@ -716,13 +729,14 @@ Built-in assignment-emission contract for Milestone 3:
       - `review` verdict `rejected` or `needs_iteration`
       - same-module rerun when the `plan` gate cannot complete
   - `review`
-    - `objective`: assess the latest accepted `plan` artifact for the
-      current cycle and produce a review verdict
+    - `objective`: assess the latest accepted `plan` artifact carried
+      into the current cycle and produce a review verdict
     - `writeScope`: inherit the current workflow write scope without
       widening it
     - `read-only artifact inputs`:
-      - latest accepted `plan` artifact reference for the current cycle
-        via `workflow.readArtifacts`
+      - latest accepted `plan` artifact reference that remains
+        authoritative for the current cycle via
+        `workflow.readArtifacts`
     - `requiredOutputs`:
       - `verdict`
       - `rationaleSummary`

@@ -17,16 +17,24 @@ import type {
   TaskEnvelope
 } from "../adapters/contract.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../adapters/host-run-store.js";
-import { buildCompletedRunRecord } from "../adapters/host-run-records.js";
+import {
+  buildCompletedRunRecord,
+  deriveWorkflowRunAttemptIdentity
+} from "../adapters/host-run-records.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord, RecoveryBrief, ResultPacket, RuntimeProjection } from "../core/types.js";
 import { RuntimeStore } from "../persistence/store.js";
-import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "../cli/runtime-state.js";
+import {
+  loadOperatorProjection,
+  loadOperatorProjectionWithDiagnostics,
+  loadWorkflowAwareProjectionWithDiagnostics
+} from "../cli/runtime-state.js";
 import { getRunnableAssignment, reconcileActiveRuns } from "../cli/run-operations.js";
 import { loadReconciledProjectionWithDiagnostics, resumeRuntime, runRuntime } from "../cli/commands.js";
 import { nowIso } from "../utils/time.js";
+import { buildWorkflowBootstrap, workflowArtifactPath } from "../workflows/index.js";
 
 const capabilities: AdapterCapabilities = {
   supportsProfiles: false,
@@ -1497,7 +1505,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         assert.equal(run.projectionAfter.assignments.get(ctx.assignmentId)?.state, "completed");
         assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
         assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
-        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(run.envelope.metadata.recoveredOutcome, true);
+        assert.equal(adapter.buildResumeEnvelopeCount, 1);
         assert.equal(adapter.executeAssignmentCount, 0);
         assert.equal(
           await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
@@ -1532,7 +1541,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         assert.equal(run.projectionAfter.assignments.get(ctx.assignmentId)?.state, "blocked");
         assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [ctx.assignmentId]);
         assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
-        assert.equal(adapter.buildResumeEnvelopeCount, 0);
+        assert.equal(run.envelope.metadata.recoveredOutcome, true);
+        assert.equal(adapter.buildResumeEnvelopeCount, 1);
         assert.equal(adapter.executeAssignmentCount, 0);
         assert.equal(
           await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
@@ -2486,6 +2496,440 @@ test("host-run recovery matrix retries malformed lease cleanup without duplicati
   );
 });
 
+test("workflow-aware recovery matrix keeps cleanup truth-driven across current and hidden runs", async () => {
+  const cases = [
+    {
+      name: "current result with active leftover lease advances to the next assignment once recovered",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        const workflowAttempt = await currentWorkflowAttempt(ctx);
+        const completedAt = "2026-04-14T12:01:00.000Z";
+        await ctx.store.writeJsonArtifact(
+          workflowArtifactPath("default", 1, "plan", ctx.assignmentId, 1),
+          {
+            workflowId: "default",
+            workflowCycle: 1,
+            moduleId: "plan",
+            moduleAttempt: 1,
+            assignmentId: ctx.assignmentId,
+            createdAt: completedAt,
+            payload: {
+              planSummary: "Recovered plan output.",
+              implementationSteps: ["Advance to review."],
+              reviewEvidenceSummary: "The recovered plan is ready for review."
+            }
+          }
+        );
+        const completedRecord = completedResultRecord(
+          ctx.assignmentId,
+          "completed",
+          "Recovered current workflow result.",
+          workflowAttempt
+        );
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+        await ctx.store.writeJsonArtifact(
+          `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z", workflowAttempt)
+        );
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(loaded.projection.workflowProgress?.currentModuleId, "review");
+        assert.notEqual(loaded.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(
+          [...loaded.projection.results.values()].find((result) => result.assignmentId === ctx.assignmentId)?.status,
+          "completed"
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "current decision with a malformed leftover lease preserves blocked truth without stale recovery",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        const workflowAttempt = await currentWorkflowAttempt(ctx);
+        const completedAt = "2026-04-14T12:01:00.000Z";
+        const completedDecisionRecord: HostRunRecord = {
+          assignmentId: ctx.assignmentId,
+          state: "completed",
+          workflowAttempt,
+          startedAt: "2026-04-14T12:00:30.000Z",
+          completedAt,
+          outcomeKind: "decision",
+          summary: "Recovered workflow decision.",
+          terminalOutcome: {
+            kind: "decision",
+            decision: {
+              decisionId: "workflow-matrix-decision",
+              requesterId: "matrix",
+              blockerSummary: "Recovered workflow decision.",
+              options: [{ id: "wait", label: "Wait", summary: "Wait for guidance." }],
+              recommendedOption: "wait",
+              state: "open",
+              createdAt: completedAt
+            }
+          }
+        };
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedDecisionRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedDecisionRecord);
+        await ctx.store.writeTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "{");
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(loaded.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(loaded.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+        assert.equal(
+          [...loaded.projection.decisions.values()].find((decision) => decision.assignmentId === ctx.assignmentId)?.state,
+          "open"
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "current completed workflow records without explicit attempt identity are treated as incomplete metadata",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        const completedRecord = completedResultRecord(
+          ctx.assignmentId,
+          "completed",
+          "Missing workflow attempt identity must not recover this result."
+        );
+        delete completedRecord.workflowAttempt;
+        const leftoverLease = runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z");
+        delete leftoverLease.workflowAttempt;
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, leftoverLease);
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(loaded.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(
+          [...loaded.projection.results.values()].filter((result) => result.assignmentId === ctx.assignmentId).length,
+          0
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "same-assignment reruns ignore old completed results without completedAt and clean their leftover leases",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        await rerunCurrentWorkflowAssignment(ctx, "2026-04-14T12:10:00.000Z");
+        const priorAttempt = {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "plan",
+          moduleAttempt: 1
+        };
+        const oldResultRecord = completedResultRecord(
+          ctx.assignmentId,
+          "completed",
+          "Attempt 1 result should not be absorbed into attempt 2.",
+          priorAttempt
+        );
+        delete oldResultRecord.completedAt;
+        oldResultRecord.startedAt = "2026-04-14T12:00:30.000Z";
+        if (oldResultRecord.terminalOutcome?.kind === "result") {
+          oldResultRecord.terminalOutcome.result.createdAt = "2026-04-14T12:01:00.000Z";
+        }
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, oldResultRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", oldResultRecord);
+        await ctx.store.writeJsonArtifact(
+          `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z", priorAttempt)
+        );
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(loaded.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(loaded.projection.workflowProgress?.currentModuleAttempt, 2);
+        assert.equal(
+          [...loaded.projection.results.values()].filter((result) => result.assignmentId === ctx.assignmentId).length,
+          0
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "same-assignment reruns ignore old completed decisions without completedAt and clean malformed leftover leases",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        await rerunCurrentWorkflowAssignment(ctx, "2026-04-14T12:10:00.000Z");
+        const priorAttempt = {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "plan",
+          moduleAttempt: 1
+        };
+        const oldDecisionRecord = completedDecisionRecord(
+          ctx.assignmentId,
+          "Attempt 1 decision should not be absorbed into attempt 2.",
+          priorAttempt
+        );
+        delete oldDecisionRecord.completedAt;
+        oldDecisionRecord.startedAt = "2026-04-14T12:00:30.000Z";
+        if (oldDecisionRecord.terminalOutcome?.kind === "decision") {
+          oldDecisionRecord.terminalOutcome.decision.createdAt = "2026-04-14T12:01:00.000Z";
+        }
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, oldDecisionRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", oldDecisionRecord);
+        await ctx.store.writeTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "{");
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(loaded.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(loaded.projection.workflowProgress?.currentModuleAttempt, 2);
+        assert.equal(
+          [...loaded.projection.decisions.values()].filter((decision) => decision.assignmentId === ctx.assignmentId).length,
+          0
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "same-assignment reruns ignore late-written old completed results when startedAt predates the current attempt",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        await rerunCurrentWorkflowAssignment(ctx, "2026-04-14T12:10:00.000Z");
+        const priorAttempt = {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "plan",
+          moduleAttempt: 1
+        };
+        const lateOldResultRecord = completedResultRecord(
+          ctx.assignmentId,
+          "completed",
+          "Late-written attempt 1 result should not be absorbed into attempt 2.",
+          priorAttempt
+        );
+        lateOldResultRecord.startedAt = "2026-04-14T12:00:30.000Z";
+        lateOldResultRecord.completedAt = "2026-04-14T12:15:00.000Z";
+        if (lateOldResultRecord.terminalOutcome?.kind === "result") {
+          lateOldResultRecord.terminalOutcome.result.createdAt = "2026-04-14T12:15:00.000Z";
+        }
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, lateOldResultRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", lateOldResultRecord);
+        await ctx.store.writeJsonArtifact(
+          `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z", priorAttempt)
+        );
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(loaded.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(loaded.projection.workflowProgress?.currentModuleAttempt, 2);
+        assert.equal(
+          [...loaded.projection.results.values()].filter((result) => result.assignmentId === ctx.assignmentId).length,
+          0
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "same-assignment reruns treat active prior-attempt leases as historical and clean them without blocking the new attempt",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        await rerunCurrentWorkflowAssignment(ctx, "2026-04-14T12:10:00.000Z");
+        await ctx.store.writeJsonArtifact(
+          `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
+          {
+            assignmentId: ctx.assignmentId,
+            state: "running",
+            workflowAttempt: {
+              workflowId: "default",
+              workflowCycle: 1,
+              moduleId: "plan",
+              moduleAttempt: 1
+            },
+            adapterData: { nativeRunId: "prior-attempt-live-lease" },
+            startedAt: "2026-04-14T12:00:30.000Z",
+            heartbeatAt: "2026-04-14T12:09:30.000Z",
+            leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+          } satisfies HostRunRecord
+        );
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.equal(loaded.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(loaded.projection.workflowProgress?.currentModuleAttempt, 2);
+        assert.equal(await ctx.adapter.hasRunLease(ctx.store, ctx.assignmentId), false);
+      }
+    },
+    {
+      name: "current result with an expired leftover lease reruns once, then later cleanup stays silent after recovery is durable",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        const workflowAttempt = await currentWorkflowAttempt(ctx);
+        const expiredLease = runningRecord(
+          ctx.assignmentId,
+          "2000-01-01T00:00:00.000Z",
+          workflowAttempt
+        );
+        const completedRecord = completedResultRecord(
+          ctx.assignmentId,
+          "completed",
+          "Recovered current workflow result for same-assignment rerun.",
+          workflowAttempt
+        );
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, expiredLease);
+
+        const firstLoad = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(firstLoad.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(firstLoad.projection.workflowProgress?.currentModuleAttempt, 2);
+        assert.equal(await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted"), 1);
+
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, expiredLease);
+
+        const secondLoad = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(!secondLoad.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!secondLoad.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(secondLoad.projection.workflowProgress?.currentAssignmentId, ctx.assignmentId);
+        assert.equal(secondLoad.projection.workflowProgress?.currentModuleAttempt, 2);
+        assert.equal(await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted"), 1);
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "hidden completed decisions with active leftover leases clean up silently once the decision is already durable",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        const hiddenAssignmentId = randomUUID();
+        const completedDecision = completedDecisionRecord(
+          hiddenAssignmentId,
+          "Recovered hidden workflow decision."
+        );
+        const hiddenDecision = completedDecision.terminalOutcome;
+        assert.ok(hiddenDecision?.kind === "decision", "expected a durable hidden decision outcome");
+        await ctx.store.appendEvent({
+          eventId: randomUUID(),
+          sessionId: ctx.projection.sessionId,
+          timestamp: hiddenDecision.decision.createdAt,
+          type: "decision.created",
+          payload: {
+            decision: {
+              decisionId: hiddenDecision.decision.decisionId ?? randomUUID(),
+              assignmentId: hiddenAssignmentId,
+              requesterId: hiddenDecision.decision.requesterId,
+              blockerSummary: hiddenDecision.decision.blockerSummary,
+              options: hiddenDecision.decision.options.map((option) => ({ ...option })),
+              recommendedOption: hiddenDecision.decision.recommendedOption,
+              state: hiddenDecision.decision.state,
+              createdAt: hiddenDecision.decision.createdAt
+            }
+          }
+        });
+        await ctx.store.syncSnapshotFromEvents();
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.json`, completedDecision);
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, runningRecord(
+          hiddenAssignmentId,
+          "2999-04-11T10:00:30.000Z"
+        ));
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.equal(
+          [...loaded.projection.decisions.values()].find((decision) => decision.assignmentId === hiddenAssignmentId)?.state,
+          "open"
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "hidden stale workflow runs report cleanup truthfully once and stay silent after cleanup",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        const hiddenAssignmentId = randomUUID();
+        const hiddenStaleRecord = runningRecord(hiddenAssignmentId, "2000-01-01T00:00:00.000Z");
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.json`, hiddenStaleRecord);
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, hiddenStaleRecord);
+
+        const firstLoad = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+        const secondLoad = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+        const telemetry = await ctx.store.loadTelemetry();
+        const hiddenCleanupDiagnostic = firstLoad.diagnostics.find(
+          (diagnostic) => diagnostic.code === "hidden-run-cleaned"
+        );
+
+        assert.ok(hiddenCleanupDiagnostic);
+        assert.match(
+          hiddenCleanupDiagnostic.message,
+          new RegExp(`Cleared stale host run artifacts for non-current workflow assignment ${hiddenAssignmentId}`)
+        );
+        assert.ok(!firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.ok(!secondLoad.diagnostics.some((diagnostic) => diagnostic.code === "hidden-run-cleaned"));
+        assert.equal(
+          telemetry.filter((event) => event.eventType === "host.run.hidden_stale_cleaned").length,
+          1
+        );
+        assert.equal(
+          telemetry.filter((event) => event.eventType === "host.run.stale_reconciled").length,
+          0
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    }
+  ] as const;
+
+  for (const testCase of cases) {
+    await testCase.run();
+  }
+});
+
 test("host-run recovery matrix verifies stale cleanup against adapter-defined lease paths", async () => {
   const customArtifacts = {
     runRecordPath: (assignmentId: string) => `records/${assignmentId}.state`,
@@ -2568,12 +3012,17 @@ class MatrixAdapter implements HostAdapter {
 
   async claimRunLease(
     store: RuntimeArtifactStore,
-    _projection: RuntimeProjection,
+    projection: RuntimeProjection,
     assignmentId: string,
     claimedRun?: HostRunRecord
   ): Promise<HostRunRecord> {
     this.bindStore(store);
-    const record = claimedRun ?? runningRecord(assignmentId, "2999-04-11T10:00:30.000Z");
+    const workflowAttempt = deriveWorkflowRunAttemptIdentity(projection, assignmentId);
+    const record = claimedRun ?? runningRecord(
+      assignmentId,
+      "2999-04-11T10:00:30.000Z",
+      workflowAttempt
+    );
     await this.runStore.claim(record);
     return record;
   }
@@ -2651,11 +3100,26 @@ class ExecutionSentinelMatrixAdapter extends MatrixAdapter {
 
   override async buildResumeEnvelope(
     _store: RuntimeArtifactStore,
-    _projection: RuntimeProjection,
-    _brief: RecoveryBrief
+    projection: RuntimeProjection,
+    brief: RecoveryBrief
   ): Promise<TaskEnvelope> {
     this.buildResumeEnvelopeCount += 1;
-    throw new Error("buildResumeEnvelope should not run while an active host run lease is present.");
+    const assignmentId = projection.status.activeAssignmentIds[0]
+      ?? [...projection.assignments.keys()][0]!;
+    const assignment = projection.assignments.get(assignmentId)!;
+    return {
+      host: this.host,
+      adapter: this.id,
+      objective: assignment.objective,
+      writeScope: [...assignment.writeScope],
+      requiredOutputs: [...assignment.requiredOutputs],
+      recoveryBrief: brief,
+      recentResults: [],
+      metadata: { activeAssignmentId: assignment.id },
+      estimatedChars: 0,
+      trimApplied: false,
+      trimmedFields: []
+    };
   }
 
   override async executeAssignment(
@@ -2885,6 +3349,46 @@ async function createMatrixContext(adapter = new MatrixAdapter({
   };
 }
 
+async function createWorkflowMatrixContext(adapter = new MatrixAdapter({
+  runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,
+  runLeasePath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.lease.json`,
+  lastRunPath: () => "adapters/matrix/last-run.json"
+})): Promise<MatrixContext> {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-workflow-run-matrix-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "matrix",
+    host: "matrix",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = buildWorkflowBootstrap({
+    sessionId,
+    adapterId: adapter.id,
+    host: adapter.host,
+    timestamp: "2026-04-14T12:00:00.000Z"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+  await store.syncSnapshotFromEvents();
+
+  await adapter.initialize(store, await loadOperatorProjection(store));
+  adapter.bindStore(store);
+
+  return {
+    store,
+    projection: await loadOperatorProjection(store),
+    assignmentId: bootstrap.initialAssignmentId,
+    adapter
+  };
+}
+
 async function waitFor(check: () => Promise<boolean>, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -2968,6 +3472,35 @@ async function appendAssignmentBeyondSnapshotBoundary(ctx: MatrixContext): Promi
   return assignmentId;
 }
 
+async function rerunCurrentWorkflowAssignment(ctx: MatrixContext, appliedAt: string): Promise<void> {
+  await ctx.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: ctx.projection.sessionId,
+    timestamp: appliedAt,
+    type: "workflow.transition.applied",
+    payload: {
+      workflowId: "default",
+      fromModuleId: "plan",
+      toModuleId: "plan",
+      workflowCycle: 1,
+      moduleAttempt: 2,
+      transition: "rerun_same_module",
+      previousAssignmentId: ctx.assignmentId,
+      nextAssignmentId: ctx.assignmentId,
+      appliedAt
+    }
+  });
+  await ctx.store.syncSnapshotFromEvents();
+  ctx.projection = await loadOperatorProjection(ctx.store);
+}
+
+async function currentWorkflowAttempt(ctx: MatrixContext): Promise<NonNullable<HostRunRecord["workflowAttempt"]>> {
+  const projection = await loadOperatorProjection(ctx.store);
+  const workflowAttempt = deriveWorkflowRunAttemptIdentity(projection, ctx.assignmentId);
+  assert.ok(workflowAttempt, "expected workflow attempt identity for the current workflow assignment");
+  return workflowAttempt;
+}
+
 async function corruptSnapshotBoundary(store: RuntimeStore): Promise<void> {
   const snapshot = await store.loadSnapshot();
   assert.ok(snapshot?.lastEventId, "expected a snapshot boundary before corruption");
@@ -2992,10 +3525,15 @@ async function removeAssignmentFromSnapshot(store: RuntimeStore, assignmentId: s
   await store.writeSnapshot(snapshot);
 }
 
-function runningRecord(assignmentId: string, leaseExpiresAt: string): HostRunRecord {
+function runningRecord(
+  assignmentId: string,
+  leaseExpiresAt: string,
+  workflowAttempt?: HostRunRecord["workflowAttempt"]
+): HostRunRecord {
   return {
     assignmentId,
     state: "running",
+    ...(workflowAttempt ? { workflowAttempt } : {}),
     startedAt: nowIso(),
     heartbeatAt: nowIso(),
     leaseExpiresAt,
@@ -3022,12 +3560,14 @@ async function countRecoveredOutcomeEvents(
 function completedResultRecord(
   assignmentId: string,
   status: ResultPacket["status"],
-  summary: string
+  summary: string,
+  workflowAttempt?: HostRunRecord["workflowAttempt"]
 ): HostRunRecord {
   const createdAt = nowIso();
   return {
     assignmentId,
     state: "completed",
+    ...(workflowAttempt ? { workflowAttempt } : {}),
     startedAt: createdAt,
     completedAt: createdAt,
     outcomeKind: "result",
@@ -3050,12 +3590,14 @@ function completedResultRecord(
 
 function completedDecisionRecord(
   assignmentId: string,
-  blockerSummary: string
+  blockerSummary: string,
+  workflowAttempt?: HostRunRecord["workflowAttempt"]
 ): HostRunRecord {
   const createdAt = nowIso();
   return {
     assignmentId,
     state: "completed",
+    ...(workflowAttempt ? { workflowAttempt } : {}),
     startedAt: createdAt,
     completedAt: createdAt,
     outcomeKind: "decision",

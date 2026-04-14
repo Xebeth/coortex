@@ -13,7 +13,11 @@ import type {
   RuntimeArtifactStore,
   TaskEnvelope
 } from "../../../adapters/contract.js";
-import { buildCompletedRunRecord, createRunningRunRecord } from "../../../adapters/host-run-records.js";
+import {
+  buildCompletedRunRecord,
+  createRunningRunRecord,
+  deriveWorkflowRunAttemptIdentity
+} from "../../../adapters/host-run-records.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../../../adapters/host-run-store.js";
 import { executeHostRunSession } from "../../../adapters/host-run-session.js";
 import type {
@@ -145,14 +149,18 @@ export class CodexAdapter implements HostAdapter {
   buildResumeEnvelope(
     store: RuntimeArtifactStore,
     projection: RuntimeProjection,
-    brief: RecoveryBrief
+    brief: RecoveryBrief,
+    options?: {
+      workflow?: import("../../../core/types.js").WorkflowSummary | null;
+    }
   ): Promise<TaskEnvelope> {
     return buildTaskEnvelope(store, projection, brief, {
       host: this.host,
       adapter: this.id,
       maxChars: 4_000,
       resultSummaryLimit: 400,
-      artifactDir: "artifacts/results"
+      artifactDir: "artifacts/results",
+      workflow: options?.workflow ?? null
     });
   }
 
@@ -171,7 +179,10 @@ export class CodexAdapter implements HostAdapter {
     const leaseMs = readPositiveIntEnv("COORTEX_RUN_LEASE_MS", DEFAULT_RUN_LEASE_MS);
     const heartbeatMs = readPositiveIntEnv("COORTEX_RUN_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS);
     const runStore = this.runStore(store);
-    let runningRecord = claimedRun ?? createRunningRunRecord(assignmentId, startedAt, leaseMs);
+    const workflowAttempt = deriveWorkflowRunAttemptIdentity(projection, assignmentId);
+    let runningRecord = claimedRun ?? createRunningRunRecord(assignmentId, startedAt, leaseMs, {
+      ...(workflowAttempt ? { workflowAttempt } : {})
+    });
     let schemaPath: string;
     try {
       schemaPath = await store.writeJsonArtifact(
@@ -193,7 +204,10 @@ export class CodexAdapter implements HostAdapter {
         assignmentId,
         startedAt,
         completedAt,
-        getNativeRunId(runningRecord)
+        {
+          nativeRunId: getNativeRunId(runningRecord),
+          workflowAttempt: runningRecord.workflowAttempt
+        }
       );
       const warning = await runStore.persistWarning(runRecord);
       return {
@@ -266,12 +280,15 @@ export class CodexAdapter implements HostAdapter {
 
   async claimRunLease(
     store: RuntimeArtifactStore,
-    _projection: RuntimeProjection,
+    projection: RuntimeProjection,
     assignmentId: string
   ): Promise<HostRunRecord> {
     const leaseMs = readPositiveIntEnv("COORTEX_RUN_LEASE_MS", DEFAULT_RUN_LEASE_MS);
     const startedAt = nowIso();
-    const runningRecord = createRunningRunRecord(assignmentId, startedAt, leaseMs);
+    const workflowAttempt = deriveWorkflowRunAttemptIdentity(projection, assignmentId);
+    const runningRecord = createRunningRunRecord(assignmentId, startedAt, leaseMs, {
+      ...(workflowAttempt ? { workflowAttempt } : {})
+    });
     await this.runStore(store).claim(runningRecord);
     return runningRecord;
   }

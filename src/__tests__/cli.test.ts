@@ -8,6 +8,7 @@ import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
 import { RuntimeStore } from "../persistence/store.js";
+import type { HostRunRecord } from "../core/types.js";
 
 const execFileAsync = promisify(execFile);
 const liveCodexEnv = {
@@ -21,10 +22,11 @@ async function runCliCommand(
   options: {
     cwd: string;
     env?: NodeJS.ProcessEnv;
+    args?: string[];
   }
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [cliPath, command], {
+    const child = spawn(process.execPath, [cliPath, command, ...(options.args ?? [])], {
       cwd: options.cwd,
       env: options.env
     });
@@ -48,6 +50,23 @@ async function runCliCommand(
   });
 }
 
+function workflowAttemptFromSnapshot(snapshot: {
+  workflowProgress?: {
+    workflowId: string;
+    workflowCycle: number;
+    currentModuleId: string;
+    currentModuleAttempt: number;
+  };
+}) {
+  assert.ok(snapshot.workflowProgress, "expected workflow progress in snapshot");
+  return {
+    workflowId: snapshot.workflowProgress.workflowId,
+    workflowCycle: snapshot.workflowProgress.workflowCycle,
+    moduleId: snapshot.workflowProgress.currentModuleId,
+    moduleAttempt: snapshot.workflowProgress.currentModuleAttempt
+  };
+}
+
 async function createCompletedDecisionRecoverySetup(options?: { includeLeftoverLease?: boolean }) {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-decision-status-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -61,13 +80,21 @@ async function createCompletedDecisionRecoverySetup(options?: { includeLeftoverL
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
   ) as {
     assignments: Array<{ id: string }>;
+    workflowProgress: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
   };
   const assignmentId = snapshot.assignments[0]!.id;
   const startedAt = new Date(Date.now() - 120_000).toISOString();
   const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
   const completedRecord = {
     assignmentId,
     state: "completed",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-completed-decision"
     },
@@ -140,16 +167,24 @@ async function createCompletedResultRecoverySetup(options?: {
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
   ) as {
     assignments: Array<{ id: string }>;
+    workflowProgress: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
   };
   const assignmentId = snapshot.assignments[0]!.id;
   const startedAt = new Date(Date.now() - 120_000).toISOString();
   const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
   const resultStatus = options?.resultStatus ?? "completed";
   const summary = options?.summary ?? "Recovered completed host run for command recovery.";
   const resultId = options?.resultId ?? `result-cli-${resultStatus}-recovery`;
   const completedRecord = {
     assignmentId,
     state: "completed",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-completed-result"
     },
@@ -174,6 +209,7 @@ async function createCompletedResultRecoverySetup(options?: {
   const leftoverLease = {
     assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-leftover-result-lease"
     },
@@ -199,6 +235,122 @@ async function createCompletedResultRecoverySetup(options?: {
   );
 
   return { projectRoot, cliPath, runtimeDir, assignmentId, completedAt };
+}
+
+async function createSameAssignmentRerunInspectSetup(options: {
+  terminalKind: "result" | "decision";
+  omitCompletedAt?: boolean;
+}) {
+  const projectRoot = await mkdtemp(join(tmpdir(), `coortex-cli-same-assignment-inspect-${options.terminalKind}-`));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const store = RuntimeStore.forProject(projectRoot);
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    sessionId: string;
+    assignments: Array<{ id: string }>;
+  };
+  const assignmentId = snapshot.assignments[0]!.id;
+  const startedAt = "2026-04-18T12:00:30.000Z";
+  const terminalAt = "2026-04-18T12:01:00.000Z";
+  const appliedAt = "2026-04-18T12:10:00.000Z";
+
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: snapshot.sessionId,
+    timestamp: appliedAt,
+    type: "workflow.transition.applied",
+    payload: {
+      workflowId: "default",
+      fromModuleId: "plan",
+      toModuleId: "plan",
+      workflowCycle: 1,
+      moduleAttempt: 2,
+      transition: "rerun_same_module",
+      previousAssignmentId: assignmentId,
+      nextAssignmentId: assignmentId,
+      appliedAt
+    }
+  });
+  await store.syncSnapshotFromEvents();
+
+  const runRecord: HostRunRecord = options.terminalKind === "result"
+    ? {
+        assignmentId,
+        state: "completed" as const,
+        adapterData: {
+          nativeRunId: "thread-cli-inspect-old-result"
+        },
+        startedAt,
+        outcomeKind: "result" as const,
+        resultStatus: "completed" as const,
+        summary: "Prior attempt result should stay hidden from ctx inspect.",
+        terminalOutcome: {
+          kind: "result" as const,
+          result: {
+            resultId: "result-cli-inspect-old-attempt",
+            producerId: "codex",
+            status: "completed" as const,
+            summary: "Prior attempt result should stay hidden from ctx inspect.",
+            changedFiles: [],
+            createdAt: terminalAt
+          }
+        }
+      }
+    : {
+        assignmentId,
+        state: "completed" as const,
+        adapterData: {
+          nativeRunId: "thread-cli-inspect-old-decision"
+        },
+        startedAt,
+        outcomeKind: "decision" as const,
+        summary: "Prior attempt decision should stay hidden from ctx inspect.",
+        terminalOutcome: {
+          kind: "decision" as const,
+          decision: {
+            decisionId: "decision-cli-inspect-old-attempt",
+            requesterId: "codex",
+            blockerSummary: "Prior attempt decision should stay hidden from ctx inspect.",
+            options: [{ id: "wait", label: "Wait", summary: "Pause." }],
+            recommendedOption: "wait",
+            state: "open" as const,
+            createdAt: terminalAt
+          }
+        }
+      };
+  const persistedRun: HostRunRecord = options.omitCompletedAt
+    ? runRecord
+    : {
+        ...runRecord,
+        completedAt: terminalAt
+      };
+  persistedRun.workflowAttempt = {
+    workflowId: "default",
+    workflowCycle: 1,
+    moduleId: "plan",
+    moduleAttempt: 1
+  };
+
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(persistedRun, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(persistedRun, null, 2),
+    "utf8"
+  );
+
+  return { projectRoot, cliPath, assignmentId };
 }
 
 async function createRuntimeCompletedResultMalformedLeaseSetup() {
@@ -705,6 +857,8 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   });
   assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Results: 0/);
+  assert.match(status.stdout, /Workflow: default/);
+  assert.match(status.stdout, /Current module: plan/);
 
   const resume = await execFileAsync(process.execPath, [cliPath, "resume"], {
     cwd: projectRoot,
@@ -724,8 +878,8 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     cwd: projectRoot,
     env
   });
-  assert.match(inspect.stdout, /"nativeRunId": "thread-cli-1"/);
-  assert.match(inspect.stdout, /"outcomeKind": "result"/);
+  assert.match(inspect.stdout, /"workflow": \{/);
+  assert.match(inspect.stdout, /"run": null/);
 
   const doctor = await execFileAsync(process.execPath, [cliPath, "doctor"], {
     cwd: projectRoot,
@@ -747,12 +901,17 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   const snapshot = JSON.parse(
     await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
   ) as {
+    assignments: Array<{ id: string; state: string }>;
     results: Array<{ status: string; summary: string }>;
     status: { activeAssignmentIds: string[] };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
   assert.equal(snapshot.results.length, 1);
   assert.equal(snapshot.results[0]?.status, "completed");
-  assert.equal(snapshot.status.activeAssignmentIds.length, 0);
+  assert.deepEqual(snapshot.status.activeAssignmentIds, [snapshot.assignments[0]!.id]);
+  assert.equal(snapshot.assignments[0]?.state, "queued");
+  assert.equal(snapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(snapshot.workflowProgress.currentModuleAttempt, 2);
 
   const telemetry = await readFile(join(projectRoot, ".coortex", "runtime", "telemetry.ndjson"), "utf8");
   assert.match(telemetry, /"eventType":"host.run.started"/);
@@ -898,9 +1057,352 @@ test("ctx inspect ignores a parseable but invalid convenience last-run pointer",
     cwd: projectRoot
   });
 
-  assert.equal(inspect.exitCode, 1);
-  assert.equal(inspect.stdout.trim(), "No recorded host run found.");
+  assert.equal(inspect.exitCode, 0);
+  assert.match(inspect.stdout, /"workflow": \{/);
+  assert.match(inspect.stdout, /"run": null/);
   assert.equal(inspect.stderr.trim(), "");
+});
+
+test("ctx inspect prefers the current workflow assignment over an unrelated last recorded host run", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-inspect-workflow-precedence-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const store = RuntimeStore.forProject(projectRoot);
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const snapshot = await store.loadSnapshot();
+  assert.ok(snapshot, "expected snapshot after init");
+  const workflowAssignmentId = snapshot.assignments[0]!.id;
+  const secondaryAssignmentId = randomUUID();
+  const assignmentTimestamp = new Date(Date.now() - 10_000).toISOString();
+
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: snapshot.sessionId,
+    timestamp: assignmentTimestamp,
+    type: "assignment.created",
+    payload: {
+      assignment: {
+        id: secondaryAssignmentId,
+        parentTaskId: snapshot.sessionId,
+        workflow: "default",
+        ownerType: "runtime",
+        ownerId: "codex:test",
+        objective: "Inspect the non-workflow assignment.",
+        writeScope: ["README.md"],
+        requiredOutputs: ["result"],
+        state: "queued",
+        createdAt: assignmentTimestamp,
+        updatedAt: assignmentTimestamp
+      }
+    }
+  });
+  await store.syncSnapshotFromEvents();
+
+  const unrelatedLastRun = {
+    assignmentId: secondaryAssignmentId,
+    state: "completed",
+    adapterData: {
+      nativeRunId: "thread-cli-inspect-secondary"
+    },
+    startedAt: new Date(Date.now() - 20_000).toISOString(),
+    completedAt: new Date(Date.now() - 15_000).toISOString(),
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Last recorded run belongs to another assignment.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: randomUUID(),
+        producerId: "codex",
+        status: "completed",
+        summary: "Last recorded run belongs to another assignment.",
+        changedFiles: [],
+        createdAt: new Date(Date.now() - 15_000).toISOString()
+      }
+    }
+  };
+  await store.writeJsonArtifact(`adapters/codex/runs/${secondaryAssignmentId}.json`, unrelatedLastRun);
+  await store.writeJsonArtifact("adapters/codex/last-run.json", unrelatedLastRun);
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+  const payload = JSON.parse(inspect.stdout) as {
+    workflow: { currentAssignmentId: string | null };
+    assignment: { id: string } | null;
+    run: { assignmentId: string } | null;
+  };
+
+  assert.equal(inspect.exitCode, 0);
+  assert.equal(payload.workflow.currentAssignmentId, workflowAssignmentId);
+  assert.equal(payload.assignment?.id, workflowAssignmentId);
+  assert.equal(payload.run, null);
+});
+
+test("ctx inspect explicit assignment id overrides workflow and last-run targets", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-inspect-explicit-precedence-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const store = RuntimeStore.forProject(projectRoot);
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const snapshot = await store.loadSnapshot();
+  assert.ok(snapshot, "expected snapshot after init");
+  const explicitAssignmentId = randomUUID();
+  const lastRunAssignmentId = randomUUID();
+  const assignmentTimestamp = new Date(Date.now() - 10_000).toISOString();
+
+  for (const [assignmentId, objective] of [
+    [explicitAssignmentId, "Inspect the explicitly requested assignment."],
+    [lastRunAssignmentId, "Inspect the last-run assignment."]
+  ] as const) {
+    await store.appendEvent({
+      eventId: randomUUID(),
+      sessionId: snapshot.sessionId,
+      timestamp: assignmentTimestamp,
+      type: "assignment.created",
+      payload: {
+        assignment: {
+          id: assignmentId,
+          parentTaskId: snapshot.sessionId,
+          workflow: "default",
+          ownerType: "runtime",
+          ownerId: "codex:test",
+          objective,
+          writeScope: ["README.md"],
+          requiredOutputs: ["result"],
+          state: "queued",
+          createdAt: assignmentTimestamp,
+          updatedAt: assignmentTimestamp
+        }
+      }
+    });
+  }
+  await store.syncSnapshotFromEvents();
+
+  const explicitRun = {
+    assignmentId: explicitAssignmentId,
+    state: "completed",
+    adapterData: {
+      nativeRunId: "thread-cli-inspect-explicit"
+    },
+    startedAt: new Date(Date.now() - 20_000).toISOString(),
+    completedAt: new Date(Date.now() - 18_000).toISOString(),
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Explicit assignment run.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: randomUUID(),
+        producerId: "codex",
+        status: "completed",
+        summary: "Explicit assignment run.",
+        changedFiles: [],
+        createdAt: new Date(Date.now() - 18_000).toISOString()
+      }
+    }
+  };
+  const lastRun = {
+    assignmentId: lastRunAssignmentId,
+    state: "completed",
+    adapterData: {
+      nativeRunId: "thread-cli-inspect-last-run"
+    },
+    startedAt: new Date(Date.now() - 17_000).toISOString(),
+    completedAt: new Date(Date.now() - 16_000).toISOString(),
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Last-run assignment record.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: randomUUID(),
+        producerId: "codex",
+        status: "completed",
+        summary: "Last-run assignment record.",
+        changedFiles: [],
+        createdAt: new Date(Date.now() - 16_000).toISOString()
+      }
+    }
+  };
+  await store.writeJsonArtifact(`adapters/codex/runs/${explicitAssignmentId}.json`, explicitRun);
+  await store.writeJsonArtifact(`adapters/codex/runs/${lastRunAssignmentId}.json`, lastRun);
+  await store.writeJsonArtifact("adapters/codex/last-run.json", lastRun);
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot,
+    args: [explicitAssignmentId]
+  });
+  const payload = JSON.parse(inspect.stdout) as {
+    workflow: { currentAssignmentId: string | null };
+    assignment: { id: string; objective: string } | null;
+    run: { assignmentId: string; adapterData?: { nativeRunId?: string } } | null;
+  };
+
+  assert.equal(inspect.exitCode, 0);
+  assert.notEqual(payload.workflow.currentAssignmentId, explicitAssignmentId);
+  assert.equal(payload.assignment?.id, explicitAssignmentId);
+  assert.equal(payload.assignment?.objective, "Inspect the explicitly requested assignment.");
+  assert.equal(payload.run?.assignmentId, explicitAssignmentId);
+  assert.equal(payload.run?.adapterData?.nativeRunId, "thread-cli-inspect-explicit");
+});
+
+test("ctx inspect fails when an explicit assignment id matches neither assignment nor run", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-inspect-missing-explicit-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot,
+    args: ["00000000-0000-0000-0000-000000000000"]
+  });
+
+  assert.equal(inspect.exitCode, 1);
+  assert.equal(inspect.stdout.trim(), "No runtime context found.");
+  assert.equal(inspect.stderr.trim(), "");
+});
+
+test("ctx inspect prints reconciliation diagnostics when it repairs a completed host run", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-inspect-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+    results: Array<{ status: string; summary: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
+  };
+  const assignmentId = snapshot.assignments[0]!.id;
+  const startedAt = new Date(Date.now() - 120_000).toISOString();
+  const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
+  const completedRecord = {
+    assignmentId,
+    state: "completed",
+    workflowAttempt,
+    adapterData: {
+      nativeRunId: "thread-cli-completed-inspect"
+    },
+    startedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered completed host run for ctx inspect.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "result-cli-completed-inspect",
+        assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered completed host run for ctx inspect.",
+        changedFiles: ["src/cli/ctx.ts"],
+        createdAt: completedAt
+      }
+    }
+  };
+  const leftoverLease = {
+    assignmentId,
+    state: "running",
+    workflowAttempt,
+    adapterData: {
+      nativeRunId: "thread-cli-completed-inspect-leftover-lease"
+    },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+    JSON.stringify(leftoverLease, null, 2),
+    "utf8"
+  );
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+  const payload = JSON.parse(inspect.stdout) as {
+    workflow: { currentAssignmentId: string | null; currentModuleState: string };
+    assignment: { id: string; state: string } | null;
+    run: { assignmentId: string; summary?: string } | null;
+  };
+
+  assert.equal(inspect.exitCode, 0);
+  assert.match(
+    inspect.stderr,
+    /WARNING completed-run-reconciled Recovered completed host outcome/
+  );
+  assert.equal(payload.workflow.currentAssignmentId, assignmentId);
+  assert.equal(payload.workflow.currentModuleState, "queued");
+  assert.equal(payload.assignment?.id, assignmentId);
+  assert.equal(payload.assignment?.state, "queued");
+  assert.equal(payload.run, null);
+});
+
+test("ctx inspect hides prior-attempt same-assignment runs after a rerun", async () => {
+  for (const variant of [
+    { terminalKind: "result" as const, omitCompletedAt: false },
+    { terminalKind: "result" as const, omitCompletedAt: true },
+    { terminalKind: "decision" as const, omitCompletedAt: true }
+  ]) {
+    const { projectRoot, cliPath, assignmentId } = await createSameAssignmentRerunInspectSetup(variant);
+
+    const inspect = await runCliCommand(cliPath, "inspect", {
+      cwd: projectRoot
+    });
+    const explicitInspect = await runCliCommand(cliPath, "inspect", {
+      cwd: projectRoot,
+      args: [assignmentId]
+    });
+
+    for (const commandResult of [inspect, explicitInspect]) {
+      const payload = JSON.parse(commandResult.stdout) as {
+        workflow: { currentAssignmentId: string | null; currentModuleState: string };
+        assignment: { id: string; state: string } | null;
+        run: { assignmentId: string } | null;
+      };
+
+      assert.equal(commandResult.exitCode, 0);
+      assert.equal(payload.workflow.currentAssignmentId, assignmentId);
+      assert.equal(payload.workflow.currentModuleState, "queued");
+      assert.equal(payload.assignment?.id, assignmentId);
+      assert.equal(payload.assignment?.state, "queued");
+      assert.equal(payload.run, null);
+      assert.equal(commandResult.stderr.trim(), "");
+    }
+  }
 });
 
 test("ctx status reconciles stale host run leases before reporting active work", async () => {
@@ -916,12 +1418,20 @@ test("ctx status reconciles stale host run leases before reporting active work",
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
   ) as {
     assignments: Array<{ id: string }>;
+    workflowProgress?: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
   };
   const assignmentId = snapshot.assignments[0]!.id;
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
   const staleAt = new Date(Date.now() - 60_000).toISOString();
   const staleRecord = {
     assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-stale-status"
     },
@@ -992,12 +1502,20 @@ test("ctx status repairs stale host run leases after snapshot fallback", async (
       lastDurableOutputAt: string;
       resumeReady: boolean;
     };
+    workflowProgress?: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
   };
   const assignmentId = snapshot.assignments[0]!.id;
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
   const staleAt = new Date(Date.now() - 60_000).toISOString();
   const staleRecord = {
     assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-stale-status-fallback"
     },
@@ -1168,7 +1686,8 @@ test("ctx status cleans hidden stale snapshot-fallback runs without hydrating th
   };
 
   assert.equal(status.exitCode, 0);
-  assert.match(status.stderr, /WARNING stale-run-reconciled/);
+  assert.match(status.stderr, /WARNING hidden-run-cleaned Cleared stale host run artifacts for non-current workflow assignment/);
+  assert.doesNotMatch(status.stderr, /WARNING stale-run-reconciled/);
   assert.match(status.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
   assert.doesNotMatch(status.stdout, new RegExp(hiddenAssignmentId));
   assert.match(status.stdout, /Active assignments: 1/);
@@ -1320,8 +1839,15 @@ test("ctx status and resume surface in-projection authoritative lease blockers",
       lastDurableOutputAt: string;
       resumeReady: boolean;
     };
+    workflowProgress?: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
   };
   const authoritativeAssignmentId = snapshot.assignments[0]!.id;
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
   const driftedAssignmentId = randomUUID();
   const driftTimestamp = new Date(Date.now() + 1_000).toISOString();
   const driftedAssignment = {
@@ -1387,6 +1913,7 @@ test("ctx status and resume surface in-projection authoritative lease blockers",
   const activeLease = {
     assignmentId: authoritativeAssignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-in-projection-active-lease"
     },
@@ -1427,9 +1954,7 @@ test("ctx status and resume surface in-projection authoritative lease blockers",
   assert.match(status.stdout, /Authoritative host leases: 1/);
   assert.match(
     status.stdout,
-    new RegExp(
-      `- ${authoritativeAssignmentId} active host run lease within the current projection but outside the current active assignment set`
-    )
+    new RegExp(`- ${authoritativeAssignmentId} active host run lease on the current active assignment`)
   );
   assert.equal(resume.exitCode, 1);
   assert.doesNotMatch(resume.stdout, /Recovery brief generated/);
@@ -1440,7 +1965,7 @@ test("ctx status and resume surface in-projection authoritative lease blockers",
   assert.equal(finalEnvelope, initialEnvelope);
 });
 
-test("ctx status recovers a completed host run and clears a leftover lease", async () => {
+test("ctx status recovers a completed host run and requeues the workflow module", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-status-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
 
@@ -1455,13 +1980,21 @@ test("ctx status recovers a completed host run and clears a leftover lease", asy
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
   };
   const assignmentId = snapshot.assignments[0]!.id;
   const startedAt = new Date(Date.now() - 120_000).toISOString();
   const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
   const completedRecord = {
     assignmentId,
     state: "completed",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-completed-status"
     },
@@ -1486,6 +2019,7 @@ test("ctx status recovers a completed host run and clears a leftover lease", asy
   const leftoverLease = {
     assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: {
       nativeRunId: "thread-cli-leftover-lease"
     },
@@ -1519,18 +2053,25 @@ test("ctx status recovers a completed host run and clears a leftover lease", asy
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.match(status.stderr, /WARNING completed-run-reconciled/);
   assert.doesNotMatch(status.stderr, /WARNING stale-run-reconciled/);
-  assert.match(status.stdout, /Active assignments: 0/);
+  assert.match(status.stdout, /Workflow: default/);
+  assert.match(status.stdout, /Current module: plan/);
+  assert.match(status.stdout, /Last gate: blocked/);
+  assert.match(status.stdout, /Last advancement: Rerun plan attempt 2\./);
+  assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Results: 1/);
   assert.match(status.stdout, /Open decisions: 0/);
-  assert.match(status.stdout, /Objective: Await the next assignment\./);
-  assert.doesNotMatch(status.stdout, new RegExp(`- ${assignmentId} queued `));
-  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
-  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.match(status.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+  assert.match(status.stdout, new RegExp(`- ${assignmentId} queued `));
+  assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(repairedSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(repairedSnapshot.results.length, 1);
   assert.deepEqual(repairedSnapshot.results[0], {
     resultId: "result-cli-completed-status",
@@ -1557,16 +2098,20 @@ test("ctx status recovers a completed host run and clears a leftover lease", asy
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.doesNotMatch(secondStatus.stderr, /WARNING completed-run-reconciled/);
   assert.doesNotMatch(secondStatus.stderr, /WARNING stale-run-reconciled/);
-  assert.match(secondStatus.stdout, /Active assignments: 0/);
+  assert.match(secondStatus.stdout, /Active assignments: 1/);
   assert.match(secondStatus.stdout, /Results: 1/);
   assert.match(secondStatus.stdout, /Open decisions: 0/);
-  assert.equal(secondSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, []);
-  assert.equal(secondSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.match(secondStatus.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+  assert.equal(secondSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(secondSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(secondSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(secondSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(secondSnapshot.results.length, 1);
   assert.deepEqual(secondSnapshot.results[0], {
     resultId: "result-cli-completed-status",
@@ -1586,7 +2131,7 @@ test("ctx status recovers a completed host run and clears a leftover lease", asy
   );
 });
 
-test("ctx status and resume do not replay a recovered completed result after later status drift", async () => {
+test("ctx status and resume keep workflow-derived status after completed-result recovery", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
     await createCompletedResultRecoverySetup();
 
@@ -1594,7 +2139,7 @@ test("ctx status and resume do not replay a recovered completed result after lat
     cwd: projectRoot
   });
   assert.match(firstStatus.stderr, /WARNING completed-run-reconciled/);
-  assert.match(firstStatus.stdout, /Objective: Await the next assignment\./);
+  assert.match(firstStatus.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
 
   await appendCompletedResultStatusDrift(
     runtimeDir,
@@ -1610,19 +2155,17 @@ test("ctx status and resume do not replay a recovered completed result after lat
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.doesNotMatch(secondStatus.stderr, /WARNING completed-run-reconciled/);
-  assert.match(
-    secondStatus.stdout,
-    /Objective: Operator adjusted the status after completed recovery\./
-  );
-  assert.equal(secondSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, []);
-  assert.equal(
-    secondSnapshot.status.currentObjective,
-    "Operator adjusted the status after completed recovery."
-  );
+  assert.doesNotMatch(secondStatus.stderr, /WARNING stale-run-reconciled/);
+  assert.match(secondStatus.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+  assert.equal(secondSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(secondSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(secondSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(secondSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(secondSnapshot.results.length, 1);
   assert.deepEqual(secondSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
@@ -1635,18 +2178,13 @@ test("ctx status and resume do not replay a recovered completed result after lat
   });
   assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 1);
 
-  await assert.rejects(
-    execFileAsync(process.execPath, [cliPath, "resume"], {
-      cwd: projectRoot
-    }),
-    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /No active assignment is available to resume\./);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING stale-run-reconciled/);
-      return true;
-    }
-  );
+  const resumed = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  assert.equal(resumed.exitCode, 0);
+  assert.match(resumed.stdout, /Recovery brief generated/);
+  assert.doesNotMatch(resumed.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(resumed.stderr, /WARNING stale-run-reconciled/);
 
   const finalSnapshot = JSON.parse(
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
@@ -1654,14 +2192,14 @@ test("ctx status and resume do not replay a recovered completed result after lat
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
-  assert.equal(finalSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(finalSnapshot.status.activeAssignmentIds, []);
-  assert.equal(
-    finalSnapshot.status.currentObjective,
-    "Operator adjusted the status after completed recovery."
-  );
+  assert.equal(finalSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(finalSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(finalSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(finalSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(finalSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(finalSnapshot.results.length, 1);
   assert.deepEqual(finalSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
@@ -1675,7 +2213,7 @@ test("ctx status and resume do not replay a recovered completed result after lat
   assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 1);
 });
 
-test("ctx status, resume, and run repair a completed result despite older matching status history", async () => {
+test("ctx status and resume repair a completed result despite older matching status history", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
     await createCompletedResultRecoverySetup();
 
@@ -1691,17 +2229,20 @@ test("ctx status, resume, and run repair a completed result despite older matchi
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.match(status.stderr, /WARNING completed-run-reconciled/);
   assert.match(status.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
-  assert.match(status.stdout, /Active assignments: 0/);
+  assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Results: 1/);
   assert.match(status.stdout, /Open decisions: 0/);
-  assert.match(status.stdout, /Objective: Await the next assignment\./);
-  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
-  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.match(status.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(repairedSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(repairedSnapshot.results.length, 1);
   assert.deepEqual(repairedSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
@@ -1714,32 +2255,16 @@ test("ctx status, resume, and run repair a completed result despite older matchi
   });
   assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 1);
 
-  await assert.rejects(
-    execFileAsync(process.execPath, [cliPath, "resume"], {
-      cwd: projectRoot
-    }),
-    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /No active assignment is available to resume\./);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
-      return true;
-    }
-  );
-
-  await assert.rejects(
-    execFileAsync(process.execPath, [cliPath, "run"], {
-      cwd: projectRoot
-    }),
-    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /No active assignment is available to run\./);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
-      return true;
-    }
-  );
+  const resume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  assert.equal(resume.exitCode, 0);
+  assert.match(resume.stdout, /Recovery brief generated/);
+  assert.doesNotMatch(resume.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(resume.stderr, /WARNING stale-run-reconciled/);
 });
 
-test("ctx status repairs snapshot-fallback completed results when the snapshot boundary is unusable", async () => {
+test("ctx status repairs snapshot-fallback completed results into a workflow rerun", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
     await createCompletedResultRecoverySetup();
 
@@ -1755,15 +2280,19 @@ test("ctx status repairs snapshot-fallback completed results when the snapshot b
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.match(status.stderr, /WARNING completed-run-reconciled/);
   assert.match(status.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
-  assert.match(status.stdout, /Active assignments: 0/);
+  assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Results: 1/);
-  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
-  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.match(status.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(repairedSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(repairedSnapshot.results.length, 1);
   assert.deepEqual(repairedSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
@@ -1780,35 +2309,26 @@ test("ctx status repairs snapshot-fallback completed results when the snapshot b
   );
 });
 
-test("ctx resume recovers a completed host run before reporting no active assignment", async () => {
+test("ctx resume recovers a completed host run before generating a rerun brief", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
     await createCompletedResultRecoverySetup();
 
-  await assert.rejects(
-    execFileAsync(process.execPath, [cliPath, "resume"], {
-      cwd: projectRoot
-    }),
-    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /No active assignment is available to resume\./);
-      return true;
-    }
-  );
+  const firstResume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  assert.equal(firstResume.exitCode, 0);
+  assert.match(firstResume.stdout, /Recovery brief generated/);
+  assert.match(firstResume.stderr, /WARNING completed-run-reconciled/);
 
   const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
   const firstQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
-  await assert.rejects(
-    execFileAsync(process.execPath, [cliPath, "resume"], {
-      cwd: projectRoot
-    }),
-    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /No active assignment is available to resume\./);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING stale-run-reconciled/);
-      return true;
-    }
-  );
+  const secondResume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  assert.equal(secondResume.exitCode, 0);
+  assert.match(secondResume.stdout, /Recovery brief generated/);
+  assert.doesNotMatch(secondResume.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(secondResume.stderr, /WARNING stale-run-reconciled/);
 
   const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
   const secondQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
@@ -1823,11 +2343,14 @@ test("ctx resume recovers a completed host run before reporting no active assign
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
-  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
-  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(repairedSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(repairedSnapshot.results.length, 1);
   assert.deepEqual(repairedSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
@@ -1844,7 +2367,7 @@ test("ctx resume recovers a completed host run before reporting no active assign
   );
 });
 
-test("ctx run surfaces a recovered completed host run before later rerun errors", async () => {
+test("ctx run surfaces a recovered completed host run before the next workflow rerun", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
     await createCompletedResultRecoverySetup();
 
@@ -1860,18 +2383,13 @@ test("ctx run surfaces a recovered completed host run before later rerun errors"
   const firstRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
   const firstQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
 
-  await assert.rejects(
-    execFileAsync(process.execPath, [cliPath, "run"], {
-      cwd: projectRoot
-    }),
-    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
-      assert.ok(error instanceof Error);
-      assert.match(error.message, /No active assignment is available to run\./);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING stale-run-reconciled/);
-      return true;
-    }
-  );
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+  assert.equal(status.exitCode, 0);
+  assert.match(status.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+  assert.doesNotMatch(status.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(status.stderr, /WARNING stale-run-reconciled/);
 
   const secondRecoveryEventCount = await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted");
   const secondQueuedTransitionCount = await countQueuedAssignmentUpdatedEvents(runtimeDir, assignmentId);
@@ -1886,11 +2404,14 @@ test("ctx run surfaces a recovered completed host run before later rerun errors"
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
-  assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
-  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
-  assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+  assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(repairedSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(repairedSnapshot.results.length, 1);
   assert.deepEqual(repairedSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
@@ -1923,6 +2444,7 @@ test("ctx run surfaces a recovered failed host run with a non-zero exit", async 
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.equal(run.exitCode, 1);
@@ -1930,9 +2452,11 @@ test("ctx run surfaces a recovered failed host run with a non-zero exit", async 
   assert.match(run.stdout, /Result \(failed\): Recovered failed host run for command recovery\./);
   assert.match(run.stderr, /WARNING completed-run-reconciled/);
   assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 1);
-  assert.equal(repairedSnapshot.assignments[0]?.state, "failed");
-  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
-  assert.equal(repairedSnapshot.status.currentObjective, `Review failed assignment ${assignmentId}.`);
+  assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(repairedSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.deepEqual(repairedSnapshot.results[0], {
     resultId: "result-cli-failed-recovery",
     assignmentId,
@@ -1944,25 +2468,17 @@ test("ctx run surfaces a recovered failed host run with a non-zero exit", async 
   });
 });
 
-test("ctx status, resume, and run recover completed runtime truth from a malformed leftover lease", async () => {
+test("ctx status and resume preserve workflow reruns behind a malformed leftover lease", async () => {
   const cases = [
     {
       command: "status",
       expectedExitCode: 0,
-      expectedError: undefined,
-      expectCompletedWarning: true
+      expectedError: undefined
     },
     {
       command: "resume",
-      expectedExitCode: 1,
-      expectedError: /No active assignment is available to resume\./,
-      expectCompletedWarning: false
-    },
-    {
-      command: "run",
       expectedExitCode: 0,
-      expectedError: undefined,
-      expectCompletedWarning: true
+      expectedError: undefined
     }
   ] as const;
 
@@ -1979,29 +2495,27 @@ test("ctx status, resume, and run recover completed runtime truth from a malform
       assignments: Array<{ id: string; state: string }>;
       results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
       status: { activeAssignmentIds: string[]; currentObjective: string };
+      workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
     };
 
     assert.equal(commandResult.exitCode, testCase.expectedExitCode);
-    if (testCase.expectCompletedWarning) {
-      assert.match(commandResult.stderr, /WARNING completed-run-reconciled/);
-    }
-    assert.doesNotMatch(commandResult.stderr, /WARNING stale-run-reconciled/);
+    assert.equal(commandResult.stderr, "");
     assert.doesNotMatch(commandResult.stderr, /Host run reconciliation failed to clear the active lease/);
     if (testCase.expectedError) {
       assert.match(commandResult.stderr, testCase.expectedError);
     } else if (testCase.command === "status") {
-      assert.match(commandResult.stdout, /Active assignments: 0/);
+      assert.match(commandResult.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+      assert.match(commandResult.stdout, /Active assignments: 1/);
       assert.match(commandResult.stdout, /Results: 1/);
       assert.match(commandResult.stdout, /Open decisions: 0/);
     } else {
-      assert.match(
-        commandResult.stdout,
-        /Result \(completed\): Recovered completed runtime result despite malformed leftover lease\./
-      );
+      assert.match(commandResult.stdout, /Recovery brief generated/);
     }
-    assert.equal(repairedSnapshot.assignments[0]?.state, "completed");
-    assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
-    assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
+    assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+    assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
+    assert.match(repairedSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+    assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "plan");
+    assert.equal(repairedSnapshot.workflowProgress.currentModuleAttempt, 2);
     assert.equal(repairedSnapshot.results.length, 1);
     assert.deepEqual(repairedSnapshot.results[0], {
       resultId: "result-cli-runtime-malformed-lease",
@@ -2036,7 +2550,7 @@ test("ctx status, resume, and run preserve completed runtime decisions behind a 
     {
       command: "run",
       expectedExitCode: 1,
-      expectedError: /Assignment .* is blocked and cannot be run\. Resolve decision .* first\./
+      expectedError: /Workflow assignment .* is not runnable for module plan\. Resolve decision .*:/
     }
   ] as const;
 
@@ -2065,13 +2579,14 @@ test("ctx status, resume, and run preserve completed runtime decisions behind a 
       assert.match(commandResult.stdout, /Active assignments: 1/);
       assert.match(commandResult.stdout, /Open decisions: 1/);
     } else {
-      assert.match(commandResult.stdout, /Recovery brief generated for Resolve the recovered decision before continuing\./);
+      assert.match(commandResult.stdout, /Recovery brief generated/);
+      assert.match(commandResult.stdout, /Resolve decision decision-cli-runtime-malformed-lease:/);
     }
     assert.equal(repairedSnapshot.assignments[0]?.state, "blocked");
     assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
     assert.equal(
       repairedSnapshot.status.currentObjective,
-      "Resolve the recovered decision before continuing."
+      "Resolve decision decision-cli-runtime-malformed-lease: Recovered completed runtime decision despite malformed leftover lease."
     );
     assert.equal(repairedSnapshot.decisions.length, 1);
     assert.deepEqual(repairedSnapshot.decisions[0], {
@@ -2183,7 +2698,7 @@ test("ctx status recovers a completed host decision before further action", asyn
   );
 });
 
-test("ctx status does not reopen a resolved recovered decision", async () => {
+test("ctx status advances to a queued rerun after a recovered decision resolves", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } = await createCompletedDecisionRecoverySetup({
     includeLeftoverLease: true
   });
@@ -2299,17 +2814,23 @@ test("ctx status does not reopen a resolved recovered decision", async () => {
     assignments: Array<{ id: string; state: string }>;
     decisions: Array<{ decisionId: string; assignmentId: string; state: string; resolvedAt?: string }>;
     status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.doesNotMatch(secondStatus.stderr, /WARNING completed-run-reconciled/);
   assert.doesNotMatch(secondStatus.stderr, /WARNING stale-run-reconciled/);
   assert.match(secondStatus.stdout, /Active assignments: 1/);
   assert.match(secondStatus.stdout, /Open decisions: 0/);
-  assert.equal(secondSnapshot.assignments[0]?.state, "in_progress");
+  assert.match(secondStatus.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
+  assert.equal(secondSnapshot.assignments[0]?.state, "queued");
   assert.equal(secondSnapshot.decisions.length, 1);
   assert.equal(secondSnapshot.decisions[0]?.decisionId, decisionId);
   assert.equal(secondSnapshot.decisions[0]?.state, "resolved");
   assert.equal(secondSnapshot.decisions[0]?.resolvedAt, resolutionTimestamp);
+  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.match(secondSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(secondSnapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(secondSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 1);
   await assert.rejects(
     readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
@@ -2317,7 +2838,7 @@ test("ctx status does not reopen a resolved recovered decision", async () => {
   );
 });
 
-test("ctx status preserves later durable decision progression during snapshot fallback recovery", async () => {
+test("ctx status falls back to the recovered blocked decision when later suffix replay is unusable", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } = await createCompletedDecisionRecoverySetup();
   const initialSnapshot = JSON.parse(
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
@@ -2458,17 +2979,20 @@ test("ctx status preserves later durable decision progression during snapshot fa
 
   assert.match(status.stderr, /WARNING completed-run-reconciled/);
   assert.match(status.stdout, /Active assignments: 1/);
-  assert.match(status.stdout, /Open decisions: 0/);
-  assert.match(status.stdout, new RegExp(`- ${assignmentId} in_progress `));
-  assert.equal(repairedSnapshot.assignments[0]?.state, "in_progress");
+  assert.match(status.stdout, /Open decisions: 1/);
+  assert.match(status.stdout, new RegExp(`- ${assignmentId} blocked `));
+  assert.equal(repairedSnapshot.assignments[0]?.state, "blocked");
   assert.equal(repairedSnapshot.decisions.length, 1);
   assert.equal(repairedSnapshot.decisions[0]?.assignmentId, assignmentId);
   assert.equal(repairedSnapshot.decisions[0]?.decisionId, completedRecord.terminalOutcome.decision.decisionId);
-  assert.equal(repairedSnapshot.decisions[0]?.state, "resolved");
-  assert.equal(repairedSnapshot.decisions[0]?.resolvedAt, resolutionTimestamp);
+  assert.equal(repairedSnapshot.decisions[0]?.state, "open");
+  assert.equal(repairedSnapshot.decisions[0]?.resolvedAt, undefined);
   assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
-  assert.equal(repairedSnapshot.status.currentObjective, "Continue after snapshot fallback recovery.");
-  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 1);
+  assert.equal(
+    repairedSnapshot.status.currentObjective,
+    "Resolve decision decision-cli-completed-status: Need operator confirmation before proceeding."
+  );
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 2);
 });
 
 test("ctx resume repairs snapshot-fallback completed decisions when the snapshot boundary is unusable", async () => {
@@ -2604,7 +3128,8 @@ test("ctx run surfaces a recovered completed host decision before later rerun er
     }),
     (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /is blocked and cannot be run/);
+      assert.match(error.message, /Workflow assignment .* is not runnable for module plan/);
+      assert.match(error.message, /Resolve decision decision-cli-completed-status:/);
       assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
       assert.doesNotMatch(error.stderr ?? "", /WARNING stale-run-reconciled/);
       return true;
@@ -2789,8 +3314,10 @@ test("ctx run exits non-zero when it persists a failed result", async () => {
   const snapshot = JSON.parse(
     await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
   ) as {
+    assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string }>;
-    status: { activeAssignmentIds: string[] };
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
   const runRecord = JSON.parse(
     await readFile(
@@ -2806,7 +3333,11 @@ test("ctx run exits non-zero when it persists a failed result", async () => {
   assert.equal(snapshot.results.length, 1);
   assert.equal(snapshot.results[0]?.assignmentId, assignmentId);
   assert.equal(snapshot.results[0]?.status, "failed");
-  assert.deepEqual(snapshot.status.activeAssignmentIds, []);
+  assert.deepEqual(snapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.equal(snapshot.assignments[0]?.state, "queued");
+  assert.match(snapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(snapshot.workflowProgress.currentModuleId, "plan");
+  assert.equal(snapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(runRecord.assignmentId, assignmentId);
   assert.equal(runRecord.resultStatus, "failed");
   assert.equal(runRecord.terminalOutcome?.kind, "result");
@@ -2936,7 +3467,8 @@ test("ctx run refuses to rerun a blocked assignment with an unresolved decision"
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /is blocked and cannot be run/);
+      assert.match(error.message, /Workflow assignment .* is not runnable for module plan/);
+      assert.match(error.message, /Resolve decision .*: Need operator guidance before proceeding\./);
       return true;
     }
   );

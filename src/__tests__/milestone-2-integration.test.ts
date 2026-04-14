@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { CodexCommandRunner } from "../hosts/codex/adapter/cli.js";
+import { deriveWorkflowRunAttemptIdentity } from "../adapters/host-run-records.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { getNativeRunId } from "../core/run-state.js";
 import type { HostRunRecord } from "../core/types.js";
@@ -20,13 +21,28 @@ import {
   resumeRuntime,
   runRuntime
 } from "../cli/commands.js";
+import { loadWorkflowAwareProjectionWithDiagnostics } from "../cli/runtime-state.js";
 import { nowIso } from "../utils/time.js";
+import { evaluateWorkflowProgression, workflowArtifactPath } from "../workflows/index.js";
+import type { WorkflowArtifactDocument } from "../workflows/types.js";
 
 interface SmokeSetup {
   projectRoot: string;
   store: RuntimeStore;
   adapter: CodexAdapter;
   assignmentId: string;
+}
+
+async function currentWorkflowAttempt(
+  store: RuntimeStore,
+  assignmentId: string
+): Promise<NonNullable<HostRunRecord["workflowAttempt"]>> {
+  const workflowAttempt = deriveWorkflowRunAttemptIdentity(
+    await loadOperatorProjection(store),
+    assignmentId
+  );
+  assert.ok(workflowAttempt, "expected workflow attempt identity for the current workflow assignment");
+  return workflowAttempt;
 }
 
 async function countQueuedAssignmentUpdatedEvents(
@@ -94,10 +110,12 @@ test("milestone-2 integration: resume refuses snapshot-backed interrupted state 
 
   await appendPartialResult(setup, "smoke-interrupted-partial", "Interrupted smoke work is partially complete.");
   await rm(join(setup.projectRoot, ".coortex", "runtime", "events.ndjson"));
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
 
   const runningRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     startedAt: nowIso(),
     heartbeatAt: nowIso(),
     leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -251,9 +269,10 @@ test("milestone-2 integration: final run-record write failures do not drop a com
   assert.equal(run.execution.outcome.capture.status, "completed");
   assert.match(run.execution.warning ?? "", /final run record could not be persisted/i);
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
-  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "queued");
   assert.equal(snapshot?.results.at(-1)?.summary, "Completed host outcome survived a final run-record write failure.");
-  assert.equal(snapshot?.status.activeAssignmentIds.length, 0);
+  assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(snapshot?.status.currentObjective ?? "", new RegExp(`Start plan assignment ${setup.assignmentId}:`));
   await assert.rejects(
     readFile(
       join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
@@ -371,10 +390,79 @@ test("milestone-2 integration: run recovers a durable outcome even if the adapte
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
   assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
-  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "queued");
   assert.equal(snapshot?.results.at(-1)?.assignmentId, setup.assignmentId);
-  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
-  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 0);
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(
+    run.projectionAfter.status.currentObjective,
+    new RegExp(`Start plan assignment ${setup.assignmentId}:`)
+  );
+  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 1);
+});
+
+test("milestone-2 integration: recovered plan advancement envelope matches the converged review assignment", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in recovered plan advancement smoke test");
+  });
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
+
+  await setup.store.writeJsonArtifact(
+    workflowArtifactPath("default", 1, "plan", setup.assignmentId, 1),
+    {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "plan",
+      moduleAttempt: 1,
+      assignmentId: setup.assignmentId,
+      createdAt: "2026-04-16T09:01:00.000Z",
+      payload: {
+        planSummary: "Recovered plan is ready for review.",
+        implementationSteps: ["Advance directly to review."],
+        reviewEvidenceSummary: "Recovered plan output is complete."
+      }
+    } satisfies WorkflowArtifactDocument
+  );
+
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    workflowAttempt,
+    adapterData: { nativeRunId: "plan-advance-recovered-thread" },
+    startedAt: "2026-04-16T09:00:00.000Z",
+    completedAt: "2026-04-16T09:01:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered plan advancement completed.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "plan-advance-recovered-result",
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered plan advancement completed.",
+        changedFiles: ["src/workflows/modules/plan.ts"],
+        createdAt: "2026-04-16T09:01:00.000Z"
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+  const reviewAssignmentId = run.projectionAfter.workflowProgress?.currentAssignmentId;
+  const reviewAssignment = reviewAssignmentId
+    ? run.projectionAfter.assignments.get(reviewAssignmentId)
+    : undefined;
+
+  assert.equal(run.recoveredOutcome, true);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.assignmentId, setup.assignmentId);
+  assert.ok(reviewAssignmentId, "expected recovery to advance into review");
+  assert.equal(run.envelope.workflow?.currentModuleId, "review");
+  assert.equal(run.envelope.workflow?.currentAssignmentId, reviewAssignmentId);
+  assert.equal(run.envelope.metadata.activeAssignmentId, reviewAssignmentId);
+  assert.equal(run.envelope.objective, reviewAssignment?.objective);
+  assert.deepEqual(run.envelope.requiredOutputs, reviewAssignment?.requiredOutputs);
 });
 
 test("milestone-2 integration: completed host recovery finishes convergence when only the terminal event persisted", async () => {
@@ -417,19 +505,24 @@ test("milestone-2 integration: completed host recovery finishes convergence when
   const projectionBefore = await loadOperatorProjection(setup.store);
   const snapshot = await setup.store.loadSnapshot();
 
-  assert.equal(projectionBefore.assignments.get(setup.assignmentId)?.state, "completed");
-  assert.deepEqual(projectionBefore.status.activeAssignmentIds, []);
+  assert.equal(projectionBefore.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.deepEqual(projectionBefore.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(
+    projectionBefore.status.currentObjective,
+    new RegExp(`Start plan assignment ${setup.assignmentId}:`)
+  );
   assert.ok(
     run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed")
   );
-  assert.ok(
-    run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled")
-  );
   assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
-  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "completed");
-  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
+  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(
+    run.projectionAfter.status.currentObjective,
+    new RegExp(`Start plan assignment ${setup.assignmentId}:`)
+  );
   assert.equal(snapshot?.results.at(-1)?.assignmentId, setup.assignmentId);
-  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 0);
+  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 1);
   await assert.rejects(
     readFile(
       join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
@@ -463,7 +556,12 @@ test("milestone-2 integration: completed host recovery reuses the original durab
   (setup.store as RuntimeStore & {
     appendEvent: RuntimeStore["appendEvent"];
   }).appendEvent = async (event) => {
-    if (!failedAssignmentUpdate && event.type === "assignment.updated") {
+    if (
+      !failedAssignmentUpdate &&
+      event.type === "assignment.updated" &&
+      event.payload.assignmentId === setup.assignmentId &&
+      event.payload.patch.state === "queued"
+    ) {
       failedAssignmentUpdate = true;
       throw new Error("simulated post-result persistence failure");
     }
@@ -482,13 +580,491 @@ test("milestone-2 integration: completed host recovery reuses the original durab
 
   assert.equal(run.execution.outcome.kind, "result");
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
-  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
   assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
-  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "completed");
-  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
-  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 0);
+  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(
+    run.projectionAfter.status.currentObjective,
+    new RegExp(`Start plan assignment ${setup.assignmentId}:`)
+  );
+  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 1);
   assert.equal(results.length, 1);
   assert.equal(results[0]?.resultId, run.execution.outcome.capture.resultId);
+});
+
+test("milestone-2 integration: recovered legacy outcomes use the shared bounded envelope builder", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used when a legacy recovered outcome is synthesized");
+  });
+  await stripWorkflowStateFromRuntime(setup.store);
+
+  const summary = "Recovered legacy result ".repeat(40).trim();
+  const completedAt = new Date(Date.now() - 20_000).toISOString();
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    adapterData: { nativeRunId: "legacy-recovery-thread" },
+    startedAt: new Date(Date.now() - 30_000).toISOString(),
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "legacy-recovered-result",
+        producerId: "codex",
+        status: "completed",
+        summary,
+        changedFiles: ["README.md"],
+        createdAt: completedAt
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+  const artifact = await readFile(
+    join(setup.projectRoot, ".coortex", "artifacts", "results", "legacy-recovered-result.txt"),
+    "utf8"
+  );
+
+  assert.equal(run.recoveredOutcome, true);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.resultId, "legacy-recovered-result");
+  assert.equal(run.execution.outcome.capture.summary, summary);
+  assert.equal(run.envelope.metadata.recoveredOutcome, true);
+  assert.ok(run.envelope.estimatedChars > 0);
+  assert.equal(run.envelope.trimApplied, true);
+  assert.equal(run.envelope.recentResults[0]?.trimmed, true);
+  assert.equal(run.envelope.recentResults[0]?.reference, ".coortex/artifacts/results/legacy-recovered-result.txt");
+  assert.equal(run.envelope.recoveryBrief.lastDurableResults[0]?.trimmed, true);
+  assert.equal(artifact.trim(), summary);
+});
+
+test("milestone-2 integration: run surfaces a recovered verify completion after the workflow closes", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in recovered verify completion smoke test");
+  });
+  const planAssignmentId = setup.assignmentId;
+
+  await setAssignmentState(setup.store, planAssignmentId, "in_progress", "2026-04-15T14:00:00.000Z");
+  await advanceWorkflowModule(setup.store, {
+    artifact: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "plan",
+      moduleAttempt: 1,
+      assignmentId: planAssignmentId,
+      createdAt: "2026-04-15T14:01:00.000Z",
+      payload: {
+        planSummary: "Plan complete.",
+        implementationSteps: ["Advance to review."],
+        reviewEvidenceSummary: "Ready for review."
+      }
+    },
+    resultId: "plan-result-recovered-complete",
+    summary: "Plan completed.",
+    createdAt: "2026-04-15T14:01:00.000Z",
+    progressionAt: "2026-04-15T14:01:01.000Z"
+  });
+
+  let projection = await loadOperatorProjection(setup.store);
+  const reviewAssignmentId = projection.workflowProgress?.currentAssignmentId;
+  assert.ok(reviewAssignmentId, "expected the workflow to advance to review");
+
+  await setAssignmentState(
+    setup.store,
+    reviewAssignmentId,
+    "in_progress",
+    "2026-04-15T14:02:00.000Z"
+  );
+  await advanceWorkflowModule(setup.store, {
+    artifact: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "review",
+      moduleAttempt: 1,
+      assignmentId: reviewAssignmentId,
+      createdAt: "2026-04-15T14:03:00.000Z",
+      payload: {
+        verdict: "approved",
+        rationaleSummary: "Review approved."
+      }
+    },
+    resultId: "review-result-recovered-complete",
+    summary: "Review completed.",
+    createdAt: "2026-04-15T14:03:00.000Z",
+    progressionAt: "2026-04-15T14:03:01.000Z"
+  });
+
+  projection = await loadOperatorProjection(setup.store);
+  const verifyAssignmentId = projection.workflowProgress?.currentAssignmentId;
+  assert.ok(verifyAssignmentId, "expected the workflow to advance to verify");
+
+  await setAssignmentState(
+    setup.store,
+    verifyAssignmentId,
+    "in_progress",
+    "2026-04-15T14:04:00.000Z"
+  );
+  await setup.store.writeJsonArtifact(
+    workflowArtifactPath("default", 1, "verify", verifyAssignmentId, 1),
+    {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "verify",
+      moduleAttempt: 1,
+      assignmentId: verifyAssignmentId,
+      createdAt: "2026-04-15T14:05:00.000Z",
+      payload: {
+        verdict: "verified",
+        verificationSummary: "Verification recovered from the completed host run.",
+        evidenceResultIds: ["review-result-recovered-complete"]
+      }
+    } satisfies WorkflowArtifactDocument
+  );
+
+  const completedRecord: HostRunRecord = {
+    assignmentId: verifyAssignmentId,
+    state: "completed",
+    workflowAttempt: await currentWorkflowAttempt(setup.store, verifyAssignmentId),
+    adapterData: { nativeRunId: "verify-recovered-thread" },
+    startedAt: "2026-04-15T14:04:00.000Z",
+    completedAt: "2026-04-15T14:05:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Workflow verification complete.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "verify-result-recovered-complete",
+        producerId: "codex",
+        status: "completed",
+        summary: "Workflow verification complete.",
+        changedFiles: ["src/workflows/modules/verify.ts"],
+        createdAt: "2026-04-15T14:05:00.000Z"
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(
+    `adapters/codex/runs/${verifyAssignmentId}.json`,
+    completedRecord
+  );
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(run.recoveredOutcome, true);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.resultId, "verify-result-recovered-complete");
+  assert.equal(run.execution.outcome.capture.summary, "Workflow verification complete.");
+  assert.equal(run.envelope.metadata.recoveredOutcome, true);
+  assert.equal(run.envelope.workflow?.currentAssignmentId, null);
+  assert.equal(run.envelope.metadata.activeAssignmentId, null);
+  assert.equal(run.envelope.objective, "Workflow default complete.");
+  assert.deepEqual(run.envelope.requiredOutputs, []);
+  assert.deepEqual(run.envelope.writeScope, []);
+  assert.equal(run.projectionAfter.workflowProgress?.currentAssignmentId, null);
+  assert.equal(run.projectionAfter.workflowProgress?.lastTransition?.transition, "complete");
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
+});
+
+test("milestone-2 integration: same-assignment reruns ignore old completed results when completedAt is missing", async () => {
+  const setup = await createSmokeSetup(
+    stableRunner("missing-completed-at-old-result", "Current rerun result succeeded.")
+  );
+  await rerunWorkflowSameAssignment(setup.store, setup.assignmentId, "2026-04-18T12:10:00.000Z");
+  const priorAttempt = {
+    workflowId: "default",
+    workflowCycle: 1,
+    moduleId: "plan",
+    moduleAttempt: 1
+  };
+
+  const oldAttemptRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    workflowAttempt: priorAttempt,
+    adapterData: { nativeRunId: "old-attempt-result-missing-completed-at" },
+    startedAt: "2026-04-18T12:00:30.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Old attempt result should not be recovered.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "old-attempt-result-missing-completed-at",
+        producerId: "codex",
+        status: "completed",
+        summary: "Old attempt result should not be recovered.",
+        changedFiles: ["src/cli/runtime-state.ts"],
+        createdAt: "2026-04-18T12:01:00.000Z"
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, oldAttemptRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", oldAttemptRecord);
+  await setup.store.writeJsonArtifact(
+    `adapters/codex/runs/${setup.assignmentId}.lease.json`,
+    {
+      assignmentId: setup.assignmentId,
+      state: "running",
+      workflowAttempt: priorAttempt,
+      adapterData: { nativeRunId: "old-attempt-result-lease" },
+      startedAt: "2026-04-18T12:00:30.000Z",
+      heartbeatAt: "2026-04-18T12:09:30.000Z",
+      leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+    } satisfies HostRunRecord
+  );
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(run.projectionBefore.workflowProgress?.currentModuleAttempt, 2);
+  assert.equal(run.recoveredOutcome, false);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.summary, "Current rerun result succeeded.");
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(
+    ![...run.projectionBefore.results.values()].some(
+      (result) => result.summary === "Old attempt result should not be recovered."
+    )
+  );
+});
+
+test("milestone-2 integration: same-assignment reruns ignore old completed decisions when completedAt is missing", async () => {
+  const setup = await createSmokeSetup(
+    stableRunner("missing-completed-at-old-decision", "Current rerun after old decision succeeded.")
+  );
+  await rerunWorkflowSameAssignment(setup.store, setup.assignmentId, "2026-04-18T12:10:00.000Z");
+  const priorAttempt = {
+    workflowId: "default",
+    workflowCycle: 1,
+    moduleId: "plan",
+    moduleAttempt: 1
+  };
+
+  const oldAttemptRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    workflowAttempt: priorAttempt,
+    adapterData: { nativeRunId: "old-attempt-decision-missing-completed-at" },
+    startedAt: "2026-04-18T12:00:30.000Z",
+    outcomeKind: "decision",
+    summary: "Old attempt decision should not be recovered.",
+    terminalOutcome: {
+      kind: "decision",
+      decision: {
+        decisionId: "old-attempt-decision-missing-completed-at",
+        requesterId: "codex",
+        blockerSummary: "Old attempt decision should not be recovered.",
+        options: [{ id: "wait", label: "Wait", summary: "Pause." }],
+        recommendedOption: "wait",
+        state: "open",
+        createdAt: "2026-04-18T12:01:00.000Z"
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, oldAttemptRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", oldAttemptRecord);
+  await setup.store.writeTextArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, "{");
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(run.projectionBefore.workflowProgress?.currentModuleAttempt, 2);
+  assert.equal(run.recoveredOutcome, false);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.summary, "Current rerun after old decision succeeded.");
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(
+    ![...run.projectionBefore.decisions.values()].some(
+      (decision) => decision.blockerSummary === "Old attempt decision should not be recovered."
+    )
+  );
+});
+
+test("milestone-2 integration: cleanup-only active leftover completed result lease does not block a same-assignment rerun", async () => {
+  const setup = await createSmokeSetup(
+    stableRunner("cleanup-only-result-rerun", "Cleanup-only result rerun succeeded.")
+  );
+  const priorAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
+
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    workflowAttempt: priorAttempt,
+    adapterData: { nativeRunId: "cleanup-only-result-recovered" },
+    startedAt: new Date(Date.now() - 120_000).toISOString(),
+    completedAt: new Date(Date.now() - 110_000).toISOString(),
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered result should not block the rerun.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: randomUUID(),
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered result should not block the rerun.",
+        changedFiles: [],
+        createdAt: new Date(Date.now() - 110_000).toISOString()
+      }
+    }
+  };
+  const activeLease: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    workflowAttempt: priorAttempt,
+    adapterData: { nativeRunId: "cleanup-only-result-lease" },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, activeLease);
+
+  const recovered = await resumeRuntime(setup.store, setup.adapter);
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, activeLease);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(run.recoveredOutcome, false);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.summary, "Cleanup-only result rerun succeeded.");
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+});
+
+test("milestone-2 integration: cleanup-only active leftover completed decision lease does not block a same-assignment rerun", async () => {
+  const setup = await createSmokeSetup(
+    stableRunner("cleanup-only-decision-rerun", "Cleanup-only decision rerun succeeded.")
+  );
+  const priorAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
+
+  const decisionCreatedAt = new Date(Date.now() - 110_000).toISOString();
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    workflowAttempt: priorAttempt,
+    adapterData: { nativeRunId: "cleanup-only-decision-recovered" },
+    startedAt: new Date(Date.now() - 120_000).toISOString(),
+    completedAt: decisionCreatedAt,
+    outcomeKind: "decision",
+    summary: "Recovered decision should not block the rerun.",
+    terminalOutcome: {
+      kind: "decision",
+      decision: {
+        decisionId: randomUUID(),
+        requesterId: "codex",
+        blockerSummary: "Recovered decision should not block the rerun.",
+        options: [{ id: "continue", label: "Continue", summary: "Continue after review." }],
+        recommendedOption: "continue",
+        state: "open",
+        createdAt: decisionCreatedAt
+      }
+    }
+  };
+  const activeLease: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    workflowAttempt: priorAttempt,
+    adapterData: { nativeRunId: "cleanup-only-decision-lease" },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, activeLease);
+
+  const recovered = await resumeRuntime(setup.store, setup.adapter);
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+
+  const recoveredProjection = await loadOperatorProjection(setup.store);
+  const recoveredDecision = [...recoveredProjection.decisions.values()].find(
+    (decision) => decision.assignmentId === setup.assignmentId && decision.state === "open"
+  );
+  assert.ok(recoveredDecision, "expected the recovered decision to be durable");
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: recoveredProjection.sessionId,
+    timestamp: nowIso(),
+    type: "decision.resolved",
+    payload: {
+      decisionId: recoveredDecision.decisionId,
+      resolvedAt: nowIso(),
+      resolutionSummary: "Operator resolved the recovered decision."
+    }
+  });
+  await setup.store.syncSnapshotFromEvents();
+
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, activeLease);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(run.recoveredOutcome, false);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.summary, "Cleanup-only decision rerun succeeded.");
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+});
+
+test("milestone-2 integration: hidden stale workflow cleanup is silent after the first pass", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in hidden stale workflow cleanup smoke test");
+  });
+
+  const hiddenAssignmentId = randomUUID();
+  const hiddenStaleRecord: HostRunRecord = {
+    assignmentId: hiddenAssignmentId,
+    state: "running",
+    adapterData: { nativeRunId: "hidden-stale-workflow-run" },
+    startedAt: new Date(Date.now() - 120_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 120_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() - 60_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${hiddenAssignmentId}.json`, hiddenStaleRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${hiddenAssignmentId}.lease.json`, hiddenStaleRecord);
+
+  const firstLoad = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+  const secondLoad = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+  const telemetry = await setup.store.loadTelemetry();
+  const hiddenCleanupDiagnostic = firstLoad.diagnostics.find(
+    (diagnostic) => diagnostic.code === "hidden-run-cleaned"
+  );
+
+  assert.ok(hiddenCleanupDiagnostic);
+  assert.match(
+    hiddenCleanupDiagnostic.message,
+    new RegExp(`Cleared stale host run artifacts for non-current workflow assignment ${hiddenAssignmentId}`)
+  );
+  assert.ok(!firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(!secondLoad.diagnostics.some((diagnostic) => diagnostic.code === "hidden-run-cleaned"));
+  assert.equal(
+    telemetry.filter((event) => event.eventType === "host.run.hidden_stale_cleaned").length,
+    1
+  );
+  assert.equal(
+    telemetry.filter((event) => event.eventType === "host.run.stale_reconciled").length,
+    0
+  );
+  await assert.rejects(
+    readFile(
+      join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${hiddenAssignmentId}.lease.json`),
+      "utf8"
+    ),
+    /ENOENT/
+  );
 });
 
 test("milestone-2 integration: non-terminal persist warnings still clear the finished lease", async () => {
@@ -575,7 +1151,7 @@ test("milestone-2 integration: pre-launch claim failures leave runtime state unc
   const snapshot = await setup.store.loadSnapshot();
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
 
-  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "in_progress");
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "queued");
   assert.equal(snapshot?.results.length, 0);
   assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId]);
   assert.equal(inspected, undefined);
@@ -656,9 +1232,11 @@ test("milestone-2 integration: resume uses the latest projection across multiple
 
   const staleAt = new Date(Date.now() - 60_000).toISOString();
   const expiredAt = new Date(Date.now() - 1_000).toISOString();
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const firstExpiredRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-stale-first" },
     startedAt: staleAt,
     heartbeatAt: staleAt,
@@ -682,12 +1260,12 @@ test("milestone-2 integration: resume uses the latest projection across multiple
     (diagnostic) => diagnostic.code === "stale-run-reconciled"
   );
 
-  assert.equal(staleDiagnostics.length, 2);
+  assert.equal(staleDiagnostics.length, 1);
   assert.equal(snapshot?.assignments.find((assignment) => assignment.id === setup.assignmentId)?.state, "queued");
   assert.equal(snapshot?.assignments.find((assignment) => assignment.id === secondAssignmentId)?.state, "queued");
-  assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId, secondAssignmentId]);
+  assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId]);
   assert.match(snapshot?.status.currentObjective ?? "", new RegExp(setup.assignmentId));
-  assert.match(snapshot?.status.currentObjective ?? "", new RegExp(secondAssignmentId));
+  assert.doesNotMatch(snapshot?.status.currentObjective ?? "", new RegExp(secondAssignmentId));
   await assert.rejects(
     readFile(
       join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
@@ -704,7 +1282,7 @@ test("milestone-2 integration: resume uses the latest projection across multiple
   );
 });
 
-test("milestone-2 integration: run chooses a later active assignment when an earlier one is blocked", async () => {
+test("milestone-2 integration: run refuses later queued work when the workflow assignment is blocked", async () => {
   let invocationCount = 0;
   let promptSeen = "";
   const setup = await createSmokeSetup(async (input) => {
@@ -801,16 +1379,13 @@ test("milestone-2 integration: run chooses a later active assignment when an ear
   }
   await setup.store.syncSnapshotFromEvents();
 
-  const run = await runRuntime(setup.store, setup.adapter);
+  await assert.rejects(
+    runRuntime(setup.store, setup.adapter),
+    /Workflow assignment .* is not runnable for module plan\. Resolve decision .*:/
+  );
 
-  assert.equal(invocationCount, 1);
-  assert.equal(run.assignment.id, runnableAssignmentId);
-  assert.match(promptSeen, new RegExp(runnableAssignmentId));
-  assert.doesNotMatch(promptSeen, new RegExp(`activeAssignmentId\\\":\\s*\\\"${blockedAssignmentId}\\\"`));
-  assert.equal(run.envelope.recoveryBrief.activeAssignments.length, 1);
-  assert.equal(run.envelope.recoveryBrief.activeAssignments[0]?.id, runnableAssignmentId);
-  assert.match(run.envelope.recoveryBrief.nextRequiredAction, new RegExp(runnableAssignmentId));
-  assert.doesNotMatch(run.envelope.recoveryBrief.nextRequiredAction, /Resolve decision|Unblock assignment/);
+  assert.equal(invocationCount, 0);
+  assert.equal(promptSeen, "");
 });
 
 test("milestone-2 integration: resume reconciles a running host record without a lease expiry", async () => {
@@ -819,9 +1394,11 @@ test("milestone-2 integration: resume reconciles a running host record without a
   });
 
   const startedAt = new Date(Date.now() - 60_000).toISOString();
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const leaseLessRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-missing-lease" },
     startedAt,
     heartbeatAt: startedAt
@@ -830,6 +1407,7 @@ test("milestone-2 integration: resume reconciles a running host record without a
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-missing-lease" },
     startedAt
   });
@@ -863,9 +1441,11 @@ test("milestone-2 integration: stale lease-only runs are reconciled and cleared 
     };
   });
 
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const expiredLeaseOnlyRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-lease-only-stale" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
@@ -891,7 +1471,7 @@ test("milestone-2 integration: stale lease-only runs are reconciled and cleared 
   );
 });
 
-test("milestone-2 integration: malformed lease JSON is ignored and recovery still reruns the assignment", async () => {
+test("milestone-2 integration: malformed workflow lease metadata is cleaned without inferring stale ownership", async () => {
   const setup = await createSmokeSetup(async (input) => {
     await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-malformed-lease" });
     await writeStructuredOutput(input.outputPath, {
@@ -928,7 +1508,7 @@ test("milestone-2 integration: malformed lease JSON is ignored and recovery stil
   assert.equal(leaseBeforeRun, "{");
   assert.equal(run.execution.outcome.kind, "result");
   assert.equal(run.execution.outcome.capture.status, "completed");
-  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   await assert.rejects(
     readFile(
       join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
@@ -938,7 +1518,7 @@ test("milestone-2 integration: malformed lease JSON is ignored and recovery stil
   );
 });
 
-test("milestone-2 integration: malformed lease reconciliation preserves the malformed lease reason", async () => {
+test("milestone-2 integration: malformed workflow lease cleanup preserves the malformed lease reason", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in malformed lease reconciliation reason smoke test");
   });
@@ -953,7 +1533,7 @@ test("milestone-2 integration: malformed lease reconciliation preserves the malf
   const resumed = await resumeRuntime(setup.store, setup.adapter);
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
 
-  assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(!resumed.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(inspected?.state, "completed");
   assert.equal(inspected?.staleReasonCode, "malformed_lease_artifact");
   assert.equal(inspected?.staleReason, "malformed lease file");
@@ -964,9 +1544,11 @@ test("milestone-2 integration: completed run record wins over a leftover lease d
     throw new Error("runner not used in completed-record lease recovery smoke test");
   });
 
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const completedRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "completed",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-completed" },
     startedAt: new Date(Date.now() - 120_000).toISOString(),
     completedAt: new Date(Date.now() - 110_000).toISOString(),
@@ -988,6 +1570,7 @@ test("milestone-2 integration: completed run record wins over a leftover lease d
   const staleLease: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-stale-lease" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
@@ -1020,9 +1603,11 @@ test("milestone-2 integration: resume ignores an active leftover lease when a co
     throw new Error("runner not used in active-leftover-lease resume smoke test");
   });
 
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const completedRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "completed",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-completed-active-lease" },
     startedAt: new Date(Date.now() - 120_000).toISOString(),
     completedAt: new Date(Date.now() - 110_000).toISOString(),
@@ -1044,6 +1629,7 @@ test("milestone-2 integration: resume ignores an active leftover lease when a co
   const activeLease: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-active-leftover-lease" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
@@ -1053,16 +1639,14 @@ test("milestone-2 integration: resume ignores an active leftover lease when a co
   await setup.store.writeJsonArtifact(`adapters/codex/last-run.json`, completedRecord);
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, activeLease);
 
-  await assert.rejects(
-    resumeRuntime(setup.store, setup.adapter),
-    /No active assignment is available to resume\./
-  );
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
   const snapshot = await setup.store.loadSnapshot();
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
 
-  assert.equal(snapshot?.assignments[0]?.state, "completed");
-  assert.deepEqual(snapshot?.status.activeAssignmentIds, []);
-  assert.equal(snapshot?.status.currentObjective, "Await the next assignment.");
+  assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(snapshot?.assignments[0]?.state, "queued");
+  assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(snapshot?.status.currentObjective ?? "", new RegExp(`Start plan assignment ${setup.assignmentId}:`));
   assert.equal(snapshot?.results.length, 1);
   assert.equal(snapshot?.results[0]?.status, "completed");
   assert.equal(snapshot?.results[0]?.summary, "Completed run beats an active leftover lease");
@@ -1082,9 +1666,11 @@ test("milestone-2 integration: stale reconciliation is idempotent after the firs
     stableRunner("smoke-thread-stale-repeat", "Recovered stale assignment after status/run follow-up.")
   );
 
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const staleRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-stale-repeat" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
@@ -1111,7 +1697,7 @@ test("milestone-2 integration: stale reconciliation is idempotent after the firs
   });
   await setup.store.syncSnapshotFromEvents();
   const secondResume = await resumeRuntime(setup.store, setup.adapter);
-  const statusResult = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+  const statusProjection = await loadOperatorProjection(setup.store);
   const run = await runRuntime(setup.store, setup.adapter);
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
   const telemetry = await setup.store.loadTelemetry();
@@ -1128,12 +1714,11 @@ test("milestone-2 integration: stale reconciliation is idempotent after the firs
 
   assert.ok(firstResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.ok(!secondResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
-  assert.equal(statusResult.projection.assignments.get(setup.assignmentId)?.state, "queued");
-  assert.equal(
-    statusResult.projection.status.currentObjective,
-    "Operator updated the status after stale reconciliation."
+  assert.equal(statusProjection.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.match(
+    statusProjection.status.currentObjective,
+    new RegExp(`Start plan assignment ${setup.assignmentId}:`)
   );
-  assert.ok(!statusResult.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(run.execution.outcome.kind, "result");
   assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(queuedTransitionCount, 1);
@@ -1146,9 +1731,11 @@ test("milestone-2 integration: stale reconciliation retries artifact cleanup aft
     throw new Error("runner not used in stale reconciliation retry smoke test");
   });
 
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const staleRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-stale-retry-artifacts" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
@@ -1168,10 +1755,7 @@ test("milestone-2 integration: stale reconciliation retries artifact cleanup aft
     await originalReconcile(store, record);
   };
 
-  await assert.rejects(
-    resumeRuntime(setup.store, setup.adapter),
-    /Host run reconciliation failed to clear the active lease for assignment/
-  );
+  const firstResume = await resumeRuntime(setup.store, setup.adapter);
   const snapshotAfterFirst = await setup.store.loadSnapshot();
   const inspectedAfterFirst = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
   const secondStatusProjection = await loadOperatorProjection(setup.store);
@@ -1182,6 +1766,8 @@ test("milestone-2 integration: stale reconciliation retries artifact cleanup aft
     (event) => event.eventType === "host.run.stale_reconciled"
   ).length;
 
+  assert.ok(firstResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(firstResume.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
   assert.equal(snapshotAfterFirst?.assignments[0]?.state, "queued");
   assert.equal(inspectedAfterFirst?.state, "completed");
   assert.equal(inspectedAfterFirst?.staleReasonCode, "expired_lease");
@@ -1224,6 +1810,7 @@ test("milestone-2 integration: stale retries move back to in-progress before the
   const expiredRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt: await currentWorkflowAttempt(setup.store, setup.assignmentId),
     adapterData: { nativeRunId: "smoke-thread-old-stale" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
@@ -1276,6 +1863,103 @@ async function createSmokeSetup(runExec: CodexCommandRunner["runExec"]): Promise
   };
 }
 
+async function setAssignmentState(
+  store: RuntimeStore,
+  assignmentId: string,
+  state: "queued" | "in_progress" | "blocked" | "completed" | "failed",
+  timestamp: string
+): Promise<void> {
+  const projection = await loadOperatorProjection(store);
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "assignment.updated",
+    payload: {
+      assignmentId,
+      patch: {
+        state,
+        updatedAt: timestamp
+      }
+    }
+  });
+  await store.syncSnapshotFromEvents();
+}
+
+async function rerunWorkflowSameAssignment(
+  store: RuntimeStore,
+  assignmentId: string,
+  appliedAt: string
+): Promise<void> {
+  const projection = await loadOperatorProjection(store);
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp: appliedAt,
+    type: "workflow.transition.applied",
+    payload: {
+      workflowId: "default",
+      fromModuleId: "plan",
+      toModuleId: "plan",
+      workflowCycle: 1,
+      moduleAttempt: 2,
+      transition: "rerun_same_module",
+      previousAssignmentId: assignmentId,
+      nextAssignmentId: assignmentId,
+      appliedAt
+    }
+  });
+  await store.syncSnapshotFromEvents();
+}
+
+async function advanceWorkflowModule(
+  store: RuntimeStore,
+  input: {
+    artifact: WorkflowArtifactDocument;
+    resultId: string;
+    summary: string;
+    createdAt: string;
+    progressionAt: string;
+  }
+): Promise<void> {
+  await store.writeJsonArtifact(
+    workflowArtifactPath(
+      input.artifact.workflowId,
+      input.artifact.workflowCycle,
+      input.artifact.moduleId,
+      input.artifact.assignmentId,
+      input.artifact.moduleAttempt
+    ),
+    input.artifact
+  );
+  const projection = await loadOperatorProjection(store);
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp: input.createdAt,
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: input.resultId,
+        assignmentId: input.artifact.assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary: input.summary,
+        changedFiles: [],
+        createdAt: input.createdAt
+      }
+    }
+  });
+  const progressedProjection = await loadOperatorProjection(store);
+  const progression = await evaluateWorkflowProgression(progressedProjection, store, {
+    timestamp: input.progressionAt
+  });
+  for (const event of progression.events) {
+    await store.appendEvent(event);
+  }
+  await store.syncSnapshotFromEvents();
+}
+
 async function appendPartialResult(setup: SmokeSetup, resultId: string, summary: string): Promise<void> {
   await setup.store.appendEvent({
     eventId: randomUUID(),
@@ -1295,6 +1979,19 @@ async function appendPartialResult(setup: SmokeSetup, resultId: string, summary:
     }
   });
   await setup.store.syncSnapshotFromEvents();
+}
+
+async function stripWorkflowStateFromRuntime(store: RuntimeStore): Promise<void> {
+  const filteredEvents = (await readFile(store.eventsPath, "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .filter((line) => {
+      const event = JSON.parse(line) as { type?: string };
+      return !event.type?.startsWith("workflow.");
+    });
+  await writeFile(store.eventsPath, `${filteredEvents.join("\n")}\n`, "utf8");
+  const projection = await store.syncSnapshotFromEvents();
+  assert.equal(projection.workflowProgress, undefined);
 }
 
 async function writeStructuredOutput(outputPath: string, payload: unknown): Promise<void> {
@@ -1332,7 +2029,7 @@ function normalizeRunArtifacts(
     | Awaited<ReturnType<RuntimeStore["loadTelemetry"]>>[number]
     | undefined
 ) {
-  return {
+  return normalizeStructuredStrings({
     envelope: {
       host: run.envelope.host,
       adapter: run.envelope.adapter,
@@ -1341,13 +2038,13 @@ function normalizeRunArtifacts(
       requiredOutputs: [...run.envelope.requiredOutputs],
       recentResults: run.envelope.recentResults.map((result) => ({
         trimmed: result.trimmed,
-        summary: result.summary,
+        summary: normalizeWorkflowDerivedString(result.summary),
         hasReference: typeof result.reference === "string"
       })),
-      metadata: {
+      metadata: normalizeStructuredStrings({
         ...run.envelope.metadata,
         activeAssignmentId: "<active-assignment>"
-      },
+      }),
       estimatedChars: run.envelope.estimatedChars,
       trimApplied: run.envelope.trimApplied,
       trimmedFields: run.envelope.trimmedFields.map((field) => ({
@@ -1365,14 +2062,14 @@ function normalizeRunArtifacts(
         run.execution.outcome.kind === "result"
           ? {
               status: run.execution.outcome.capture.status,
-              summary: run.execution.outcome.capture.summary,
-              changedFiles: [...run.execution.outcome.capture.changedFiles]
+              summary: normalizeWorkflowDerivedString(run.execution.outcome.capture.summary),
+              changedFiles: run.execution.outcome.capture.changedFiles.map(normalizeWorkflowDerivedString)
             }
           : undefined,
       decision:
         run.execution.outcome.kind === "decision"
           ? {
-              blockerSummary: run.execution.outcome.capture.blockerSummary,
+              blockerSummary: normalizeWorkflowDerivedString(run.execution.outcome.capture.blockerSummary),
               recommendedOption: run.execution.outcome.capture.recommendedOption,
               options: run.execution.outcome.capture.options.map((option) => ({
                 id: option.id,
@@ -1386,17 +2083,19 @@ function normalizeRunArtifacts(
       ? {
           status: {
             activeMode: snapshot.status.activeMode,
-            currentObjective: snapshot.status.currentObjective,
+            currentObjective: normalizeWorkflowDerivedString(snapshot.status.currentObjective),
             activeAssignmentCount: snapshot.status.activeAssignmentIds.length,
             activeHost: snapshot.status.activeHost,
             activeAdapter: snapshot.status.activeAdapter,
             resumeReady: snapshot.status.resumeReady
           },
           assignments: snapshot.assignments.map((assignment) => ({
-          workflow: assignment.workflow,
-          ownerType: assignment.ownerType,
-          ownerId: assignment.ownerId,
-          objective: normalizeBootstrapObjective(assignment.objective),
+            workflow: assignment.workflow,
+            ownerType: assignment.ownerType,
+            ownerId: assignment.ownerId,
+            objective: normalizeBootstrapObjective(
+              normalizeWorkflowDerivedString(assignment.objective)
+            ),
             writeScope: [...assignment.writeScope],
             requiredOutputs: [...assignment.requiredOutputs],
             state: assignment.state
@@ -1405,12 +2104,12 @@ function normalizeRunArtifacts(
             assignmentIdMatchesActive: result.assignmentId.length > 0,
             producerId: result.producerId,
             status: result.status,
-            summary: result.summary,
-            changedFiles: [...result.changedFiles]
+            summary: normalizeWorkflowDerivedString(result.summary),
+            changedFiles: result.changedFiles.map(normalizeWorkflowDerivedString)
           })),
           decisions: snapshot.decisions.map((decision) => ({
             requesterId: decision.requesterId,
-            blockerSummary: decision.blockerSummary,
+            blockerSummary: normalizeWorkflowDerivedString(decision.blockerSummary),
             recommendedOption: decision.recommendedOption,
             state: decision.state,
             options: decision.options.map((option) => ({
@@ -1426,14 +2125,14 @@ function normalizeRunArtifacts(
           eventType: completedTelemetry.eventType,
           host: completedTelemetry.host,
           adapter: completedTelemetry.adapter,
-          metadata: completedTelemetry.metadata,
+          metadata: normalizeStructuredStrings(completedTelemetry.metadata),
           inputTokens: completedTelemetry.inputTokens,
           outputTokens: completedTelemetry.outputTokens,
           totalTokens: completedTelemetry.totalTokens,
           cachedTokens: completedTelemetry.cachedTokens
         }
       : undefined
-  };
+  });
 }
 
 function findLastTelemetry(
@@ -1444,10 +2143,33 @@ function findLastTelemetry(
 }
 
 function normalizeBootstrapObjective(value: string): string {
-  return value.replace(
-    /Coordinate work for coortex-m2-smoke-[^ ]+ through the Coortex runtime\./g,
-    "Coordinate work for <smoke-project> through the Coortex runtime."
+  return normalizeWorkflowDerivedString(
+    value.replace(
+      /Coordinate work for coortex-m2-smoke-[^ ]+ through the Coortex runtime\./g,
+      "Coordinate work for <smoke-project> through the Coortex runtime."
+    )
   );
+}
+
+function normalizeWorkflowDerivedString(value: string): string {
+  return value
+    .replace(
+      /\.coortex\/runtime\/workflows\/default\/cycles\/\d+\/[a-z]+\/[0-9a-f-]{36}\/attempt-\d+\.json/g,
+      ".coortex/runtime/workflows/default/cycles/<cycle>/<module>/<assignment>/attempt-<attempt>.json"
+    )
+    .replace(
+      /(Start|Retry|Continue) [a-z]+ assignment [0-9a-f-]{36}:/g,
+      "$1 <module> assignment <assignment>:"
+    )
+    .replace(/Resolve decision [0-9a-f-]{36}:/g, "Resolve decision <decision>:");
+}
+
+function normalizeStructuredStrings<T>(value: T): T {
+  return JSON.parse(
+    JSON.stringify(value, (_key, nested) =>
+      typeof nested === "string" ? normalizeWorkflowDerivedString(nested) : nested
+    )
+  ) as T;
 }
 
 async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 500): Promise<void> {

@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { CodexCommandRunner } from "../hosts/codex/adapter/cli.js";
+import { deriveWorkflowRunAttemptIdentity } from "../adapters/host-run-records.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { getNativeRunId } from "../core/run-state.js";
 import type { HostRunRecord } from "../core/types.js";
@@ -27,6 +28,18 @@ interface SmokeSetup {
   store: RuntimeStore;
   adapter: CodexAdapter;
   assignmentId: string;
+}
+
+async function currentWorkflowAttempt(
+  store: RuntimeStore,
+  assignmentId: string
+): Promise<NonNullable<HostRunRecord["workflowAttempt"]>> {
+  const workflowAttempt = deriveWorkflowRunAttemptIdentity(
+    await loadOperatorProjection(store),
+    assignmentId
+  );
+  assert.ok(workflowAttempt, "expected workflow attempt identity for the current workflow assignment");
+  return workflowAttempt;
 }
 
 async function countQueuedAssignmentUpdatedEvents(
@@ -83,17 +96,17 @@ test("milestone-2 smoke: happy-path execution persists result, status, and telem
   assert.equal(run.envelope.metadata.activeAssignmentId, setup.assignmentId);
   assert.equal(snapshot?.results.length, 1);
   assert.equal(snapshot?.results[0]?.status, "completed");
-  assert.equal(snapshot?.status.activeAssignmentIds.length, 0);
-  assert.equal(snapshot?.status.currentObjective, "Await the next assignment.");
+  assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(snapshot?.status.currentObjective ?? "", new RegExp(`Start plan assignment ${setup.assignmentId}:`));
   assert.equal(getNativeRunId(runRecord), "smoke-thread-1");
   assert.equal(runRecord?.state, "completed");
   assert.equal(telemetry.at(-1)?.inputTokens, 15);
   assert.equal(telemetry.at(-1)?.cachedTokens, 5);
   assert.equal(telemetry.at(-1)?.totalTokens, 23);
-  await assert.rejects(
-    resumeRuntime(setup.store, setup.adapter),
-    /No active assignment is available to resume\./
-  );
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  assert.equal(resumed.brief.activeAssignments.length, 1);
+  assert.equal(resumed.brief.activeAssignments[0]?.id, setup.assignmentId);
+  assert.match(resumed.brief.nextRequiredAction, new RegExp(`Start plan assignment ${setup.assignmentId}:`));
 });
 
 test("milestone-2 smoke: decision path persists a blocker through the real run path", async () => {
@@ -184,13 +197,17 @@ test("milestone-2 smoke: completed host outcomes are reconciled after runtime ev
   assert.equal(persistedRun?.state, "completed");
   assert.equal(persistedRun?.terminalOutcome?.kind, "result");
   assert.equal(snapshot?.results.at(-1)?.assignmentId, setup.assignmentId);
-  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "queued");
   assert.equal(
     [...run.projectionAfter.results.values()].at(-1)?.summary,
     "Completed host run was recovered after runtime event persistence failed."
   );
-  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
-  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 0);
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(
+    run.projectionAfter.status.currentObjective,
+    new RegExp(`Start plan assignment ${setup.assignmentId}:`)
+  );
+  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 1);
 });
 
 test("milestone-2 smoke: failed host outcomes are recovered in place after runtime event persistence fails", async () => {
@@ -235,9 +252,13 @@ test("milestone-2 smoke: failed host outcomes are recovered in place after runti
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
   assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
-  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "failed");
-  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
-  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 0);
+  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(
+    run.projectionAfter.status.currentObjective,
+    new RegExp(`Start plan assignment ${setup.assignmentId}:`)
+  );
+  assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 1);
 });
 
 test("milestone-2 smoke: run repairs a malformed event log and still reports success", async () => {
@@ -299,9 +320,11 @@ test("milestone-2 smoke: resume reconciles a stale running host lease into a que
   });
 
   const staleAt = new Date(Date.now() - 60_000).toISOString();
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const expiredRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-stale" },
     startedAt: staleAt,
     heartbeatAt: staleAt,
@@ -317,8 +340,8 @@ test("milestone-2 smoke: resume reconciles a stale running host lease into a que
 
   assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(snapshot?.assignments[0]?.state, "queued");
-  assert.match(snapshot?.status.currentObjective ?? "", /Retry assignment/);
-  assert.match(resumed.brief.nextRequiredAction, /Start assignment/);
+  assert.match(snapshot?.status.currentObjective ?? "", new RegExp(`Start plan assignment ${setup.assignmentId}:`));
+  assert.match(resumed.brief.nextRequiredAction, new RegExp(`Start plan assignment ${setup.assignmentId}:`));
   assert.equal(inspected?.state, "completed");
   assert.ok(typeof inspected?.staleAt === "string");
   assert.match(inspected?.staleReason ?? "", /lease expired/i);
@@ -330,9 +353,11 @@ test("milestone-2 smoke: run refuses to start while an active host lease is stil
   });
 
   const now = new Date();
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
   const runningRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
+    workflowAttempt,
     adapterData: { nativeRunId: "smoke-thread-active" },
     startedAt: now.toISOString(),
     heartbeatAt: now.toISOString(),

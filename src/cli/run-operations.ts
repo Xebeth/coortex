@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { HostAdapter } from "../adapters/contract.js";
+import { deriveWorkflowRunAttemptIdentity } from "../adapters/host-run-records.js";
 import { isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord } from "../core/types.js";
@@ -9,6 +10,7 @@ import { buildStaleRunReconciliation, createActiveRunDiagnostic, selectRunnableP
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import { RuntimeStore } from "../persistence/store.js";
+import { deriveWorkflowSummary } from "../workflows/index.js";
 
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
@@ -704,6 +706,7 @@ function buildCompletedRunRecordFromRuntimeOutcome(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   assignmentId: string
 ): HostRunRecord | undefined {
+  const workflowAttempt = deriveWorkflowRunAttemptIdentity(projection, assignmentId);
   const decision = [...projection.decisions.values()]
     .filter((candidate) => candidate.assignmentId === assignmentId)
     .at(-1);
@@ -723,6 +726,7 @@ function buildCompletedRunRecordFromRuntimeOutcome(
     return {
       assignmentId,
       state: "completed",
+      ...(workflowAttempt ? { workflowAttempt } : {}),
       startedAt: result.createdAt,
       completedAt: result.createdAt,
       outcomeKind: "result",
@@ -745,6 +749,7 @@ function buildCompletedRunRecordFromRuntimeOutcome(
   return {
     assignmentId,
     state: "completed",
+    ...(workflowAttempt ? { workflowAttempt } : {}),
     startedAt: decision!.createdAt,
     completedAt: decision!.createdAt,
     outcomeKind: "decision",
@@ -1388,8 +1393,6 @@ export function buildOutcomeEvents(
   adapter: HostAdapter
 ): RuntimeEvent[] {
   const timestamp = nowIso();
-  const assignmentId = execution.run.assignmentId;
-  const status = nextRuntimeStatus(projection, execution);
   const events: RuntimeEvent[] = [];
 
   if (execution.outcome.kind === "decision") {
@@ -1412,6 +1415,12 @@ export function buildOutcomeEvents(
     });
   }
 
+  if (projection.workflowProgress) {
+    return events;
+  }
+
+  const assignmentId = execution.run.assignmentId;
+  const status = nextRuntimeStatus(projection, execution);
   events.push({
     eventId: randomUUID(),
     sessionId: projection.sessionId,
@@ -1439,6 +1448,22 @@ export function buildOutcomeEvents(
 export function getRunnableAssignment(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>
 ) {
+  if (projection.workflowProgress) {
+    const summary = deriveWorkflowSummary(projection);
+    const assignmentId = projection.workflowProgress.currentAssignmentId;
+    const assignment = assignmentId ? projection.assignments.get(assignmentId) : undefined;
+    if (!assignment || !summary) {
+      throw new Error("No active workflow assignment is available to run.");
+    }
+    if (!summary.rerunEligible) {
+      const suffix = summary.blockerReason ? ` ${summary.blockerReason}` : "";
+      throw new Error(
+        `Workflow assignment ${assignment.id} is not runnable for module ${summary.currentModuleId}.${suffix}`
+      );
+    }
+    return assignment;
+  }
+
   const activeAssignments = projection.status.activeAssignmentIds
     .map((assignmentId) => projection.assignments.get(assignmentId))
     .filter((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));

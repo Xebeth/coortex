@@ -13,6 +13,7 @@ import type { RuntimeConfig } from "../config/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { getNativeRunId } from "../core/run-state.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
+import { initRuntime } from "../cli/commands.js";
 import { nowIso } from "../utils/time.js";
 
 test("codex adapter normalizes host result, decision, and telemetry captures", () => {
@@ -1232,42 +1233,30 @@ test("codex adapter records a failed outcome and removes the lease file when cla
 test("codex adapter claimRunLease persists a readable running lease", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-claim-lease-"));
   const store = RuntimeStore.forProject(projectRoot);
-  const sessionId = randomUUID();
-  const config: RuntimeConfig = {
-    version: 1,
-    sessionId,
-    adapter: "codex",
-    host: "codex",
-    rootPath: projectRoot,
-    createdAt: nowIso()
-  };
-
-  await store.initialize(config);
-  const bootstrap = createBootstrapRuntime({
-    rootPath: projectRoot,
-    sessionId,
-    adapter: "codex",
-    host: "codex",
-    workflow: "milestone-2"
-  });
-  for (const event of bootstrap.events) {
-    await store.appendEvent(event);
-  }
+  const adapter = new CodexAdapter();
+  const initialized = await initRuntime(projectRoot, store, adapter);
+  assert.ok(initialized, "expected initRuntime to create a workflow-mode runtime");
 
   const projection = await store.rebuildProjection();
-  const assignmentId = bootstrap.initialAssignmentId;
-  const adapter = new CodexAdapter();
-  await adapter.initialize(store, projection);
+  const assignmentId = projection.workflowProgress?.currentAssignmentId;
+  assert.ok(assignmentId, "expected a workflow current assignment");
 
   const claimed = await adapter.claimRunLease(store, projection, assignmentId);
   const inspected = await adapter.inspectRun(store, assignmentId);
 
   assert.equal(claimed.assignmentId, assignmentId);
   assert.equal(claimed.state, "running");
+  assert.deepEqual(claimed.workflowAttempt, {
+    workflowId: "default",
+    workflowCycle: 1,
+    moduleId: "plan",
+    moduleAttempt: 1
+  });
   assert.equal(inspected?.assignmentId, assignmentId);
   assert.equal(inspected?.state, "running");
   assert.equal(inspected?.startedAt, claimed.startedAt);
   assert.equal(inspected?.leaseExpiresAt, claimed.leaseExpiresAt);
+  assert.deepEqual(inspected?.workflowAttempt, claimed.workflowAttempt);
 });
 
 async function createMockRunningExec(

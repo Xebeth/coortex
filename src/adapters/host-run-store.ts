@@ -32,7 +32,10 @@ export class HostRunStore {
         this.artifacts.runRecordPath(assignmentId),
         `${this.adapterId} run record`
       );
-      const leaseRecord = await this.readLeaseRecord(assignmentId);
+      const leaseRecord = preserveMalformedLeaseRunContext(
+        runRecord,
+        await this.readLeaseRecord(assignmentId)
+      );
       return normalizeInspectedRun(selectAuthoritativeRunRecord(runRecord, leaseRecord));
     }
     const lastRun = await this.readLastRunPointer();
@@ -281,6 +284,25 @@ function createMalformedLeaseRecord(assignmentId: string, leaseIdentity: string)
     startedAt: malformedLeaseStartedAt(leaseIdentity),
     staleReasonCode: "malformed_lease_artifact",
     staleReason: "malformed lease file"
+  };
+}
+
+function preserveMalformedLeaseRunContext(
+  runRecord: HostRunRecord | undefined,
+  leaseRecord: HostRunRecord | undefined
+): HostRunRecord | undefined {
+  if (
+    !runRecord ||
+    !leaseRecord ||
+    leaseRecord.staleReasonCode !== "malformed_lease_artifact"
+  ) {
+    return leaseRecord;
+  }
+  return {
+    ...leaseRecord,
+    startedAt: runRecord.startedAt,
+    ...(runRecord.workflowAttempt ? { workflowAttempt: runRecord.workflowAttempt } : {}),
+    ...(runRecord.adapterData ? { adapterData: runRecord.adapterData } : {})
   };
 }
 

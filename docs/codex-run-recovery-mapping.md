@@ -57,6 +57,15 @@ do not replace runtime-owned assignment, result, or decision state.
 Before the runtime marks work active for a new Codex run, the adapter
 claims the per-assignment lease.
 
+For workflow-mode runs, that lease and the matching run record must
+carry the explicit workflow attempt identity from runtime-owned workflow
+progress:
+
+- `workflowId`
+- `workflowCycle`
+- `moduleId`
+- `moduleAttempt`
+
 ### Running
 
 While Codex is active, heartbeat updates refresh the active lease and
@@ -68,6 +77,9 @@ When Codex reaches a terminal outcome, the adapter clears the active
 lease and persists terminal run metadata before the runtime appends the
 durable result or decision events.
 
+Workflow-mode completion must preserve the same explicit workflow
+attempt identity that was stamped at claim time.
+
 ### Recovery
 
 If Codex exits unexpectedly or metadata becomes stale, `inspect`,
@@ -76,6 +88,10 @@ runtime-owned queued retry state.
 
 The reconciliation rules themselves are shared. The Codex adapter only
 supplies Codex-specific metadata parsing and host-process behavior.
+
+If a workflow-mode Codex run record is missing explicit workflow attempt
+identity, recovery treats it as invalid or incomplete workflow metadata
+instead of reconstructing ownership from timestamps.
 
 ---
 

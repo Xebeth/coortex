@@ -4,21 +4,28 @@ import { randomUUID } from "node:crypto";
 import type { RuntimeConfig } from "../config/types.js";
 import type { HostAdapter, HostExecutionOutcome, TaskEnvelope } from "../adapters/contract.js";
 import type { Assignment, DecisionPacket, ResultPacket } from "../core/types.js";
-import { createBootstrapRuntime } from "../core/runtime.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
+import { selectWorkflowVisibleRunRecord } from "../recovery/host-runs.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
+import {
+  buildWorkflowBootstrap,
+  deriveWorkflowSummary
+} from "../workflows/index.js";
 import type { CommandDiagnostic } from "./types.js";
-import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
+import {
+  diagnosticsFromWarning,
+  loadOperatorProjection,
+  loadOperatorProjectionWithDiagnostics,
+  loadWorkflowAwareProjectionWithDiagnostics
+} from "./runtime-state.js";
 import {
   buildOutcomeEvents,
   getRunnableAssignment,
-  loadReconciledProjectionWithDiagnostics,
   markAssignmentInProgress,
-  projectionForRunnableAssignment,
-  reconcileActiveRuns
+  projectionForRunnableAssignment
 } from "./run-operations.js";
 
 export type { CommandDiagnostic } from "./types.js";
@@ -73,12 +80,10 @@ export async function initRuntime(
   };
 
   await store.initialize(config);
-  const bootstrap = createBootstrapRuntime({
-    rootPath: projectRoot,
+  const bootstrap = buildWorkflowBootstrap({
     sessionId,
-    adapter: adapter.id,
-    host: adapter.host,
-    workflow: "milestone-2"
+    adapterId: adapter.id,
+    host: adapter.host
   });
 
   for (const event of bootstrap.events) {
@@ -87,10 +92,18 @@ export async function initRuntime(
 
   const syncResult = await store.syncSnapshotFromEventsWithRecovery();
   const diagnostics = diagnosticsFromWarning(syncResult.warning, "event-log-repaired");
-  const projection = syncResult.projection;
+  let projection = syncResult.projection;
+  const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  projection = workflowAware.projection;
+  diagnostics.push(...workflowAware.diagnostics);
   await adapter.initialize(store, projection);
   const bootstrapBrief = buildRecoveryBrief(projection);
-  const bootstrapEnvelope = await adapter.buildResumeEnvelope(store, projection, bootstrapBrief);
+  const bootstrapEnvelope = await buildWorkflowAwareEnvelope(
+    store,
+    adapter,
+    projection,
+    bootstrapBrief
+  );
   await store.writeJsonArtifact("runtime/last-resume-envelope.json", bootstrapEnvelope);
   const telemetry = await recordNormalizedTelemetry(
     store,
@@ -123,20 +136,20 @@ export async function resumeRuntime(
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
 
-  const reconciled = await loadReconciledProjectionWithDiagnostics(store, adapter);
-  const authoritativeLeaseAssignmentId = reconciled.activeLeases[0];
+  const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  const authoritativeLeaseAssignmentId = workflowAware.activeLeases[0];
   if (authoritativeLeaseAssignmentId) {
     throw new Error(
       `Assignment ${authoritativeLeaseAssignmentId} already has an active host run lease.`
     );
   }
-  const diagnostics = [...reconciled.diagnostics];
-  const effectiveProjection = reconciled.projection;
+  const diagnostics = [...workflowAware.diagnostics];
+  const effectiveProjection = workflowAware.projection;
   const brief = buildRecoveryBrief(effectiveProjection);
   if (brief.activeAssignments.length === 0) {
     throw new Error("No active assignment is available to resume.");
   }
-  const envelope = await adapter.buildResumeEnvelope(store, effectiveProjection, brief);
+  const envelope = await buildWorkflowAwareEnvelope(store, adapter, effectiveProjection, brief);
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(effectiveProjection));
   await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
@@ -173,24 +186,42 @@ export async function runRuntime(
   }
 
   const projectionBeforeResult = await loadOperatorProjectionWithDiagnostics(store);
-  const reconciled = await reconcileActiveRuns(
-    store,
-    adapter,
-    projectionBeforeResult.projection,
-    { snapshotFallback: projectionBeforeResult.snapshotFallback }
-  );
-  projectionBeforeResult.diagnostics.push(...reconciled.diagnostics);
-  const projectionBefore = reconciled.projection;
-  if (reconciled.activeLeases.length > 0) {
-    const assignmentId = reconciled.activeLeases[0]!;
+  const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  const projectionBefore = workflowAware.projection;
+  if (workflowAware.activeLeases.length > 0) {
+    const assignmentId = workflowAware.activeLeases[0]!;
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
-  let diagnostics: CommandDiagnostic[] = [...projectionBeforeResult.diagnostics];
+  let diagnostics: CommandDiagnostic[] = [...workflowAware.diagnostics];
+  if (workflowAware.recoveredRunRecord) {
+    const recoveredExecution = synthesizeRecoveredExecution(workflowAware.recoveredRunRecord);
+    const recoveredAssignment = projectionBefore.assignments.get(
+      workflowAware.recoveredRunRecord.assignmentId
+    );
+    if (recoveredExecution && recoveredAssignment) {
+      const recoveredEnvelope = await buildRecoveredExecutionEnvelope(
+        store,
+        adapter,
+        projectionBefore,
+        recoveredAssignment.id
+      );
+      return {
+        projectionBefore,
+        projectionAfter: projectionBefore,
+        assignment: recoveredAssignment,
+        envelope: recoveredEnvelope,
+        execution: recoveredExecution,
+        recoveredOutcome: true,
+        diagnostics
+      };
+    }
+  }
   let assignment: ReturnType<typeof getRunnableAssignment>;
   try {
     assignment = getRunnableAssignment(projectionBefore);
   } catch (error) {
-    const recoveredOutcome = synthesizeRecoveredExecutionFromReconciliation(
+    const recoveredOutcome = await synthesizeRecoveredExecutionFromReconciliation(
+      store,
       adapter,
       projectionBeforeResult.projection,
       projectionBefore
@@ -216,7 +247,7 @@ export async function runRuntime(
   try {
     const envelopeProjection = projectionForRunnableAssignment(projectionBefore, assignment.id);
     const brief = buildRecoveryBrief(envelopeProjection);
-    envelope = await adapter.buildResumeEnvelope(store, envelopeProjection, brief);
+    envelope = await buildWorkflowAwareEnvelope(store, adapter, envelopeProjection, brief);
     launchedProjection = await markAssignmentInProgress(store, projectionBefore, assignment.id);
 
     const startedTelemetry = await recordNormalizedTelemetry(
@@ -241,9 +272,9 @@ export async function runRuntime(
     for (const event of events) {
       await store.appendEvent(event);
     }
-    const projectionAfterResult = await store.syncSnapshotFromEventsWithRecovery();
+    const projectionAfterResult = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
     const projectionAfter = projectionAfterResult.projection;
-    diagnostics.push(...diagnosticsFromWarning(projectionAfterResult.warning, "event-log-repaired"));
+    diagnostics.push(...projectionAfterResult.diagnostics);
 
     if (execution.telemetry) {
       const completedTelemetry = await recordNormalizedTelemetry(
@@ -272,7 +303,7 @@ export async function runRuntime(
         await adapter.inspectRun(store, assignment.id)
       );
       if (recoveredExecution) {
-        const recovered = await loadReconciledProjectionWithDiagnostics(store, adapter);
+        const recovered = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
         diagnostics.push(
           ...diagnosticsFromWarning(
             `Runtime event persistence was interrupted after the host run completed durably. Recovered from durable host run metadata. ${
@@ -307,6 +338,89 @@ export async function inspectRuntimeRun(
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
   return adapter.inspectRun(store, assignmentId);
+}
+
+export async function inspectRuntimeContext(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId?: string
+) {
+  const config = await store.loadConfig();
+  if (!config) {
+    throw new Error("Coortex is not initialized. Run `ctx init` first.");
+  }
+  const loaded = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  const workflow = deriveWorkflowSummary(loaded.projection);
+  if (assignmentId) {
+    const explicitAssignment = loaded.projection.assignments.get(assignmentId);
+    const explicitRun = selectWorkflowVisibleRunRecord(
+      loaded.projection,
+      await adapter.inspectRun(store, assignmentId)
+    );
+    if (!explicitAssignment && !explicitRun) {
+      return {
+        diagnostics: loaded.diagnostics,
+        record: undefined
+      };
+    }
+
+    return {
+      diagnostics: loaded.diagnostics,
+      record: {
+        workflow,
+        assignment: explicitAssignment
+          ? {
+              id: explicitAssignment.id,
+              state: explicitAssignment.state,
+              workflow: explicitAssignment.workflow,
+              objective: explicitAssignment.objective
+            }
+          : null,
+        run: explicitRun ?? null
+      }
+    };
+  }
+
+  const workflowAssignmentId = loaded.projection.workflowProgress?.currentAssignmentId;
+  const lastRun = selectWorkflowVisibleRunRecord(
+    loaded.projection,
+    await adapter.inspectRun(store)
+  );
+  const targetAssignmentId =
+    workflowAssignmentId
+    ?? lastRun?.assignmentId;
+  const assignment = targetAssignmentId
+    ? loaded.projection.assignments.get(targetAssignmentId)
+    : undefined;
+  const run = selectWorkflowVisibleRunRecord(
+    loaded.projection,
+    targetAssignmentId
+      ? await adapter.inspectRun(store, targetAssignmentId)
+      : lastRun
+  );
+
+  if (!workflow && !assignment && !run) {
+    return {
+      diagnostics: loaded.diagnostics,
+      record: undefined
+    };
+  }
+
+  return {
+    diagnostics: loaded.diagnostics,
+    record: {
+      workflow,
+      assignment: assignment
+        ? {
+            id: assignment.id,
+            state: assignment.state,
+            workflow: assignment.workflow,
+            objective: assignment.objective
+          }
+        : null,
+      run: run ?? null
+    }
+  };
 }
 
 function synthesizeRecoveredExecution(
@@ -358,27 +472,30 @@ function isRecoverableCompletedRunRecord(record: { state: string; terminalOutcom
   return record.state === "completed" && Boolean(record.terminalOutcome);
 }
 
-function synthesizeRecoveredExecutionFromReconciliation(
+async function synthesizeRecoveredExecutionFromReconciliation(
+  store: RuntimeStore,
   adapter: HostAdapter,
   projectionBeforeReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>,
   projectionAfterReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>
-): {
+): Promise<{
   assignment: Assignment;
   envelope: TaskEnvelope;
   execution: HostExecutionOutcome;
-} | undefined {
+} | undefined> {
   const recoveredDecision = findRecoveredDecisionCandidate(
     projectionBeforeReconciliation,
     projectionAfterReconciliation
   );
   if (recoveredDecision) {
+    const envelope = await buildRecoveredExecutionEnvelope(
+      store,
+      adapter,
+      projectionAfterReconciliation,
+      recoveredDecision.assignment.id
+    );
     return {
       assignment: recoveredDecision.assignment,
-      envelope: buildRecoveredExecutionEnvelope(
-        adapter,
-        projectionAfterReconciliation,
-        recoveredDecision.assignment
-      ),
+      envelope,
       execution: {
         outcome: {
           kind: "decision",
@@ -428,14 +545,16 @@ function synthesizeRecoveredExecutionFromReconciliation(
   if (!recoveredResult) {
     return undefined;
   }
+  const envelope = await buildRecoveredExecutionEnvelope(
+    store,
+    adapter,
+    projectionAfterReconciliation,
+    recoveredResult.assignment.id
+  );
 
   return {
     assignment: recoveredResult.assignment,
-    envelope: buildRecoveredExecutionEnvelope(
-      adapter,
-      projectionAfterReconciliation,
-      recoveredResult.assignment
-    ),
+    envelope,
     execution: {
       outcome: {
         kind: "result",
@@ -542,35 +661,48 @@ function findRecoveredResultCandidate(
   return candidate;
 }
 
-function buildRecoveredExecutionEnvelope(
+async function buildRecoveredExecutionEnvelope(
+  store: RuntimeStore,
   adapter: HostAdapter,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignment: Assignment
-): TaskEnvelope {
-  const brief = buildRecoveryBrief(projection);
+  assignmentId: string
+): Promise<TaskEnvelope> {
+  const envelopeProjection = projection.workflowProgress
+    ? projection
+    : projection.status.activeAssignmentIds.includes(assignmentId)
+      ? projection
+      : projectionForRunnableAssignment(projection, assignmentId);
+  const brief = buildRecoveryBrief(envelopeProjection);
+  const envelope = await buildWorkflowAwareEnvelope(store, adapter, envelopeProjection, brief);
+
+  if (!projection.workflowProgress) {
+    return {
+      ...envelope,
+      metadata: {
+        ...envelope.metadata,
+        recoveredOutcome: true
+      }
+    };
+  }
+
   return {
-    host: adapter.host,
-    adapter: adapter.id,
-    objective: assignment.objective,
-    writeScope: [...assignment.writeScope],
-    requiredOutputs: [...assignment.requiredOutputs],
-    recoveryBrief: brief,
-    recentResults: brief.lastDurableResults.map((result) => ({
-      resultId: result.resultId,
-      summary: result.summary,
-      trimmed: !!result.trimmed,
-      ...(result.reference ? { reference: result.reference } : {})
-    })),
+    ...envelope,
     metadata: {
-      activeMode: projection.status.activeMode,
-      activeAssignmentId: assignment.id,
-      unresolvedDecisionCount: brief.unresolvedDecisions.length,
+      ...envelope.metadata,
       recoveredOutcome: true
-    },
-    estimatedChars: 0,
-    trimApplied: false,
-    trimmedFields: []
+    }
   };
+}
+
+async function buildWorkflowAwareEnvelope(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  brief: ReturnType<typeof buildRecoveryBrief>
+): Promise<TaskEnvelope> {
+  return adapter.buildResumeEnvelope(store, projection, brief, {
+    workflow: deriveWorkflowSummary(projection)
+  });
 }
 
 function findLatestOpenDecision(
