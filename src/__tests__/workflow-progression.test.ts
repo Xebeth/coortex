@@ -549,6 +549,227 @@ test("workflow replay does not mark a module completed when the gate persisted b
   assert.equal(summary?.currentModuleState, "in_progress");
 });
 
+test("workflow progression reuses a durable next assignment when advance transition persistence is interrupted", async () => {
+  const timestamp = "2026-04-15T12:30:00.000Z";
+  const bootstrap = buildWorkflowBootstrap({
+    sessionId: "session-workflow-advance-reuse",
+    adapterId: "codex",
+    host: "codex",
+    timestamp
+  });
+  const projection = projectRuntimeState(
+    "session-workflow-advance-reuse",
+    "/tmp/project",
+    "codex",
+    bootstrap.events
+  );
+  const assignmentId = bootstrap.initialAssignmentId;
+  const inProgressAt = "2026-04-15T12:31:00.000Z";
+  applyRuntimeEvent(projection, {
+    eventId: "assignment-plan-in-progress-reuse",
+    sessionId: projection.sessionId,
+    timestamp: inProgressAt,
+    type: "assignment.updated",
+    payload: {
+      assignmentId,
+      patch: {
+        state: "in_progress",
+        updatedAt: inProgressAt
+      }
+    }
+  });
+  applyRuntimeEvent(projection, {
+    eventId: "result-plan-ready-reuse",
+    sessionId: projection.sessionId,
+    timestamp: "2026-04-15T12:32:00.000Z",
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: "result-plan-ready-reuse",
+        assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary: "Plan ready for review.",
+        changedFiles: [],
+        createdAt: "2026-04-15T12:32:00.000Z"
+      }
+    }
+  });
+
+  const artifactPath = workflowArtifactPath("default", 1, "plan", assignmentId, 1);
+  const store = new StaticWorkflowArtifactStore(
+    new Map([
+      [
+        artifactPath,
+        {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "plan",
+          moduleAttempt: 1,
+          assignmentId,
+          createdAt: "2026-04-15T12:32:00.000Z",
+          payload: {
+            planSummary: "Plan ready for review.",
+            implementationSteps: ["Reuse the durable next assignment."],
+            reviewEvidenceSummary: "Advance convergence should consume the pre-created review assignment."
+          }
+        }
+      ]
+    ])
+  );
+
+  const firstPass = await evaluateWorkflowProgression(projection, store, {
+    timestamp: "2026-04-15T12:32:01.000Z"
+  });
+  const createdAssignment = getCreatedAssignmentEvent(firstPass.events);
+  assert.ok(createdAssignment, "expected a durable review assignment to be created");
+  for (const event of firstPass.events.filter((event) => event.type !== "workflow.transition.applied")) {
+    applyRuntimeEvent(projection, event);
+  }
+
+  const secondPass = await evaluateWorkflowProgression(projection, store, {
+    timestamp: "2026-04-15T12:32:10.000Z"
+  });
+  const secondTransition = getTransitionEvent(secondPass.events);
+
+  assert.deepEqual(secondPass.events.map((event) => event.type), ["workflow.transition.applied"]);
+  assert.equal(secondTransition?.payload.transition, "advance");
+  assert.equal(secondTransition?.payload.nextAssignmentId, createdAssignment.payload.assignment.id);
+
+  for (const event of secondPass.events) {
+    applyRuntimeEvent(projection, event);
+  }
+
+  assert.equal(projection.workflowProgress?.currentModuleId, "review");
+  assert.equal(projection.workflowProgress?.currentAssignmentId, createdAssignment.payload.assignment.id);
+  assert.equal(projection.assignments.size, 2);
+});
+
+test("workflow progression reuses a durable next assignment when rewind transition persistence is interrupted", async () => {
+  const verifyAssignment = createWorkflowAssignment(
+    "verify-assignment-rewind-reuse",
+    "default",
+    "Verify the latest approved review state against current-cycle durable evidence.",
+    "in_progress",
+    "2026-04-15T12:40:00.000Z"
+  );
+  const reviewResult: ResultPacket = {
+    resultId: "review-result-rewind-reuse",
+    assignmentId: "review-assignment-rewind-reuse",
+    producerId: "codex",
+    status: "completed",
+    summary: "Approved review evidence.",
+    changedFiles: [],
+    createdAt: "2026-04-15T12:41:00.000Z"
+  };
+  const verifyResult: ResultPacket = {
+    resultId: "verify-result-rewind-reuse",
+    assignmentId: verifyAssignment.id,
+    producerId: "codex",
+    status: "completed",
+    summary: "Verification failed and should rewind.",
+    changedFiles: [],
+    createdAt: "2026-04-15T12:42:00.000Z"
+  };
+  const projection = createWorkflowProjection({
+    currentModuleId: "verify",
+    workflowCycle: 1,
+    currentModuleAttempt: 1,
+    currentAssignment: verifyAssignment,
+    currentResult: verifyResult,
+    extraResults: [reviewResult],
+    moduleRecords: {
+      review: {
+        moduleId: "review",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId: "review-assignment-rewind-reuse",
+        moduleState: "completed",
+        gateOutcome: "approved",
+        sourceResultIds: [reviewResult.resultId],
+        sourceDecisionIds: [],
+        artifactReferences: [
+          {
+            path: workflowArtifactPath("default", 1, "review", "review-assignment-rewind-reuse", 1),
+            format: "json",
+            digest: "review-digest-rewind-reuse",
+            sourceResultId: reviewResult.resultId
+          }
+        ],
+        enteredAt: "2026-04-15T12:41:00.000Z",
+        evaluatedAt: "2026-04-15T12:41:30.000Z",
+        checklistStatus: "complete",
+        evidenceSummary: "Review approved."
+      },
+      verify: {
+        moduleId: "verify",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId: verifyAssignment.id,
+        moduleState: "in_progress",
+        sourceResultIds: [],
+        sourceDecisionIds: [],
+        artifactReferences: [],
+        enteredAt: "2026-04-15T12:40:00.000Z"
+      }
+    }
+  });
+  const verifyArtifactPath = workflowArtifactPath("default", 1, "verify", verifyAssignment.id, 1);
+  const store = new StaticWorkflowArtifactStore(
+    new Map([
+      [
+        verifyArtifactPath,
+        {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "verify",
+          moduleAttempt: 1,
+          assignmentId: verifyAssignment.id,
+          createdAt: "2026-04-15T12:42:00.000Z",
+          payload: {
+            verdict: "failed",
+            verificationSummary: "Verification failed and should rewind to review.",
+            evidenceResultIds: [reviewResult.resultId]
+          }
+        }
+      ]
+    ])
+  );
+
+  const firstPass = await evaluateWorkflowProgression(projection, store, {
+    timestamp: "2026-04-15T12:42:01.000Z"
+  });
+  const createdAssignment = getCreatedAssignmentEvent(firstPass.events);
+  assert.ok(createdAssignment, "expected a durable rewound review assignment to be created");
+  for (const event of firstPass.events.filter((event) => event.type !== "workflow.transition.applied")) {
+    applyRuntimeEvent(projection, event);
+  }
+
+  const secondPass = await evaluateWorkflowProgression(projection, store, {
+    timestamp: "2026-04-15T12:42:10.000Z"
+  });
+  const secondTransition = getTransitionEvent(secondPass.events);
+
+  assert.deepEqual(secondPass.events.map((event) => event.type), ["workflow.transition.applied"]);
+  assert.equal(secondTransition?.payload.transition, "rewind");
+  assert.equal(secondTransition?.payload.nextAssignmentId, createdAssignment.payload.assignment.id);
+
+  for (const event of secondPass.events) {
+    applyRuntimeEvent(projection, event);
+  }
+
+  assert.equal(projection.workflowProgress?.workflowCycle, 2);
+  assert.equal(projection.workflowProgress?.currentModuleId, "review");
+  assert.equal(projection.workflowProgress?.currentAssignmentId, createdAssignment.payload.assignment.id);
+  assert.equal(
+    [...projection.assignments.values()].filter(
+      (assignment) =>
+        assignment.objective === createdAssignment.payload.assignment.objective
+    ).length,
+    1
+  );
+});
+
 test("workflow progression preserves explicit runtime artifact references into the next module context", async () => {
   const timestamp = "2026-04-15T13:00:00.000Z";
   const bootstrap = buildWorkflowBootstrap({
@@ -1040,6 +1261,13 @@ function getTransitionEvent(events: RuntimeEvent[]) {
   return events.find(
     (event): event is Extract<RuntimeEvent, { type: "workflow.transition.applied" }> =>
       event.type === "workflow.transition.applied"
+  );
+}
+
+function getCreatedAssignmentEvent(events: RuntimeEvent[]) {
+  return events.find(
+    (event): event is Extract<RuntimeEvent, { type: "assignment.created" }> =>
+      event.type === "assignment.created"
   );
 }
 
