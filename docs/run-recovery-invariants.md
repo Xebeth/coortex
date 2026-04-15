@@ -123,6 +123,9 @@ effective host-run state follows these rules:
   run-attempt metadata that runtime authority is still pending. Legacy
   live-lease normalization must not synthesize resumable attachment
   truth from that current launch window.
+- Host-run-local control hints used for reconciliation, including the
+  wrapped-launch pending-authority hint, must not be copied into
+  runtime-owned attachment metadata.
 - When one runtime mutation creates or updates attachment-and-claim
   authority together, those runtime events must be durably appended as
   one batch. A persistence failure must not strand only half of the

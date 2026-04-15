@@ -115,6 +115,10 @@ only so legacy live-lease normalization does not synthesize resumable
 authority for a current launch that has not finished persisting runtime
 truth yet.
 
+That hint remains host-run-local metadata. Recovery may consult it, but
+promotion into runtime attachment truth must strip it from
+attachment-owned metadata.
+
 ### `prepareResumeRuntime()`
 
 `prepareResumeRuntime()` is read-only over authoritative runtime truth.

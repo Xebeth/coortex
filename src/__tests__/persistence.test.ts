@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
+import { withPathLock } from "../persistence/files.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
@@ -205,6 +206,44 @@ test("runtime store repair serializes with concurrent appenders", async () => {
 
   assert.ok(replayedResult);
   assert.ok((await store.loadEvents()).some((event) => event.eventId === resultEvent.eventId));
+});
+
+test("withPathLock times out instead of reaping a live holder", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-live-lock-"));
+  const lockPath = join(projectRoot, "runtime", "events.ndjson");
+  let releaseHolder!: () => void;
+  const holderReleased = new Promise<void>((resolve) => {
+    releaseHolder = resolve;
+  });
+  let signalHolderEntered!: () => void;
+  const holderEntered = new Promise<void>((resolve) => {
+    signalHolderEntered = resolve;
+  });
+  let secondEntered = false;
+
+  const firstHolder = withPathLock(lockPath, async () => {
+    signalHolderEntered();
+    await holderReleased;
+  });
+
+  await holderEntered;
+  await assert.rejects(
+    withPathLock(
+      lockPath,
+      async () => {
+        secondEntered = true;
+      },
+      {
+        retryMs: 5,
+        timeoutMs: 25
+      }
+    ),
+    /Timed out acquiring file lock/
+  );
+
+  assert.equal(secondEntered, false);
+  releaseHolder();
+  await firstHolder;
 });
 
 test("runtime store rebuildProjection stays strict on malformed events", async () => {

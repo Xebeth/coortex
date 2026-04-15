@@ -454,7 +454,8 @@ test("milestone-2 integration: provisional live-lease authority is promoted befo
     heartbeatAt: nowIso(),
     leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
     adapterData: {
-      nativeRunId: "smoke-thread-provisional-promoted"
+      nativeRunId: "smoke-thread-provisional-promoted",
+      coortexPendingAttachment: true
     }
   };
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
@@ -472,6 +473,7 @@ test("milestone-2 integration: provisional live-lease authority is promoted befo
   );
   assert.equal(attachment?.state, "detached_resumable");
   assert.equal(attachment?.nativeSessionId, "smoke-thread-provisional-promoted");
+  assert.equal(attachment?.adapterMetadata?.coortexPendingAttachment, undefined);
 });
 
 test("milestone-2 integration: wrapped resume persists a terminal completed result and releases attachment authority", async () => {

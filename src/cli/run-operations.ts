@@ -33,6 +33,7 @@ const RESUMABLE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
   "detached_resumable"
 ]);
 const PENDING_ATTACHMENT_HINT = "coortexPendingAttachment";
+const INTERNAL_ATTACHMENT_METADATA_KEYS = new Set([PENDING_ATTACHMENT_HINT]);
 
 export async function loadReconciledProjectionWithDiagnostics(
   store: RuntimeStore,
@@ -145,6 +146,18 @@ function hasAttachmentHistoryForAssignment(
   return [...projection.claims.values()].some((claim) => claim.assignmentId === assignmentId);
 }
 
+function sanitizeAttachmentAdapterMetadata(
+  adapterData?: Record<string, unknown>
+): Record<string, unknown> | undefined {
+  if (!adapterData) {
+    return undefined;
+  }
+  const filteredEntries = Object.entries(adapterData).filter(
+    ([key]) => !INTERNAL_ATTACHMENT_METADATA_KEYS.has(key)
+  );
+  return filteredEntries.length > 0 ? Object.fromEntries(filteredEntries) : undefined;
+}
+
 async function reconcileLegacyLeaseOnlyAuthority(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
@@ -177,6 +190,7 @@ async function reconcileLegacyLeaseOnlyAuthority(
     typeof record.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
       ? record.adapterData.nativeRunId
       : undefined;
+  const adapterMetadata = sanitizeAttachmentAdapterMetadata(record.adapterData);
   const attachment: RuntimeAttachment = {
     id: attachmentId,
     adapter: projection.adapter,
@@ -190,7 +204,7 @@ async function reconcileLegacyLeaseOnlyAuthority(
     },
     detachedAt: timestamp,
     ...(nativeSessionId ? { nativeSessionId } : {}),
-    ...(record.adapterData ? { adapterMetadata: { ...record.adapterData } } : {})
+    ...(adapterMetadata ? { adapterMetadata } : {})
   };
   const claim: AssignmentClaim = {
     id: claimId,
@@ -389,6 +403,7 @@ async function reconcileProvisionalAttachmentClaims(
     const hasLiveLease = !!record && record.state === "running" && !isRunLeaseExpired(record);
 
     if (hasLiveLease && liveNativeSessionId) {
+      const adapterMetadata = sanitizeAttachmentAdapterMetadata(record?.adapterData);
       effectiveProjection = await transitionAttachmentClaim(
         store,
         effectiveProjection,
@@ -400,7 +415,7 @@ async function reconcileProvisionalAttachmentClaims(
             updatedAt: nowIso(),
             detachedAt: nowIso(),
             nativeSessionId: liveNativeSessionId,
-            ...(record?.adapterData ? { adapterMetadata: { ...record.adapterData } } : {})
+            ...(adapterMetadata ? { adapterMetadata } : {})
           },
           claim: {
             updatedAt: nowIso()

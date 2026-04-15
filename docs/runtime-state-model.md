@@ -151,6 +151,9 @@ For Milestone 2 reclaim semantics:
 - legacy live-lease normalization excludes the current wrapped-launch
   lease-first window when host-run metadata still says runtime
   authority is pending
+- host-run-local control hints used only for reconciliation must be
+  stripped before host metadata is copied into runtime attachment
+  metadata
 
 ## 7. Assignment Claim
 
