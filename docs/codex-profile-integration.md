@@ -139,6 +139,10 @@ For the current hardening slice:
 - wrapped reclaim uses the structured `exec resume` path so successful
   resume records result/decision outcomes and completion telemetry
   through the same runtime-owned outcome pipeline as wrapped launch
+- wrapped launch and wrapped reclaim are expected to remain behaviorally
+  aligned on runtime-owned persistence, attachment finalization, and
+  operator-visible status semantics; reclaim adds only the prior
+  attachment / same-session verification requirement
 - if Codex does not materialize the `-o` last-message file, Coortex
   falls back to the streamed `agent_message` JSONL item and validates
   the same structured outcome there instead

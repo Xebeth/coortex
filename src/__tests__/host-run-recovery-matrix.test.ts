@@ -25,7 +25,12 @@ import type { DecisionPacket, HostRunRecord, RecoveryBrief, ResultPacket, Runtim
 import { RuntimeStore } from "../persistence/store.js";
 import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "../cli/runtime-state.js";
 import { getRunnableAssignment, reconcileActiveRuns } from "../cli/run-operations.js";
-import { loadReconciledProjectionWithDiagnostics, resumeRuntime, runRuntime } from "../cli/commands.js";
+import {
+  loadReconciledProjectionWithDiagnostics,
+  prepareResumeRuntime,
+  resumeRuntime,
+  runRuntime
+} from "../cli/commands.js";
 import { nowIso } from "../utils/time.js";
 
 const capabilities: AdapterCapabilities = {
@@ -1757,6 +1762,31 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
   }
 });
 
+test("host-run command matrix keeps prepareResumeRuntime read-only while reconciled entrypoints repair the same legacy lease", async () => {
+  const adapter = new BriefingMatrixAdapter();
+  const ctx = await createMatrixContext(adapter);
+  const record = runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z");
+  await adapter.claimRunLease(ctx.store, ctx.projection, ctx.assignmentId, record);
+
+  const projectionBefore = await loadOperatorProjection(ctx.store);
+  const prepared = await prepareResumeRuntime(ctx.store, adapter);
+  const projectionAfterPrepare = await loadOperatorProjection(ctx.store);
+  const reconciled = await loadReconciledProjectionWithDiagnostics(ctx.store, adapter);
+
+  assert.equal(prepared.envelope.metadata.activeAssignmentId, ctx.assignmentId);
+  assert.equal(prepared.projection.attachments.size, 0);
+  assert.equal(prepared.projection.claims.size, 0);
+  assert.equal(projectionBefore.attachments.size, 0);
+  assert.equal(projectionBefore.claims.size, 0);
+  assert.equal(projectionAfterPrepare.attachments.size, 0);
+  assert.equal(projectionAfterPrepare.claims.size, 0);
+  assert.equal(adapter.lastBuildProjection?.attachments.size, 0);
+  assert.equal(adapter.lastBuildProjection?.claims?.size ?? 0, 0);
+  assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized"));
+  assert.equal([...reconciled.projection.attachments.values()][0]?.state, "detached_resumable");
+  assert.equal([...reconciled.projection.claims.values()][0]?.state, "active");
+});
+
 test("host-run command matrix keeps stale-run reconciliation idempotent", async () => {
   const adapter = new BriefingMatrixAdapter();
   const ctx = await createMatrixContext(adapter);
@@ -2334,6 +2364,102 @@ test("host-run recovery matrix retries snapshot-fallback completed-run repair wi
   assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
 });
 
+test("host-run recovery matrix preserves orphaned attachment truth across snapshot-only reclaim failure", async () => {
+  const adapter = new ReclaimFailureMatrixAdapter();
+  const ctx = await createMatrixContext(adapter);
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  const timestamp = nowIso();
+  const nativeSessionId = "matrix-resume-snapshot-only";
+
+  const events: RuntimeEvent[] = [
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp,
+      type: "assignment.updated",
+      payload: {
+        assignmentId: ctx.assignmentId,
+        patch: {
+          state: "in_progress",
+          updatedAt: timestamp
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: ctx.projection.adapter,
+          host: ctx.projection.status.activeHost,
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: claimId,
+          assignmentId: ctx.assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ];
+
+  for (const event of events) {
+    await ctx.store.appendEvent(event);
+  }
+  await ctx.store.syncSnapshotFromEvents();
+  await writeFile(ctx.store.eventsPath, "", "utf8");
+
+  const resumed = await resumeRuntime(ctx.store, adapter);
+  const repairedSnapshot = await ctx.store.loadSnapshot();
+  const repairedProjection = await loadOperatorProjection(ctx.store);
+  const repairedAssignment = repairedProjection.assignments.get(ctx.assignmentId);
+  const repairedAttachment = repairedProjection.attachments.get(attachmentId);
+  const repairedClaim = repairedProjection.claims.get(claimId);
+
+  assert.equal(resumed.mode, "prepared");
+  assert.equal(adapter.resumeSessionCount, 1);
+  assert.equal(repairedSnapshot?.attachments?.find((attachment) => attachment.id === attachmentId)?.state, "orphaned");
+  assert.equal(repairedSnapshot?.claims?.find((claim) => claim.id === claimId)?.state, "orphaned");
+  assert.match(
+    repairedSnapshot?.attachments?.find((attachment) => attachment.id === attachmentId)?.orphanedReason ?? "",
+    /simulated snapshot-only resume failure/
+  );
+  assert.match(
+    repairedSnapshot?.claims?.find((claim) => claim.id === claimId)?.orphanedReason ?? "",
+    /simulated snapshot-only resume failure/
+  );
+  assert.equal(repairedAssignment?.state, "queued");
+  assert.equal(repairedAttachment?.state, "orphaned");
+  assert.equal(repairedClaim?.state, "orphaned");
+});
+
 test("host-run recovery matrix replays completed results when snapshot-boundary proof is unusable", async () => {
   const ctx = await createMatrixContext();
   await ctx.store.syncSnapshotFromEvents();
@@ -2873,6 +2999,35 @@ class BriefingMatrixAdapter extends MatrixAdapter {
     return {
       ...outcome,
       run
+    };
+  }
+}
+
+class ReclaimFailureMatrixAdapter extends BriefingMatrixAdapter {
+  resumeSessionCount = 0;
+
+  override getCapabilities(): AdapterCapabilities {
+    return {
+      ...super.getCapabilities(),
+      supportsNativeSessionResume: true
+    };
+  }
+
+  async resumeSession(
+    _store: RuntimeArtifactStore,
+    _projection: RuntimeProjection,
+    _envelope: TaskEnvelope,
+    attachment: import("../core/types.js").RuntimeAttachment
+  ) {
+    this.resumeSessionCount += 1;
+    return {
+      reclaimed: false as const,
+      requestedSessionId: attachment.nativeSessionId ?? "missing-native-session",
+      nativeSessionId: attachment.nativeSessionId ?? "missing-native-session",
+      sessionVerified: false,
+      exitCode: 1,
+      stoppedAt: nowIso(),
+      warning: "simulated snapshot-only resume failure"
     };
   }
 }

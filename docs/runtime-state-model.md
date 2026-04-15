@@ -248,10 +248,19 @@ append-only during normal read/status/resume inspection paths.
 resume or projection refresh is acceptable because they summarize
 authoritative runtime state rather than replace it.
 
+`prepareResumeRuntime()` is part of that derived-artifact surface. It
+may refresh telemetry or the generated resume envelope, but it must not
+repair or normalize authoritative runtime truth.
+
 When recovery has to operate from snapshot truth because the event log is
 missing or unusable, recovery-side attachment normalization or reclaim
 may update `snapshot.json` directly rather than fabricating a truncated
 replacement event log.
+
+When one command performs multiple snapshot-fallback mutations, each
+later mutation must start from the projection produced by the earlier
+durable write rather than from the stale pre-write projection loaded at
+command start.
 
 Malformed-line recovery is best-effort. Recovery may salvage replayable
 events in memory, and durable repair paths may rewrite the event log to

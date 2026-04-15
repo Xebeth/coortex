@@ -203,6 +203,17 @@ runtime truth on their own.
 
 ### Command consistency
 
+- `prepareResumeRuntime()`
+  Must stay read-only over authoritative runtime truth. It may emit
+  telemetry and rewrite derived envelope artifacts, but it must not
+  normalize legacy leases, synthesize attachments or claims, reconcile
+  stale or completed runs, or otherwise mutate runtime-owned authority.
+
+- `loadReconciledProjectionWithDiagnostics()`
+  Is a stateful repair surface. `ctx status`, `ctx run`, and
+  `ctx resume` may use it when they promise reconciled runtime truth,
+  but read-only preparation paths must not.
+
 - `ctx status`
   Must show the same reconciled state that `ctx resume` and `ctx run`
   would see, including stale-run and completed-run reconciliation.
@@ -217,6 +228,14 @@ runtime truth on their own.
   Must refuse execution if a valid active lease is present.
   When multiple active assignments exist, it must build the envelope and
   recovery brief from the assignment actually being executed.
+
+- `ctx run` and verified wrapped `ctx resume`
+  Are two entrypoints into the same runtime-owned execution lifecycle.
+  They must stay aligned on outcome normalization, attachment and claim
+  finalization, operator-visible status progression, and durable
+  telemetry semantics. The only intentional extra guard on `ctx resume`
+  is same-session identity verification against an existing
+  authoritative attachment.
 
 - `ctx run` and `ctx resume`
   When a new or recovered decision becomes the active state, the
@@ -249,6 +268,22 @@ If a snapshot exists and the event log is malformed:
 
 The goal is to preserve the latest durable state without silently
 rolling back to an older salvaged projection.
+
+### Snapshot-fallback write-base rule
+
+When recovery is writing directly to `snapshot.json` because snapshot
+truth is authoritative:
+
+1. each later write in the same command must use the projection returned
+   by the immediately prior durable write
+2. a later write must not restart from the stale projection loaded at
+   the beginning of the command
+3. multi-step transitions such as orphan-and-requeue, release-and-clear,
+   or recover-and-update-status must preserve the earlier attachment,
+   claim, assignment, and status mutations from the same command
+
+Snapshot-fallback durability must behave like one coherent state-machine
+transition, not a sequence of unrelated local rewrites.
 
 ---
 

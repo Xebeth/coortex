@@ -41,8 +41,8 @@ Focus:
 - no duplicate assignment issuance across attached sessions
 - provenance for runtime initialization and host activation
 
-Detailed target:
-- `docs/plans/milestone-2-session-attachment-hardening.md`
+Detailed record:
+- `docs/completed/milestone-2-session-attachment-hardening.md`
 
 ### Phase 3 — Workflow modules
 

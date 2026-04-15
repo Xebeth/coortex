@@ -23,14 +23,14 @@ Completed milestone summaries live under `docs/completed/`:
 
 - `completed/milestone-1.md`
 - `completed/milestone-2.md`
+- `completed/milestone-2-session-attachment-hardening.md`
 
 These are factual milestone summaries, not active plans.
 
 ## Active plans
 
-Active branch or milestone plans live under `docs/plans/`:
-
-- `plans/milestone-2-session-attachment-hardening.md`
+There are currently no active branch or milestone plans tracked under
+`docs/plans/`.
 
 ## Research and archive
 
