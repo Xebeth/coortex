@@ -1,8 +1,11 @@
 import type { RuntimeEvent } from "../core/events.js";
 import type {
   Assignment,
+  AssignmentClaim,
   DecisionPacket,
   ResultPacket,
+  RuntimeAttachment,
+  RuntimeProvenance,
   RuntimeProjection,
   RuntimeSnapshot,
   RuntimeStatus
@@ -18,6 +21,8 @@ const EMPTY_STATUS: RuntimeStatus = {
   resumeReady: false
 };
 
+const EMPTY_PROVENANCE: RuntimeProvenance = {};
+
 export function createEmptyProjection(
   sessionId: string,
   rootPath: string,
@@ -30,7 +35,10 @@ export function createEmptyProjection(
     status: { ...EMPTY_STATUS, activeAdapter: adapter },
     assignments: new Map(),
     results: new Map(),
-    decisions: new Map()
+    decisions: new Map(),
+    attachments: new Map(),
+    claims: new Map(),
+    provenance: { ...EMPTY_PROVENANCE }
   };
 }
 
@@ -41,6 +49,29 @@ export function applyRuntimeEvent(
   projection.lastEventId = event.eventId;
 
   switch (event.type) {
+    case "runtime.initialized":
+      projection.provenance = {
+        ...projection.provenance,
+        initializedAt: event.payload.initializedAt
+      };
+      break;
+    case "host.setup.completed":
+      projection.provenance = {
+        ...projection.provenance,
+        hostSetupAt: event.payload.completedAt
+      };
+      break;
+    case "runtime.activated":
+      projection.provenance = {
+        ...projection.provenance,
+        lastActivation: {
+          kind: event.payload.kind,
+          attachmentId: event.payload.attachmentId,
+          assignmentId: event.payload.assignmentId,
+          at: event.timestamp
+        }
+      };
+      break;
     case "assignment.created":
       projection.assignments.set(event.payload.assignment.id, event.payload.assignment);
       break;
@@ -74,6 +105,34 @@ export function applyRuntimeEvent(
       });
       break;
     }
+    case "attachment.created":
+      projection.attachments.set(event.payload.attachment.id, event.payload.attachment);
+      break;
+    case "attachment.updated": {
+      const current = projection.attachments.get(event.payload.attachmentId);
+      if (!current) {
+        throw new Error(`Cannot update missing attachment ${event.payload.attachmentId}`);
+      }
+      projection.attachments.set(event.payload.attachmentId, {
+        ...current,
+        ...event.payload.patch
+      });
+      break;
+    }
+    case "claim.created":
+      projection.claims.set(event.payload.claim.id, event.payload.claim);
+      break;
+    case "claim.updated": {
+      const current = projection.claims.get(event.payload.claimId);
+      if (!current) {
+        throw new Error(`Cannot update missing claim ${event.payload.claimId}`);
+      }
+      projection.claims.set(event.payload.claimId, {
+        ...current,
+        ...event.payload.patch
+      });
+      break;
+    }
     case "status.updated":
       projection.status = event.payload.status;
       break;
@@ -104,7 +163,10 @@ export function toSnapshot(projection: RuntimeProjection): RuntimeSnapshot {
     status: projection.status,
     assignments: sortByTimestamp([...projection.assignments.values()]),
     results: sortByTimestamp([...projection.results.values()]),
-    decisions: sortByTimestamp([...projection.decisions.values()])
+    decisions: sortByTimestamp([...projection.decisions.values()]),
+    attachments: sortByTimestamp([...projection.attachments.values()]),
+    claims: sortByTimestamp([...projection.claims.values()]),
+    provenance: { ...projection.provenance }
   };
   if (projection.lastEventId) {
     snapshot.lastEventId = projection.lastEventId;
@@ -120,7 +182,10 @@ export function fromSnapshot(snapshot: RuntimeSnapshot): RuntimeProjection {
     status: snapshot.status,
     assignments: new Map(snapshot.assignments.map((assignment) => [assignment.id, assignment])),
     results: new Map(snapshot.results.map((result) => [result.resultId, result])),
-    decisions: new Map(snapshot.decisions.map((decision) => [decision.decisionId, decision]))
+    decisions: new Map(snapshot.decisions.map((decision) => [decision.decisionId, decision])),
+    attachments: new Map((snapshot.attachments ?? []).map((attachment) => [attachment.id, attachment])),
+    claims: new Map((snapshot.claims ?? []).map((claim) => [claim.id, claim])),
+    provenance: { ...(snapshot.provenance ?? EMPTY_PROVENANCE) }
   };
   if (snapshot.lastEventId) {
     projection.lastEventId = snapshot.lastEventId;
@@ -128,7 +193,9 @@ export function fromSnapshot(snapshot: RuntimeSnapshot): RuntimeProjection {
   return projection;
 }
 
-function sortByTimestamp<T extends Assignment | ResultPacket | DecisionPacket>(values: T[]): T[] {
+function sortByTimestamp<
+  T extends Assignment | ResultPacket | DecisionPacket | RuntimeAttachment | AssignmentClaim
+>(values: T[]): T[] {
   return [...values].sort((left, right) => {
     const leftValue =
       "updatedAt" in left

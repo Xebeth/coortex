@@ -123,6 +123,7 @@ test("milestone-2 smoke: decision path persists a blocker through the real run p
   const resumed = await resumeRuntime(setup.store, setup.adapter);
 
   assert.equal(run.execution.outcome.kind, "decision");
+  assert.equal(resumed.mode, "prepared");
   assert.equal(snapshot?.decisions.length, 1);
   assert.equal(snapshot?.decisions[0]?.assignmentId, setup.assignmentId);
   assert.equal(snapshot?.decisions[0]?.state, "open");

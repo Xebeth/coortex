@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 
-import type { HostExecutionOutcome, HostTelemetryCapture } from "./contract.js";
+import type {
+  HostExecutionOutcome,
+  HostSessionIdentity,
+  HostTelemetryCapture
+} from "./contract.js";
 import { getNativeRunId } from "../core/run-state.js";
 import type { HostRunRecord } from "../core/types.js";
 import { nowIso } from "../utils/time.js";
@@ -41,6 +45,7 @@ export interface ExecuteHostRunSessionInput<TExecution extends { exitCode: numbe
     execution: TExecution,
     nativeRunId: string | undefined
   ) => Promise<Omit<HostRunSessionResult<TExecution>, "execution">>;
+  onSessionIdentity?: (identity: HostSessionIdentity) => Promise<void>;
   setActiveRun: (run: HostRunHandle<TExecution> | undefined) => void;
   setActiveExecutionSettled: (settled: Promise<void> | undefined) => void;
 }
@@ -128,6 +133,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
           } catch (error) {
             recordMetadataWarning(error, "thread-start handling");
           }
+          await input.onSessionIdentity?.({ nativeSessionId: nativeRunId });
         }
       });
       input.setActiveRun(running);

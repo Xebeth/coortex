@@ -83,6 +83,7 @@ The governing rule is:
 That means:
 
 - live orchestration state is not stored in prompt text
+- runtime-owned attachment, claim, and provenance truth stays in `.coortex/runtime`
 - prompts or kernel instructions stay small and stable
 - task context is bounded intentionally
 - host-specific seams are isolated behind adapter contracts
@@ -116,11 +117,14 @@ Implemented in the current repository:
 
 The adapter/runtime path now includes:
 
-- startup/resume integration
+- runtime-owned session attachments and attachment-bound claims
+- explicit runtime init, host setup, wrapped launch, and wrapped resume boundaries
 - bounded envelope building
 - real Codex-backed `run` execution
+- wrapped Codex same-session `resume` by stored native session id
 - run inspection through persisted host metadata
 - heartbeat and lease-backed host-run tracking
+- legacy lease-only normalization into runtime-owned attachment truth
 - stale-run reconciliation into queued retry state
 - active-lease protection against duplicate reruns
 - result normalization
@@ -145,12 +149,12 @@ Generated files include:
 - `.coortex/runtime/events.ndjson`
 - `.coortex/runtime/snapshot.json`
 - `.coortex/runtime/telemetry.ndjson`
-- `.coortex/runtime/last-resume-envelope.json`
+- `.coortex/runtime/last-resume-envelope.json` as a derived recovery artifact, not attachment authority
 - `.coortex/artifacts/results/*.txt` when envelope trimming persists large outputs
-- `.coortex/adapters/codex/runs/*.json` for persisted host run metadata
+- `.coortex/adapters/codex/runs/*.json` for host run attempts and lease metadata only
 - `.coortex/adapters/codex/kernel.md`
 - `.coortex/adapters/codex/profile.json`
-- `.codex/config.toml` with a Coortex-managed `model_instructions_file` block for project-local Codex integration
+- `.codex/config.toml` with a Coortex-managed `model_instructions_file` block for project-local Codex integration preparation only
 
 ## Local usage
 
@@ -167,6 +171,8 @@ Initialize the local runtime:
 node dist/cli/ctx.js init
 ```
 
+`ctx init` creates runtime state and prepares non-authoritative Codex host artifacts.
+
 Check status, doctor output, run inspection, and a recovery envelope:
 
 ```bash
@@ -176,11 +182,20 @@ node dist/cli/ctx.js inspect
 node dist/cli/ctx.js resume
 ```
 
+`ctx resume` first targets the single authoritative attached or detached-but-resumable attachment. During a verified wrapped reclaim the runtime marks that attachment attached, then returns it to `detached_resumable` when the wrapped resume process exits without a terminal runtime outcome. If no authoritative attachment exists after legacy lease normalization, it refreshes the derived recovery envelope from current runtime state instead.
+
+Successful wrapped reclaim now records result or decision outcomes
+through the same runtime-owned durable path as `ctx run`, using the
+captured last-message artifact or the streamed agent message when the
+artifact is absent.
+
 Execute the active assignment through the Codex adapter:
 
 ```bash
 node dist/cli/ctx.js run
 ```
+
+`ctx run` is the wrapped launch path for a new Coortex-managed Codex session.
 
 Run the milestone test suite:
 

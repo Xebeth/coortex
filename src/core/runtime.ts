@@ -60,6 +60,18 @@ export function createBootstrapRuntime(options: BootstrapOptions): BootstrapRunt
         eventId: randomUUID(),
         sessionId,
         timestamp,
+        type: "runtime.initialized",
+        payload: {
+          rootPath: options.rootPath,
+          adapter: options.adapter,
+          host: options.host,
+          initializedAt: timestamp
+        }
+      },
+      {
+        eventId: randomUUID(),
+        sessionId,
+        timestamp,
         type: "assignment.created",
         payload: { assignment }
       },

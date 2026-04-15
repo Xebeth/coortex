@@ -34,6 +34,11 @@ The Codex adapter is responsible for:
 - generating or validating the Coortex Codex profile
 - generating the stable kernel instruction file for Codex
 - building bounded task envelopes for Codex runs
+- surfacing native Codex session identity for runtime-owned attachments
+- invoking wrapped Codex same-session resume by stored session id when available
+- capturing structured last-message output for wrapped launch and
+  wrapped resume so runtime-owned result/decision persistence stays
+  symmetric
 - mapping Codex-native execution results into Coortex runtime artifacts
 - normalizing Codex-native telemetry into the Coortex telemetry model
 
@@ -53,6 +58,9 @@ The Coortex-specific Codex profile may manage:
 - Coortex-specific developer instructions if needed
 - Coortex-specific environment/config placeholders
 - later host-specific hooks or MCP registration if required
+
+These profile artifacts are preparatory only. They must not become the
+authoritative source of attachment state, claim state, or provenance.
 
 ---
 
@@ -74,6 +82,11 @@ The kernel must remain:
 - overlay-free
 
 It must not embed live runtime state or dynamic overlays.
+
+`.codex/config.toml`, `kernel.md`, `profile.json`, and related
+repo-local Codex artifacts stay non-authoritative. Coortex authority
+begins only when a wrapped `ctx run` launch or wrapped `ctx resume`
+reclaim creates or updates a runtime-owned attachment.
 
 ---
 
@@ -112,6 +125,26 @@ This logic should live in adapter-facing envelope/trimming code, not in the core
 The Codex adapter should normalize host-native usage or session metadata into the Coortex telemetry model.
 
 The telemetry schema must stay Coortex-owned even if the host surface is Codex-specific.
+
+## Wrapped Session Boundary
+
+For the current hardening slice:
+
+- `ctx init` initializes the runtime and prepares Codex host artifacts
+- `ctx run` performs the wrapped Codex launch path
+- `ctx resume` reclaims the authoritative Codex session when one
+  attached or detached-but-resumable attachment exists, then returns
+  that attachment to `detached-but-resumable` when the wrapped reclaim
+  exits without a terminal runtime outcome
+- wrapped reclaim uses the structured `exec resume` path so successful
+  resume records result/decision outcomes and completion telemetry
+  through the same runtime-owned outcome pipeline as wrapped launch
+- if Codex does not materialize the `-o` last-message file, Coortex
+  falls back to the streamed `agent_message` JSONL item and validates
+  the same structured outcome there instead
+
+The native Codex session id remains metadata on the runtime-owned
+attachment, not a replacement for that attachment record.
 
 ---
 

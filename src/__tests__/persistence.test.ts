@@ -534,7 +534,10 @@ test("runtime store does not rewrite a salvaged log that no longer projects clea
 
   assert.equal(warning, undefined);
   assert.equal(await readFile(store.eventsPath, "utf8"), corrupted);
-  await assert.rejects(store.syncSnapshotFromEventsWithRecovery(), /Cannot update missing assignment/);
+  await assert.rejects(
+    store.syncSnapshotFromEventsWithRecovery(),
+    /no longer starts at runtime\.initialized/
+  );
 });
 
 test("runtime store rebuilds from snapshot plus a structurally valid salvaged suffix", async () => {

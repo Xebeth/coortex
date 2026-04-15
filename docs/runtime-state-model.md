@@ -84,6 +84,11 @@ Suggested fields:
 - `last_durable_output_at`
 - `resume_ready`
 
+`current_objective` should follow the most actionable durable runtime
+state. When a decision becomes the active state, the status should move
+off the pre-decision assignment objective and reflect the blocker
+summary or a newer runtime-authored decision-specific objective.
+
 ## 5. Recovery Brief
 
 The recovery brief is the compact summary used to resume work.
@@ -98,7 +103,74 @@ Required contents:
 
 It must be compact enough to fit inside a bounded task envelope.
 
-## 6. Host Run Record
+## 6. Runtime Attachment
+
+A runtime attachment is the runtime-owned record for a Coortex-managed
+host session.
+
+Required fields:
+
+- `id`
+- `adapter`
+- `host`
+- `state`
+- `created_at`
+- `updated_at`
+- `provenance`
+
+Common optional fields:
+
+- `native_session_id`
+- `attached_at`
+- `detached_at`
+- `released_at`
+- `released_reason`
+- `orphaned_at`
+- `orphaned_reason`
+
+The native host session identifier is attachment metadata over this
+runtime-owned entity. It must not become the sole source of attachment
+truth.
+
+For Milestone 2 reclaim semantics:
+
+- `attached` means the current wrapped launch or wrapped resume has
+  verified control of the native session
+- a wrapped resume that exits without a terminal runtime outcome moves
+  the attachment back to `detached_resumable`
+- wrapped launch and wrapped resume both durably capture result or
+  decision outcomes through the same runtime-owned event path
+- `provisional` is not authoritative resumable truth until runtime
+  reconciliation can promote it
+
+## 7. Assignment Claim
+
+An assignment claim binds live execution authority to an attachment.
+
+Required fields:
+
+- `id`
+- `assignment_id`
+- `attachment_id`
+- `state`
+- `created_at`
+- `updated_at`
+- `provenance`
+
+Common optional fields:
+
+- `released_at`
+- `released_reason`
+- `orphaned_at`
+- `orphaned_reason`
+
+Milestone 2 keeps the claim rule narrow:
+
+- at most one active claim may exist per assignment
+- at most one authoritative attached or detached-but-resumable
+  attachment may exist per runtime
+
+## 8. Host Run Record
 
 The host run record is the durable, host-agnostic summary of one
 assignment execution attempt.
@@ -152,8 +224,15 @@ The state model must support:
 
 Representative events:
 
+- runtime initialized
+- host setup completed
+- runtime activated
 - assignment created
 - assignment updated
+- attachment created
+- attachment updated
+- claim created
+- claim updated
 - result submitted
 - decision created
 - decision resolved
@@ -169,6 +248,11 @@ append-only during normal read/status/resume inspection paths.
 resume or projection refresh is acceptable because they summarize
 authoritative runtime state rather than replace it.
 
+When recovery has to operate from snapshot truth because the event log is
+missing or unusable, recovery-side attachment normalization or reclaim
+may update `snapshot.json` directly rather than fabricating a truncated
+replacement event log.
+
 Malformed-line recovery is best-effort. Recovery may salvage replayable
 events in memory, and durable repair paths may rewrite the event log to
 preserve replayable events without preserving original byte-for-byte
@@ -178,12 +262,13 @@ formatting.
 
 ## Adapter Relationship
 
-Host adapters may add **mapping metadata** between runtime state and host-native concepts such as sessions, threads, or conversations.
+Host adapters may add **mapping metadata** between runtime state and
+host-native concepts such as sessions, threads, or conversations.
 
 That mapping metadata should not replace the runtime entity model.
 
-The runtime entity model, including the base host-run record, remains
-the canonical representation.
+The runtime entity model, including attachments, claims, and the base
+host-run record, remains the canonical representation.
 
 ---
 
@@ -191,6 +276,8 @@ the canonical representation.
 
 1. Runtime state is authoritative.
 2. Recovery state derives from durable runtime artifacts.
-3. Host-native session state is adapter-specific metadata, not core truth.
-4. Result and decision packets remain durable host-agnostic artifacts.
-5. The model must support bounded summaries rather than transcript replay.
+3. Attachment truth, claim truth, and provenance are runtime-owned.
+4. Host-native session state is adapter-specific metadata, not core truth.
+5. Host-run records remain attempt-level artifacts, not attachment authority.
+6. Result and decision packets remain durable host-agnostic artifacts.
+7. The model must support bounded summaries rather than transcript replay.

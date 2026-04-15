@@ -165,6 +165,463 @@ test("codex adapter executes a bounded run and persists minimal reconnect metada
   assert.deepEqual(persisted, execution.run);
 });
 
+test("codex adapter surfaces native session identity through the launch lifecycle callback", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-session-identity-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  let seenIdentity:
+    | {
+        nativeSessionId: string;
+        metadata?: Record<string, unknown>;
+      }
+    | undefined;
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      const result = (async () => {
+        await input.onEvent?.({ type: "thread.started", thread_id: "thread-callback-1" });
+        await mkdir(dirname(input.outputPath), { recursive: true });
+        await writeFile(
+          input.outputPath,
+          JSON.stringify({
+            outcomeType: "result",
+            resultStatus: "completed",
+            resultSummary: "Lifecycle callback captured the native session identity.",
+            changedFiles: ["src/hosts/codex/adapter/index.ts"],
+            blockerSummary: "",
+            decisionOptions: [],
+            recommendedOption: ""
+          }),
+          "utf8"
+        );
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: ""
+        };
+      })();
+      return {
+        result,
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      };
+    },
+    async runExec() {
+      throw new Error("runExec should not be used when startExec is stubbed");
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const execution = await adapter.executeAssignment(store, projection, envelope, undefined, {
+    async onSessionIdentity(identity) {
+      seenIdentity = identity;
+    }
+  });
+
+  assert.equal(seenIdentity?.nativeSessionId, "thread-callback-1");
+  assert.equal(execution.outcome.kind, "result");
+  assert.equal(execution.outcome.capture.status, "completed");
+  assert.equal(getNativeRunId(execution.run), "thread-callback-1");
+});
+
+test("codex adapter resumes a stored native session id through the wrapped resume runner", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-session-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  let capturedSessionId = "";
+  let capturedPrompt = "";
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in wrapped resume coverage");
+    },
+    async runResume(input) {
+      capturedSessionId = input.sessionId;
+      capturedPrompt = input.prompt ?? "";
+      await mkdir(dirname(input.outputPath), { recursive: true });
+      await writeFile(
+        input.outputPath,
+        JSON.stringify({
+          outcomeType: "result",
+          resultStatus: "partial",
+          resultSummary: "Wrapped resume captured partial progress.",
+          changedFiles: ["src/hosts/codex/adapter/index.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }),
+        "utf8"
+      );
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ type: "turn.completed", usage: { input_tokens: 7, output_tokens: 3 } }),
+        stderr: ""
+      };
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-1",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(adapter.getCapabilities().supportsNativeSessionResume, true);
+  assert.equal(capturedSessionId, "thread-resume-1");
+  assert.match(capturedPrompt, /Coordinate work/);
+  assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.nativeSessionId, "thread-resume-1");
+  assert.equal(resumeResult.requestedSessionId, "thread-resume-1");
+  assert.equal(resumeResult.observedSessionId, "thread-resume-1");
+  assert.equal(resumeResult.sessionVerified, true);
+  assert.equal(resumeResult.outcome.kind, "result");
+  assert.equal(resumeResult.outcome.capture.status, "partial");
+  assert.equal(resumeResult.run.assignmentId, bootstrap.initialAssignmentId);
+  assert.equal(resumeResult.run.resultStatus, "partial");
+  assert.equal(resumeResult.telemetry?.eventType, "host.resume.completed");
+  assert.equal(resumeResult.telemetry?.metadata.reclaimed, true);
+  assert.equal(resumeResult.telemetry?.usage?.totalTokens, 10);
+
+  const noResumeAdapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in resume capability coverage");
+    }
+  });
+  assert.equal(noResumeAdapter.getCapabilities().supportsNativeSessionResume, false);
+});
+
+test("codex adapter captures decision outcomes through the wrapped resume runner", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-decision-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const adapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in wrapped resume decision coverage");
+    },
+    async runResume(input) {
+      await mkdir(dirname(input.outputPath), { recursive: true });
+      await writeFile(
+        input.outputPath,
+        JSON.stringify({
+          outcomeType: "decision",
+          resultStatus: "",
+          resultSummary: "",
+          changedFiles: [],
+          blockerSummary: "Need an operator decision before continuing resumed work.",
+          decisionOptions: [
+            { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+            { id: "skip", label: "Skip", summary: "Skip the blocked step." }
+          ],
+          recommendedOption: "wait"
+        }),
+        "utf8"
+      );
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-decision",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.outcome.kind, "decision");
+  assert.equal(
+    resumeResult.outcome.capture.blockerSummary,
+    "Need an operator decision before continuing resumed work."
+  );
+  assert.equal(resumeResult.run.assignmentId, bootstrap.initialAssignmentId);
+  assert.equal(resumeResult.run.outcomeKind, "decision");
+  assert.equal(
+    resumeResult.telemetry?.metadata.outcomeKind,
+    "decision"
+  );
+  assert.equal(resumeResult.telemetry?.metadata.resultStatus, "");
+
+  const persisted = await adapter.inspectRun(store, bootstrap.initialAssignmentId);
+  assert.deepEqual(persisted, resumeResult.run);
+});
+
+test("codex adapter falls back to streamed wrapped-resume agent output when the last-message file is unavailable", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-stream-fallback-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const adapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in resume transcript fallback coverage");
+    },
+    async runResume(input) {
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: [
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item-resume-fallback",
+              type: "agent_message",
+              text: [
+                "```json",
+                JSON.stringify({
+                  outcomeType: "result",
+                  resultStatus: "partial",
+                  resultSummary: "Recovered wrapped resume output from the JSONL stream.",
+                  changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+                  blockerSummary: "",
+                  decisionOptions: [],
+                  recommendedOption: ""
+                }),
+                "```"
+              ].join("\n")
+            }
+          }),
+          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+  });
+
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-stream-fallback",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.outcome.kind, "result");
+  assert.equal(
+    resumeResult.outcome.capture.summary,
+    "Recovered wrapped resume output from the JSONL stream."
+  );
+  assert.equal(resumeResult.run.assignmentId, bootstrap.initialAssignmentId);
+  assert.equal(resumeResult.telemetry?.usage?.totalTokens, 9);
+});
+
+test("codex adapter rejects wrapped resume when the event stream does not verify the requested session", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-verification-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const adapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in resume verification coverage");
+    },
+    async runResume(input) {
+      await mkdir(dirname(input.outputPath), { recursive: true });
+      await writeFile(
+        input.outputPath,
+        JSON.stringify({
+          outcomeType: "result",
+          resultStatus: "partial",
+          resultSummary: "Foreign resume should be ignored.",
+          changedFiles: [],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }),
+        "utf8"
+      );
+      await input.onEvent?.({ type: "thread.resumed", thread_id: "thread-foreign-resume" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-expected",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(resumeResult.reclaimed, false);
+  assert.equal(resumeResult.requestedSessionId, "thread-resume-expected");
+  assert.equal(resumeResult.observedSessionId, "thread-foreign-resume");
+  assert.equal(resumeResult.sessionVerified, false);
+  assert.match(resumeResult.warning ?? "", /instead of requested session/);
+  assert.equal(resumeResult.telemetry?.metadata.reclaimed, false);
+});
+
 test("codex adapter does not replay stale last-message artifacts on rerun", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-rerun-"));
   const store = RuntimeStore.forProject(projectRoot);

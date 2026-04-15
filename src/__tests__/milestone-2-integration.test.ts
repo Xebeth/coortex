@@ -17,6 +17,7 @@ import {
   inspectRuntimeRun,
   loadReconciledProjectionWithDiagnostics,
   loadOperatorProjection,
+  prepareResumeRuntime,
   resumeRuntime,
   runRuntime
 } from "../cli/commands.js";
@@ -87,9 +88,30 @@ test("milestone-2 integration: trimming keeps the real run envelope bounded and 
   assert.equal(startedTelemetry?.metadata.trimmedFields, 1);
 });
 
-test("milestone-2 integration: resume refuses snapshot-backed interrupted state behind an authoritative live lease", async () => {
-  const setup = await createSmokeSetup(async () => {
-    throw new Error("runner not used in interrupted recovery smoke test");
+test("milestone-2 integration: resume reclaims snapshot-backed interrupted state after legacy live-lease normalization", async () => {
+  let resumedSessionId = "";
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async () => {
+      throw new Error("runExec should not be used in interrupted recovery smoke test");
+    },
+    runResume: async (input) => {
+      resumedSessionId = input.sessionId;
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Resume captured additional interrupted progress.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 2 } }),
+        stderr: ""
+      };
+    }
   });
 
   await appendPartialResult(setup, "smoke-interrupted-partial", "Interrupted smoke work is partially complete.");
@@ -111,25 +133,723 @@ test("milestone-2 integration: resume refuses snapshot-backed interrupted state 
 
   const statusProjection = await loadOperatorProjection(setup.store);
   const reconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
-  await assert.rejects(
-    resumeRuntime(setup.store, setup.adapter),
-    new RegExp(`Assignment ${setup.assignmentId} already has an active host run lease\\.`)
-  );
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const projectionAfterResume = await loadOperatorProjection(setup.store);
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const attachments = [...projectionAfterResume.attachments.values()];
+  const claims = [...projectionAfterResume.claims.values()];
+  const telemetry = await setup.store.loadTelemetry();
+  const resumeStartedTelemetry = findLastTelemetry(telemetry, "host.resume.started");
+  const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
 
   assert.equal(statusProjection.status.activeAssignmentIds[0], setup.assignmentId);
   assert.deepEqual(reconciled.activeLeases, [setup.assignmentId]);
+  assert.ok(
+    reconciled.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized")
+  );
+  assert.equal(resumed.mode, "reclaimed");
+  assert.equal(resumedSessionId, "smoke-thread-interrupted");
+  assert.equal(resumed.attachment.nativeSessionId, "smoke-thread-interrupted");
+  assert.equal(resumed.attachment.state, "detached_resumable");
+  assert.equal(resumed.claim.assignmentId, setup.assignmentId);
+  assert.equal(resumed.claim.state, "active");
   assert.equal(reconciled.projection.results.size, 1);
   assert.equal(
     [...reconciled.projection.results.values()][0]?.summary,
     "Interrupted smoke work is partially complete."
   );
+  assert.equal(projectionAfterResume.results.size, 2);
   assert.equal(
-    inspected?.assignmentId,
-    setup.assignmentId
+    [...projectionAfterResume.results.values()].at(-1)?.summary,
+    "Resume captured additional interrupted progress."
   );
-  assert.equal(inspected?.state, "running");
-  assert.equal(getNativeRunId(inspected), "smoke-thread-interrupted");
+  assert.equal(attachments.length, 1);
+  assert.equal(attachments[0]?.state, "detached_resumable");
+  assert.equal(attachments[0]?.nativeSessionId, "smoke-thread-interrupted");
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0]?.state, "active");
+  assert.equal(projectionAfterResume.assignments.get(setup.assignmentId)?.state, "in_progress");
+  assert.equal(inspected?.assignmentId, setup.assignmentId);
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.resultStatus, "partial");
+  assert.equal(inspected?.summary, "Resume captured additional interrupted progress.");
+  assert.equal(resumeStartedTelemetry?.assignmentId, setup.assignmentId);
+  assert.equal(resumeStartedTelemetry?.metadata.attachmentId, attachments[0]?.id);
+  assert.equal(resumeCompletedTelemetry?.assignmentId, setup.assignmentId);
+  assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.outcomeKind, "result");
+  assert.equal(resumeCompletedTelemetry?.metadata.resultStatus, "partial");
+});
+
+test("milestone-2 integration: prepareResumeRuntime stays read-only against live lease normalization candidates", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runExec should not be used in prepare-only smoke test");
+  });
+
+  const runningRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    startedAt: nowIso(),
+    heartbeatAt: nowIso(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    adapterData: {
+      nativeRunId: "smoke-thread-read-only-prepare"
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
+
+  const projectionBefore = await loadOperatorProjection(setup.store);
+  const prepared = await prepareResumeRuntime(setup.store, setup.adapter);
+  const projectionAfter = await loadOperatorProjection(setup.store);
+
+  assert.equal(prepared.brief.activeAssignments.length, 1);
+  assert.equal(prepared.envelope.metadata.activeAssignmentId, setup.assignmentId);
+  assert.equal(prepared.diagnostics.length, 0);
+  assert.equal(projectionBefore.attachments.size, 0);
+  assert.equal(projectionBefore.claims.size, 0);
+  assert.equal(projectionAfter.attachments.size, 0);
+  assert.equal(projectionAfter.claims.size, 0);
+});
+
+test("milestone-2 integration: failed same-session reclaim orphans the attachment and requeues the assignment", async () => {
+  let resumeAttempts = 0;
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch produced partial progress before reconnect was needed.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-reclaim-failure" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      resumeAttempts += 1;
+      assert.equal(input.sessionId, "smoke-thread-reclaim-failure");
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "resume failed for smoke-thread-reclaim-failure"
+      };
+    }
+  });
+
+  const firstRun = await runRuntime(setup.store, setup.adapter);
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const projection = await loadOperatorProjection(setup.store);
+  const attachment = [...projection.attachments.values()][0];
+  const claim = [...projection.claims.values()][0];
+
+  assert.equal(firstRun.execution.outcome.kind, "result");
+  assert.equal(firstRun.execution.outcome.capture.status, "partial");
+  assert.equal(firstRun.projectionAfter.attachments.size, 1);
+  assert.equal(
+    [...firstRun.projectionAfter.attachments.values()][0]?.state,
+    "detached_resumable"
+  );
+  assert.equal(resumeAttempts, 1);
+  assert.equal(resumed.mode, "prepared");
+  assert.ok(
+    resumed.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed")
+  );
+  assert.equal(attachment?.state, "orphaned");
+  assert.equal(claim?.state, "orphaned");
+  assert.match(attachment?.orphanedReason ?? "", /did not confirm the requested session/);
+  assert.match(claim?.orphanedReason ?? "", /did not confirm the requested session/);
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.deepEqual(projection.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.match(projection.status.currentObjective, new RegExp(`Retry assignment ${setup.assignmentId}:`));
+});
+
+test("milestone-2 integration: wrapped resume rejects a foreign native session reclaim and requeues the assignment", async () => {
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch produced partial progress before foreign reclaim coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-foreign-expected" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      await input.onEvent?.({ type: "thread.resumed", thread_id: "smoke-thread-foreign-observed" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const projection = await loadOperatorProjection(setup.store);
+  const attachment = [...projection.attachments.values()][0];
+  const claim = [...projection.claims.values()][0];
+  const telemetry = await setup.store.loadTelemetry();
+  const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
+
+  assert.equal(resumed.mode, "prepared");
+  assert.ok(
+    resumed.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed")
+  );
+  assert.equal(attachment?.state, "orphaned");
+  assert.equal(claim?.state, "orphaned");
+  assert.match(attachment?.orphanedReason ?? "", /instead of requested session/);
+  assert.match(claim?.orphanedReason ?? "", /instead of requested session/);
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, false);
+  assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, false);
+});
+
+test("milestone-2 integration: snapshot-only reclaim failure preserves orphaned attachment truth and queued retry state", async () => {
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch produced partial progress before snapshot-only reclaim failure.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-snapshot-resume" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async () => {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "snapshot-only resume failed"
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  await rm(join(setup.projectRoot, ".coortex", "runtime", "events.ndjson"));
+
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const snapshot = await setup.store.loadSnapshot();
+  const attachment = snapshot?.attachments?.[0];
+  const claim = snapshot?.claims?.[0];
+
+  assert.equal(resumed.mode, "prepared");
+  assert.ok(
+    resumed.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed")
+  );
+  assert.equal(attachment?.state, "orphaned");
+  assert.equal(claim?.state, "orphaned");
+  assert.match(attachment?.orphanedReason ?? "", /snapshot-only resume failed/);
+  assert.match(claim?.orphanedReason ?? "", /snapshot-only resume failed/);
+  assert.equal(snapshot?.assignments[0]?.state, "queued");
+  assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId]);
+});
+
+test("milestone-2 integration: provisional live-lease authority is promoted before same-session resume selection", async () => {
+  let resumedSessionId = "";
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async () => {
+      throw new Error("runExec should not be used in provisional promotion smoke test");
+    },
+    runResume: async (input) => {
+      resumedSessionId = input.sessionId;
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Promoted provisional attachment resumed successfully.",
+        changedFiles: ["src/cli/run-operations.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  const projection = await loadOperatorProjection(setup.store);
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  const provisionalEvents: RuntimeEvent[] = [
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "provisional",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: claimId,
+          assignmentId: setup.assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ];
+  for (const event of provisionalEvents) {
+    await setup.store.appendEvent(event);
+  }
+  await setup.store.syncSnapshotFromEvents();
+
+  const runningRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    startedAt: nowIso(),
+    heartbeatAt: nowIso(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    adapterData: {
+      nativeRunId: "smoke-thread-provisional-promoted"
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
+
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const projectionAfter = await loadOperatorProjection(setup.store);
+  const attachment = projectionAfter.attachments.get(attachmentId);
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.equal(resumedSessionId, "smoke-thread-provisional-promoted");
+  assert.ok(
+    resumed.diagnostics.some((diagnostic) => diagnostic.code === "provisional-attachment-promoted")
+  );
+  assert.equal(attachment?.state, "detached_resumable");
+  assert.equal(attachment?.nativeSessionId, "smoke-thread-provisional-promoted");
+});
+
+test("milestone-2 integration: wrapped resume persists a terminal completed result and releases attachment authority", async () => {
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch created resumable state before terminal resume coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-terminal-resume" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "completed",
+        resultSummary: "Wrapped resume finished the assignment.",
+        changedFiles: ["src/cli/commands.ts", "src/cli/run-operations.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ type: "turn.completed", usage: { input_tokens: 8, output_tokens: 5 } }),
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const projection = await loadOperatorProjection(setup.store);
+  const attachment = [...projection.attachments.values()][0];
+  const claim = [...projection.claims.values()][0];
+  const telemetry = await setup.store.loadTelemetry();
+  const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.equal(attachment?.state, "released");
+  assert.equal(claim?.state, "released");
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.deepEqual(projection.status.activeAssignmentIds, []);
+  assert.equal(projection.status.currentObjective, "Await the next assignment.");
+  assert.equal(projection.results.size, 2);
+  assert.equal([...projection.results.values()].at(-1)?.status, "completed");
+  assert.equal([...projection.results.values()].at(-1)?.summary, "Wrapped resume finished the assignment.");
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.resultStatus, "completed");
+  assert.equal(inspected?.summary, "Wrapped resume finished the assignment.");
+  assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.resultStatus, "completed");
+});
+
+test("milestone-2 integration: wrapped resume persists a decision outcome and keeps the claim resumable", async () => {
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch created resumable state before decision resume coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-decision-resume" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "decision",
+        resultStatus: "",
+        resultSummary: "",
+        changedFiles: [],
+        blockerSummary: "Need operator guidance before continuing resumed work.",
+        decisionOptions: [
+          { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+          { id: "skip", label: "Skip", summary: "Skip the blocked step." }
+        ],
+        recommendedOption: "wait"
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const projection = await loadOperatorProjection(setup.store);
+  const attachment = [...projection.attachments.values()][0];
+  const claim = [...projection.claims.values()][0];
+  const decision = [...projection.decisions.values()].at(-1);
+  const telemetry = await setup.store.loadTelemetry();
+  const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.equal(attachment?.state, "detached_resumable");
+  assert.equal(claim?.state, "active");
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "blocked");
+  assert.deepEqual(projection.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.equal(
+    projection.status.currentObjective,
+    "Need operator guidance before continuing resumed work."
+  );
+  assert.equal(decision?.state, "open");
+  assert.equal(decision?.blockerSummary, "Need operator guidance before continuing resumed work.");
+  assert.equal(decision?.recommendedOption, "wait");
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.outcomeKind, "decision");
+  assert.equal(inspected?.summary, "Need operator guidance before continuing resumed work.");
+  assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.outcomeKind, "decision");
+  assert.equal(resumeCompletedTelemetry?.metadata.resultStatus, "");
+});
+
+test("milestone-2 integration: run rejects foreign resumable claims and prevents duplicate issuance", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used when an authoritative attachment already owns the runtime");
+  });
+
+  const projection = await loadOperatorProjection(setup.store);
+  const foreignAssignmentId = setup.assignmentId;
+  const runnableAssignmentId = randomUUID();
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  const secondAssignmentEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "assignment.created",
+    payload: {
+      assignment: {
+        id: runnableAssignmentId,
+        parentTaskId: "task-foreign-claim",
+        workflow: "milestone-2",
+        ownerType: "host",
+        ownerId: "codex",
+        objective: "Try to run a different assignment while another claim is still authoritative.",
+        writeScope: ["README.md"],
+        requiredOutputs: ["result"],
+        state: "queued",
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }
+    }
+  };
+  const statusEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "status.updated",
+    payload: {
+      status: {
+        ...projection.status,
+        activeAssignmentIds: [runnableAssignmentId],
+        currentObjective: "Run the replacement assignment.",
+        lastDurableOutputAt: timestamp
+      }
+    }
+  };
+  const attachmentEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "attachment.created",
+    payload: {
+      attachment: {
+        id: attachmentId,
+        adapter: "codex",
+        host: "codex",
+        state: "detached_resumable",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        detachedAt: timestamp,
+        nativeSessionId: "smoke-thread-foreign-claim",
+        provenance: {
+          kind: "launch",
+          source: "ctx.run"
+        }
+      }
+    }
+  };
+  const claimEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "claim.created",
+    payload: {
+      claim: {
+        id: claimId,
+        assignmentId: foreignAssignmentId,
+        attachmentId,
+        state: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        provenance: {
+          kind: "launch",
+          source: "ctx.run"
+        }
+      }
+    }
+  };
+
+  for (const event of [secondAssignmentEvent, statusEvent, attachmentEvent, claimEvent]) {
+    await setup.store.appendEvent(event);
+  }
+  await setup.store.syncSnapshotFromEvents();
+
+  await assert.rejects(
+    runRuntime(setup.store, setup.adapter),
+    new RegExp(
+      `Assignment ${foreignAssignmentId} already has an active host run lease\\. Claimed by attachment ${attachmentId}\\.`
+    )
+  );
+
+  const projectionAfter = await loadOperatorProjection(setup.store);
+  assert.deepEqual(projectionAfter.status.activeAssignmentIds, [runnableAssignmentId]);
+  assert.equal(
+    [...projectionAfter.claims.values()].filter((claim) => claim.state === "active").length,
+    1
+  );
+  assert.equal(
+    [...projectionAfter.attachments.values()].filter(
+      (attachment) => attachment.state === "detached_resumable"
+    ).length,
+    1
+  );
+});
+
+test("milestone-2 integration: resume fails deterministically when multiple resumable attachments exist", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used when resumable attachment cardinality is invalid");
+  });
+
+  const projection = await loadOperatorProjection(setup.store);
+  const secondAssignmentId = randomUUID();
+  const timestamp = nowIso();
+  const secondAssignmentEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "assignment.created",
+    payload: {
+      assignment: {
+        id: secondAssignmentId,
+        parentTaskId: "task-multiple-attachments",
+        workflow: "milestone-2",
+        ownerType: "host",
+        ownerId: "codex",
+        objective: "Second assignment for invalid resumable attachment coverage.",
+        writeScope: ["README.md"],
+        requiredOutputs: ["result"],
+        state: "queued",
+        createdAt: timestamp,
+        updatedAt: timestamp
+      }
+    }
+  };
+
+  await setup.store.appendEvent(secondAssignmentEvent);
+  for (const [assignmentId, nativeSessionId] of [
+    [setup.assignmentId, "smoke-thread-attachment-one"],
+    [secondAssignmentId, "smoke-thread-attachment-two"]
+  ] as const) {
+    const attachmentId = randomUUID();
+    await setup.store.appendEvent({
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    });
+    await setup.store.appendEvent({
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    });
+  }
+  await setup.store.syncSnapshotFromEvents();
+
+  await assert.rejects(
+    resumeRuntime(setup.store, setup.adapter),
+    /multiple resumable attachments are present/
+  );
+});
+
+test("milestone-2 integration: launch without native identity finalization leaves no authoritative attachment behind", async () => {
+  const setup = await createSmokeSetup(async (input) => {
+    await writeStructuredOutput(input.outputPath, {
+      outcomeType: "result",
+      resultStatus: "partial",
+      resultSummary: "Partial work finished without surfacing a native session identity.",
+      changedFiles: ["src/hosts/codex/adapter/index.ts"],
+      blockerSummary: "",
+      decisionOptions: [],
+      recommendedOption: ""
+    });
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: ""
+    };
+  });
+
+  const run = await runRuntime(setup.store, setup.adapter);
+  const projection = await loadOperatorProjection(setup.store);
+  const attachments = [...projection.attachments.values()];
+  const claims = [...projection.claims.values()];
+
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.status, "partial");
+  assert.equal(attachments.length, 1);
+  assert.equal(attachments[0]?.state, "orphaned");
+  assert.equal(attachments[0]?.nativeSessionId, undefined);
+  assert.match(
+    attachments[0]?.orphanedReason ?? "",
+    /without native session identity finalization/i
+  );
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0]?.state, "orphaned");
+  assert.equal(
+    claims.filter((claim) => claim.state === "active").length,
+    0
+  );
 });
 
 test("milestone-2 integration: profile and kernel artifacts are generated as small static files", async () => {
@@ -1238,11 +1958,18 @@ test("milestone-2 integration: stale retries move back to in-progress before the
   assert.equal(run.projectionBefore.assignments.get(setup.assignmentId)?.state, "in_progress");
 });
 async function createSmokeSetup(runExec: CodexCommandRunner["runExec"]): Promise<SmokeSetup> {
+  return createSmokeSetupWithRunner({ runExec });
+}
+
+async function createSmokeSetupWithRunner(runner: {
+  runExec: CodexCommandRunner["runExec"];
+  runResume?: CodexCommandRunner["runResume"];
+}): Promise<SmokeSetup> {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-m2-smoke-"));
   const store = RuntimeStore.forProject(projectRoot);
   const adapter = new CodexAdapter({
     async startExec(input) {
-      const result = runExec({
+      const result = runner.runExec({
         ...input,
         onEvent: async (event) => {
           await input.onEvent?.(event);
@@ -1257,7 +1984,8 @@ async function createSmokeSetup(runExec: CodexCommandRunner["runExec"]): Promise
         }
       };
     },
-    runExec
+    runExec: runner.runExec,
+    ...(runner.runResume ? { runResume: runner.runResume } : {})
   });
   const initialized = await initRuntime(projectRoot, store, adapter);
   if (!initialized) {

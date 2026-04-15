@@ -160,6 +160,11 @@ export class RuntimeStore {
       };
     }
     if (events.length > 0) {
+      if (warning && !snapshot && events[0]?.type !== "runtime.initialized") {
+        throw new Error(
+          `Event replay could not rebuild runtime state from salvaged events because ${this.eventsPath} no longer starts at runtime.initialized.`
+        );
+      }
       const config = await this.loadConfig();
       if (!config) {
         throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
@@ -181,9 +186,14 @@ export class RuntimeStore {
       }
     }
     if (snapshot) {
-      return warning
-        ? { projection: fromSnapshot(snapshot), warning, snapshotFallback: false }
-        : { projection: fromSnapshot(snapshot), snapshotFallback: false };
+      const snapshotWarning =
+        warning ??
+        `No replayable runtime events were available from ${this.eventsPath}. Fell back to ${this.snapshotPath}.`;
+      return {
+        projection: fromSnapshot(snapshot),
+        warning: snapshotWarning,
+        snapshotFallback: true
+      };
     }
     throw new Error(`No persisted runtime state found at ${this.rootDir}`);
   }
@@ -207,6 +217,9 @@ export class RuntimeStore {
       return undefined;
     }
     if (events.length === 0) {
+      return undefined;
+    }
+    if (events[0]?.type !== "runtime.initialized") {
       return undefined;
     }
     const config = await this.loadConfig();

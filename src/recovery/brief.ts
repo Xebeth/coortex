@@ -1,6 +1,13 @@
 import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
 
-export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief {
+export interface RecoveryBriefOptions {
+  allowAttachmentResumeAction?: boolean;
+}
+
+export function buildRecoveryBrief(
+  projection: RuntimeProjection,
+  options: RecoveryBriefOptions = {}
+): RecoveryBrief {
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
@@ -35,15 +42,31 @@ export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief
     })),
     lastDurableResults: recentResults,
     unresolvedDecisions,
-    nextRequiredAction: determineNextAction(activeAssignments, unresolvedDecisions),
+    nextRequiredAction: determineNextAction(projection, activeAssignments, unresolvedDecisions, options),
     generatedAt: deriveGeneratedAt(projection)
   };
 }
 
 function determineNextAction(
+  projection: RuntimeProjection,
   activeAssignments: RecoveryBrief["activeAssignments"],
-  unresolvedDecisions: RecoveryBrief["unresolvedDecisions"]
+  unresolvedDecisions: RecoveryBrief["unresolvedDecisions"],
+  options: RecoveryBriefOptions
 ): string {
+  const allowAttachmentResumeAction = options.allowAttachmentResumeAction ?? true;
+  const resumableClaim = [...projection.claims.values()].find((claim) => {
+    if (claim.state !== "active") {
+      return false;
+    }
+    const attachment = projection.attachments.get(claim.attachmentId);
+    return attachment?.state === "attached" || attachment?.state === "detached_resumable";
+  });
+  if (allowAttachmentResumeAction && resumableClaim) {
+    const attachment = projection.attachments.get(resumableClaim.attachmentId);
+    return `Resume attachment ${resumableClaim.attachmentId} for assignment ${resumableClaim.assignmentId}${
+      attachment?.nativeSessionId ? ` (${attachment.nativeSessionId})` : ""
+    }.`;
+  }
   if (unresolvedDecisions.length > 0) {
     const nextDecision = unresolvedDecisions[0]!;
     return `Resolve decision ${nextDecision.decisionId}: ${nextDecision.blockerSummary}`;
@@ -75,7 +98,24 @@ function deriveGeneratedAt(projection: RuntimeProjection): string {
     ...[...projection.results.values()].map((result) => result.createdAt),
     ...[...projection.decisions.values()].flatMap((decision) =>
       decision.resolvedAt ? [decision.createdAt, decision.resolvedAt] : [decision.createdAt]
-    )
+    ),
+    ...[...projection.attachments.values()].flatMap((attachment) => [
+      attachment.createdAt,
+      attachment.updatedAt,
+      attachment.attachedAt ?? "",
+      attachment.detachedAt ?? "",
+      attachment.releasedAt ?? "",
+      attachment.orphanedAt ?? ""
+    ]),
+    ...[...projection.claims.values()].flatMap((claim) => [
+      claim.createdAt,
+      claim.updatedAt,
+      claim.releasedAt ?? "",
+      claim.orphanedAt ?? ""
+    ]),
+    projection.provenance.initializedAt ?? "",
+    projection.provenance.hostSetupAt ?? "",
+    projection.provenance.lastActivation?.at ?? ""
   ].filter((value) => value.length > 0);
 
   return timestamps.sort().at(-1) ?? "";

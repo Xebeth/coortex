@@ -59,6 +59,30 @@ test("host-run recovery matrix matches the supported command semantics", async (
       }
     },
     {
+      name: "legacy live lease without attachment normalizes into a resumable runtime attachment",
+      seed: async (ctx: MatrixContext) => {
+        const record = runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z");
+        await ctx.adapter.claimRunLease(ctx.store, ctx.projection, ctx.assignmentId, record);
+      },
+      assertResult: async (ctx: MatrixContext, result: Awaited<ReturnType<typeof reconcileActiveRuns>>) => {
+        assert.deepEqual(result.activeLeases, [ctx.assignmentId]);
+        assert.ok(
+          result.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized")
+        );
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
+        const attachments = [...result.projection.attachments.values()];
+        const claims = [...result.projection.claims.values()];
+        assert.equal(attachments.length, 1);
+        assert.equal(attachments[0]?.state, "detached_resumable");
+        assert.equal(attachments[0]?.nativeSessionId, `native-${ctx.assignmentId}`);
+        assert.equal(claims.length, 1);
+        assert.equal(claims[0]?.assignmentId, ctx.assignmentId);
+        assert.equal(claims[0]?.state, "active");
+        const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+        assert.equal(inspected?.state, "running");
+      }
+    },
+    {
       name: "valid active lease overrides expired running metadata during reconciliation",
       seed: async (ctx: MatrixContext) => {
         await ctx.store.writeJsonArtifact(
@@ -526,6 +550,10 @@ test("host-run recovery matrix matches the supported command semantics", async (
         assert.deepEqual(result.activeLeases, []);
         assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
         assert.deepEqual(result.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+        assert.equal(
+          result.projection.status.currentObjective,
+          "Need operator confirmation before proceeding."
+        );
         assert.equal(result.projection.decisions.size, 1);
         const durableRecord = JSON.parse(
           await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, "matrix run") ?? "{}"
@@ -809,6 +837,10 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
 
         assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
         assert.deepEqual(result.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+        assert.equal(
+          result.projection.status.currentObjective,
+          "Need operator confirmation before proceeding."
+        );
         assert.equal(result.projection.decisions.size, 1);
         assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
         assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
@@ -2844,6 +2876,7 @@ class BriefingMatrixAdapter extends MatrixAdapter {
     };
   }
 }
+
 
 async function createMatrixContext(adapter = new MatrixAdapter({
   runRecordPath: (assignmentId) => `adapters/matrix/runs/${assignmentId}.json`,

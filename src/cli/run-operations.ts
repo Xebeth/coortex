@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
 
-import type { HostAdapter } from "../adapters/contract.js";
+import type { HostAdapter, HostExecutionOutcome } from "../adapters/contract.js";
 import { isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
-import type { DecisionPacket, HostRunRecord } from "../core/types.js";
+import type {
+  AssignmentClaim,
+  DecisionPacket,
+  HostRunRecord,
+  RuntimeAttachment
+} from "../core/types.js";
 import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import { buildStaleRunReconciliation, createActiveRunDiagnostic, selectRunnableProjection } from "../recovery/host-runs.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
@@ -13,6 +18,21 @@ import { RuntimeStore } from "../persistence/store.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 
+interface AttachmentClaimBinding {
+  attachment: RuntimeAttachment;
+  claim: AssignmentClaim;
+}
+
+const AUTHORITATIVE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
+  "attached",
+  "detached_resumable"
+]);
+
+const RESUMABLE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
+  "attached",
+  "detached_resumable"
+]);
+
 export async function loadReconciledProjectionWithDiagnostics(
   store: RuntimeStore,
   adapter: HostAdapter
@@ -21,6 +41,7 @@ export async function loadReconciledProjectionWithDiagnostics(
   diagnostics: CommandDiagnostic[];
   activeLeases: string[];
   hiddenActiveLeases: string[];
+  snapshotFallback: boolean;
 }> {
   const loaded = await loadOperatorProjectionWithDiagnostics(store);
   const reconciled = await reconcileActiveRuns(store, adapter, loaded.projection, {
@@ -34,34 +55,438 @@ export async function loadReconciledProjectionWithDiagnostics(
     projection: reconciled.projection,
     diagnostics: [...loaded.diagnostics, ...reconciled.diagnostics],
     activeLeases: reconciled.activeLeases,
-    hiddenActiveLeases
+    hiddenActiveLeases,
+    snapshotFallback: loaded.snapshotFallback
   };
 }
 
 export async function markAssignmentInProgress(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
+  assignmentId: string,
+  options?: {
+    snapshotFallback?: boolean;
+  }
 ): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
   const assignment = projection.assignments.get(assignmentId);
   if (!assignment || assignment.state === "in_progress") {
     return projection;
   }
 
-  await store.appendEvent({
+  const timestamp = nowIso();
+  const event: RuntimeEvent = {
     eventId: randomUUID(),
     sessionId: projection.sessionId,
-    timestamp: nowIso(),
+    timestamp,
     type: "assignment.updated",
     payload: {
       assignmentId,
       patch: {
         state: "in_progress",
-        updatedAt: nowIso()
+        updatedAt: timestamp
       }
     }
+  };
+  if (!options?.snapshotFallback) {
+    await store.appendEvent(event);
+    return (await store.syncSnapshotFromEventsWithRecovery()).projection;
+  }
+  const nextProjection = fromSnapshot(toSnapshot(projection));
+  applyRuntimeEvent(nextProjection, event);
+  await store.writeSnapshot(toSnapshot(nextProjection));
+  return nextProjection;
+}
+
+export function listActiveClaimBindings(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
+): AttachmentClaimBinding[] {
+  return [...projection.claims.values()]
+    .filter((claim) => claim.state === "active")
+    .flatMap((claim) => {
+      const attachment = projection.attachments.get(claim.attachmentId);
+      return attachment ? [{ attachment, claim }] : [];
+    });
+}
+
+export function listAuthoritativeAttachmentClaims(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
+): AttachmentClaimBinding[] {
+  return listActiveClaimBindings(projection).filter(({ attachment }) =>
+    AUTHORITATIVE_ATTACHMENT_STATES.has(attachment.state)
+  );
+}
+
+export function listResumableAttachmentClaims(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
+): AttachmentClaimBinding[] {
+  return listActiveClaimBindings(projection).filter(({ attachment }) =>
+    RESUMABLE_ATTACHMENT_STATES.has(attachment.state)
+  );
+}
+
+function listProvisionalAttachmentClaims(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
+): AttachmentClaimBinding[] {
+  return listActiveClaimBindings(projection).filter(({ attachment }) => attachment.state === "provisional");
+}
+
+export function getActiveClaimForAssignment(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string
+): AttachmentClaimBinding | undefined {
+  return listActiveClaimBindings(projection).find(({ claim }) => claim.assignmentId === assignmentId);
+}
+
+function hasAttachmentHistoryForAssignment(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string
+): boolean {
+  return [...projection.claims.values()].some((claim) => claim.assignmentId === assignmentId);
+}
+
+async function reconcileLegacyLeaseOnlyAuthority(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  record: HostRunRecord,
+  diagnostics: CommandDiagnostic[],
+  options?: {
+    snapshotFallback?: boolean;
+  }
+): Promise<{
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
+  changed: boolean;
+}> {
+  if (
+    !projection.assignments.has(record.assignmentId) ||
+    hasAttachmentHistoryForAssignment(projection, record.assignmentId) ||
+    record.state !== "running" ||
+    isRunLeaseExpired(record)
+  ) {
+    return {
+      projection,
+      changed: false
+    };
+  }
+
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  const nativeSessionId =
+    typeof record.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
+      ? record.adapterData.nativeRunId
+      : undefined;
+  const attachment: RuntimeAttachment = {
+    id: attachmentId,
+    adapter: projection.adapter,
+    host: projection.status.activeHost,
+    state: "detached_resumable",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    provenance: {
+      kind: "legacy_normalization",
+      source: "legacy_live_lease"
+    },
+    detachedAt: timestamp,
+    ...(nativeSessionId ? { nativeSessionId } : {}),
+    ...(record.adapterData ? { adapterMetadata: { ...record.adapterData } } : {})
+  };
+  const claim: AssignmentClaim = {
+    id: claimId,
+    assignmentId: record.assignmentId,
+    attachmentId,
+    state: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    provenance: {
+      kind: "legacy_normalization",
+      source: "legacy_live_lease"
+    }
+  };
+  const events: RuntimeEvent[] = [
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: { attachment }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: { claim }
+    }
+  ];
+
+  const nextProjection = fromSnapshot(toSnapshot(projection));
+  const canAppendEvents = !options?.snapshotFallback && (await store.hasEvents());
+  for (const event of events) {
+    applyRuntimeEvent(nextProjection, event);
+    if (canAppendEvents) {
+      await store.appendEvent(event);
+    }
+  }
+  await store.writeSnapshot(toSnapshot(nextProjection));
+  diagnostics.push({
+    level: "warning",
+    code: "legacy-lease-normalized",
+    message: `Normalized legacy live lease for assignment ${record.assignmentId} into attachment ${attachmentId}.`
   });
-  return (await store.syncSnapshotFromEventsWithRecovery()).projection;
+  return {
+    projection: nextProjection,
+    changed: true
+  };
+}
+
+async function persistProjectionEvents(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  events: RuntimeEvent[],
+  options?: {
+    snapshotFallback?: boolean;
+  }
+): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
+  if (!options?.snapshotFallback) {
+    for (const event of events) {
+      await store.appendEvent(event);
+    }
+    return (await store.syncSnapshotFromEventsWithRecovery()).projection;
+  }
+
+  const nextProjection = fromSnapshot(toSnapshot(projection));
+  for (const event of events) {
+    applyRuntimeEvent(nextProjection, event);
+  }
+  await store.writeSnapshot(toSnapshot(nextProjection));
+  return nextProjection;
+}
+
+async function transitionAttachmentClaim(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  attachmentId: string,
+  claimId: string,
+  patch: {
+    attachment: Partial<RuntimeAttachment>;
+    claim: Partial<AssignmentClaim>;
+  },
+  options?: {
+    snapshotFallback?: boolean;
+  }
+): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
+  const timestamp = nowIso();
+  return persistProjectionEvents(
+    store,
+    projection,
+    [
+      {
+        eventId: randomUUID(),
+        sessionId: projection.sessionId,
+        timestamp,
+        type: "attachment.updated",
+        payload: {
+          attachmentId,
+          patch: patch.attachment
+        }
+      },
+      {
+        eventId: randomUUID(),
+        sessionId: projection.sessionId,
+        timestamp,
+        type: "claim.updated",
+        payload: {
+          claimId,
+          patch: patch.claim
+        }
+      }
+    ],
+    options
+  );
+}
+
+async function requeueAssignmentForRetry(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string,
+  objective: string,
+  options?: {
+    snapshotFallback?: boolean;
+  }
+): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
+  const timestamp = nowIso();
+  return persistProjectionEvents(
+    store,
+    projection,
+    [
+      {
+        eventId: randomUUID(),
+        sessionId: projection.sessionId,
+        timestamp,
+        type: "assignment.updated",
+        payload: {
+          assignmentId,
+          patch: {
+            state: "queued",
+            updatedAt: timestamp
+          }
+        }
+      },
+      {
+        eventId: randomUUID(),
+        sessionId: projection.sessionId,
+        timestamp,
+        type: "status.updated",
+        payload: {
+          status: {
+            ...projection.status,
+            currentObjective: `Retry assignment ${assignmentId}: ${objective}`,
+            lastDurableOutputAt: timestamp,
+            resumeReady: true
+          }
+        }
+      }
+    ],
+    options
+  );
+}
+
+async function reconcileProvisionalAttachmentClaims(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  diagnostics: CommandDiagnostic[],
+  recordByAssignmentId: Map<string, HostRunRecord>,
+  options?: {
+    snapshotFallback?: boolean;
+  }
+): Promise<{
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
+  changed: boolean;
+}> {
+  let effectiveProjection = projection;
+  let changed = false;
+
+  for (const { attachment, claim } of listProvisionalAttachmentClaims(effectiveProjection)) {
+    const assignment = effectiveProjection.assignments.get(claim.assignmentId);
+    const record =
+      recordByAssignmentId.get(claim.assignmentId) ?? await adapter.inspectRun(store, claim.assignmentId);
+    const liveNativeSessionId =
+      typeof record?.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
+        ? record.adapterData.nativeRunId
+        : undefined;
+    const hasLiveLease = !!record && record.state === "running" && !isRunLeaseExpired(record);
+
+    if (hasLiveLease && liveNativeSessionId) {
+      effectiveProjection = await transitionAttachmentClaim(
+        store,
+        effectiveProjection,
+        attachment.id,
+        claim.id,
+        {
+          attachment: {
+            state: "detached_resumable",
+            updatedAt: nowIso(),
+            detachedAt: nowIso(),
+            nativeSessionId: liveNativeSessionId,
+            ...(record?.adapterData ? { adapterMetadata: { ...record.adapterData } } : {})
+          },
+          claim: {
+            updatedAt: nowIso()
+          }
+        },
+        options
+      );
+      diagnostics.push({
+        level: "warning",
+        code: "provisional-attachment-promoted",
+        message: `Promoted provisional attachment ${attachment.id} for assignment ${claim.assignmentId} into resumable attachment truth.`
+      });
+      changed = true;
+      continue;
+    }
+
+    const startedHostRun = !!record;
+    const shouldRequeue = assignment?.state === "in_progress";
+    effectiveProjection = await transitionAttachmentClaim(
+      store,
+      effectiveProjection,
+      attachment.id,
+      claim.id,
+      startedHostRun || shouldRequeue
+        ? {
+            attachment: {
+              state: "orphaned",
+              updatedAt: nowIso(),
+              orphanedAt: nowIso(),
+              orphanedReason: hasLiveLease
+                ? "Wrapped launch left only unverifiable provisional session state."
+                : "Wrapped launch ended before native session identity could be finalized."
+            },
+            claim: {
+              state: "orphaned",
+              updatedAt: nowIso(),
+              orphanedAt: nowIso(),
+              orphanedReason: hasLiveLease
+                ? "Wrapped launch left only unverifiable provisional session state."
+                : "Wrapped launch ended before native session identity could be finalized."
+            }
+          }
+        : {
+            attachment: {
+              state: "released",
+              updatedAt: nowIso(),
+              releasedAt: nowIso(),
+              releasedReason: "Wrapped launch did not establish a durable host session."
+            },
+            claim: {
+              state: "released",
+              updatedAt: nowIso(),
+              releasedAt: nowIso(),
+              releasedReason: "Wrapped launch did not establish a durable host session."
+            }
+          },
+      options
+    );
+    if (hasLiveLease && record) {
+      try {
+        await adapter.reconcileStaleRun(store, {
+          ...record,
+          state: "completed",
+          staleAt: nowIso(),
+          staleReason: "Wrapped launch left only unverifiable provisional session state."
+        });
+      } catch {
+        // runtime authority has already been cleared; artifact cleanup remains best-effort
+      }
+    } else if (record?.state === "running") {
+      try {
+        await adapter.releaseRunLease(store, claim.assignmentId);
+      } catch {
+        // runtime authority has already been cleared; artifact cleanup remains best-effort
+      }
+    }
+    if (shouldRequeue && assignment) {
+      effectiveProjection = await requeueAssignmentForRetry(
+        store,
+        effectiveProjection,
+        claim.assignmentId,
+        assignment.objective,
+        options
+      );
+    }
+    diagnostics.push({
+      level: "warning",
+      code: "provisional-attachment-cleared",
+      message: `Cleared provisional attachment ${attachment.id} for assignment ${claim.assignmentId} because launch did not finalize into resumable attachment truth.`
+    });
+    changed = true;
+  }
+
+  return {
+    projection: effectiveProjection,
+    changed
+  };
 }
 
 export async function reconcileActiveRuns(
@@ -138,6 +563,18 @@ export async function reconcileActiveRuns(
         effectiveProjection = replayableHydration.projection;
         changed = true;
       }
+    }
+
+    const legacyNormalization = await reconcileLegacyLeaseOnlyAuthority(
+      store,
+      effectiveProjection,
+      record,
+      diagnostics,
+      { snapshotFallback }
+    );
+    if (legacyNormalization.changed) {
+      effectiveProjection = legacyNormalization.projection;
+      changed = true;
     }
 
     const durableRuntimeCompletedRecord = isDegradedRunRecord(record)
@@ -492,6 +929,17 @@ export async function reconcileActiveRuns(
     changed ||= completedRecovery.changed;
     snapshotFallbackReplayHydrated ||= completedRecovery.replayableHydrated;
   }
+
+  const provisionalReconciliation = await reconcileProvisionalAttachmentClaims(
+    store,
+    adapter,
+    effectiveProjection,
+    diagnostics,
+    enumeratedRecordByAssignmentId,
+    { snapshotFallback }
+  );
+  effectiveProjection = provisionalReconciliation.projection;
+  changed ||= provisionalReconciliation.changed;
 
   return {
     projection: changed ? effectiveProjection : projection,
@@ -1384,7 +1832,7 @@ function buildRecoveredOutcomeEvents(
 
 export function buildOutcomeEvents(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>,
+  execution: Pick<HostExecutionOutcome, "outcome" | "run">,
   adapter: HostAdapter
 ): RuntimeEvent[] {
   const timestamp = nowIso();
@@ -1474,7 +1922,7 @@ export function projectionForRunnableAssignment(
   return selectRunnableProjection(projection, assignmentId);
 }
 
-function nextAssignmentState(execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>) {
+function nextAssignmentState(execution: Pick<HostExecutionOutcome, "outcome" | "run">) {
   if (execution.outcome.kind === "decision") {
     return "blocked" as const;
   }
@@ -1490,7 +1938,7 @@ function nextAssignmentState(execution: Awaited<ReturnType<HostAdapter["executeA
 
 function nextRuntimeStatus(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>
+  execution: Pick<HostExecutionOutcome, "outcome" | "run">
 ) {
   const assignmentId = execution.run.assignmentId;
   const terminal =
@@ -1508,7 +1956,13 @@ function nextRuntimeStatus(
         ? execution.outcome.kind === "result" && execution.outcome.capture.status === "failed"
           ? `Review failed assignment ${assignmentId}.`
           : "Await the next assignment."
-        : projection.status.currentObjective,
+        : execution.outcome.kind === "decision"
+          ? nextDecisionCurrentObjective(
+              projection,
+              assignmentId,
+              execution.outcome.capture.blockerSummary
+            )
+          : projection.status.currentObjective,
     activeAssignmentIds,
     lastDurableOutputAt: nowIso(),
     resumeReady: true
@@ -1554,9 +2008,29 @@ function nextRuntimeStatusFromRecord(
           record.terminalOutcome.result.status === "failed"
           ? `Review failed assignment ${record.assignmentId}.`
           : "Await the next assignment."
-        : projection.status.currentObjective,
+        : record.terminalOutcome?.kind === "decision"
+          ? nextDecisionCurrentObjective(
+              projection,
+              record.assignmentId,
+              record.terminalOutcome.decision.blockerSummary
+            )
+          : projection.status.currentObjective,
     activeAssignmentIds,
     lastDurableOutputAt: timestamp,
     resumeReady: true
   };
+}
+
+function nextDecisionCurrentObjective(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string,
+  blockerSummary: string
+): string {
+  const hasOpenDecision = [...projection.decisions.values()].some(
+    (decision) => decision.assignmentId === assignmentId && decision.state === "open"
+  );
+  if (hasOpenDecision) {
+    return projection.status.currentObjective;
+  }
+  return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
 }

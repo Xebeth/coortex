@@ -18,9 +18,12 @@ For the full long-term target, see:
 ### 1. Runtime truth is centralized
 The runtime owns:
 - assignments
+- runtime attachments
+- attachment-bound assignment claims
 - result packets
 - decision packets
 - lifecycle state
+- activation/setup provenance
 - verification state
 - recovery state
 
@@ -45,6 +48,7 @@ Owns the runtime domain model.
 
 Responsibilities:
 - assignment types and lifecycle
+- attachment types, claim types, and attachment provenance
 - result packets
 - decision packets
 - base host-run record shape and generic run-state rules
@@ -111,6 +115,8 @@ Responsibilities:
   of assuming one adapter's filesystem layout
 - require the hooks needed by generic host-run orchestration,
   including lease claim/release and stale-run artifact reconciliation
+- surface native session identity or native resume facts without owning
+  attachment truth
 
 Must not become a dumping ground for host-specific implementations.
 
@@ -128,6 +134,8 @@ Responsibilities:
 - normalize host outputs and telemetry back into Coortex
 - provide only the host-native execution and parsing behavior not
   covered by shared adapter infrastructure
+- keep repo-local host config and kernel/profile artifacts preparatory
+  rather than authoritative
 
 Must not own runtime truth.
 
@@ -166,9 +174,11 @@ Own operator-facing commands.
 
 Responsibilities:
 - initialization
+- host setup entrypoints
 - status
 - doctor/validation
-- resume/status surfaces
+- wrapped launch and wrapped resume surfaces
+- status/inspect surfaces
 - persist recovery-side mutations when operator commands reconcile
   durable state
 

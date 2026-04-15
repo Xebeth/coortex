@@ -223,6 +223,85 @@ test("default codex runner uses dangerous bypass when enabled", async () => {
   }
 });
 
+test("default codex runner uses exec resume with structured last-message output by default", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "coortex-codex-runner-resume-default-"));
+  const binDir = join(workspace, "bin");
+  const outputPath = join(workspace, "out", "resume-last-message.json");
+  const argsPath = join(workspace, "args.json");
+  await mkdir(binDir, { recursive: true });
+  await mkdir(dirname(outputPath), { recursive: true });
+
+  await writeCodexFixture(binDir, [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const args = process.argv.slice(2);",
+    `fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(args), 'utf8');`,
+    "const outIndex = args.indexOf('-o');",
+    "if (outIndex >= 0) {",
+    "  fs.mkdirSync(path.dirname(args[outIndex + 1]), { recursive: true });",
+    "  fs.writeFileSync(args[outIndex + 1], JSON.stringify({ ok: true }), 'utf8');",
+    "}",
+    "process.exit(0);"
+  ]);
+
+  const runner = new DefaultCodexCommandRunner();
+  const originalPath = process.env.PATH;
+  process.env.PATH = prependFixturePath(binDir, originalPath);
+  try {
+    await runner.runResume({
+      cwd: workspace,
+      sessionId: "thread-resume-default",
+      prompt: "resume prompt",
+      outputPath
+    });
+
+    const args = JSON.parse(await readFile(argsPath, "utf8")) as string[];
+    assert.deepEqual(args.slice(0, 4), ["exec", "resume", "--json", "thread-resume-default"]);
+    assert.ok(args.includes("--full-auto"));
+    assert.ok(!args.includes("--dangerously-bypass-approvals-and-sandbox"));
+    assert.ok(args.includes("-o"));
+    assert.ok(args.includes(outputPath));
+    assert.equal(args.at(-1), "resume prompt");
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("default codex runner uses dangerous bypass for exec resume when enabled", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "coortex-codex-runner-resume-danger-"));
+  const binDir = join(workspace, "bin");
+  const outputPath = join(workspace, "out", "resume-last-message.json");
+  const argsPath = join(workspace, "args.json");
+  await mkdir(binDir, { recursive: true });
+  await mkdir(dirname(outputPath), { recursive: true });
+
+  await writeCodexFixture(binDir, [
+    "const fs = require('fs');",
+    `fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)), 'utf8');`,
+    "process.exit(0);"
+  ]);
+
+  const runner = new DefaultCodexCommandRunner({
+    dangerouslyBypassApprovalsAndSandbox: true
+  });
+  const originalPath = process.env.PATH;
+  process.env.PATH = prependFixturePath(binDir, originalPath);
+  try {
+    await runner.runResume({
+      cwd: workspace,
+      sessionId: "thread-resume-danger",
+      outputPath
+    });
+
+    const args = JSON.parse(await readFile(argsPath, "utf8")) as string[];
+    assert.deepEqual(args.slice(0, 4), ["exec", "resume", "--json", "thread-resume-danger"]);
+    assert.ok(args.includes("--dangerously-bypass-approvals-and-sandbox"));
+    assert.ok(!args.includes("--full-auto"));
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

@@ -46,10 +46,13 @@ Coortex is organized into these layers:
 The core runtime is the source of truth for:
 
 - assignments
+- runtime attachments
+- attachment-bound claims
 - result packets
 - decision packets
 - lifecycle state
 - ownership/claims
+- init/setup/activation provenance
 - recovery state
 - verification state
 
@@ -84,8 +87,11 @@ Responsibilities:
 
 - load durable state
 - reconcile current view
-- handle stale claims/leases in later phases
+- handle stale claims/leases and legacy lease-only normalization
 - generate a compact recovery brief
+- prefer same-session reclaim before orphan/requeue when the host supports it
+- treat snapshot-only state as non-event-backed truth and avoid
+  recreating truncated authority from it
 
 Recovery must not depend on transcript replay.
 
@@ -120,11 +126,11 @@ An adapter contract defines what a host integration must provide.
 
 A host adapter should expose at least:
 
-- startup/resume integration
+- wrapped launch/resume integration
 - bounded task-envelope injection
 - result/decision capture
 - telemetry extraction or normalization
-- lifecycle event integration
+- lifecycle event integration, including native session identity callbacks
 - capability reporting
 
 Host adapters must not redefine runtime truth.

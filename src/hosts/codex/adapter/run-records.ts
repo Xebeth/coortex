@@ -64,10 +64,12 @@ export function parseExecJsonl(stdout: string): {
   threadId?: string;
   errorMessage?: string;
   usage?: import("../../../adapters/contract.js").HostTelemetryCapture["usage"];
+  lastAgentMessage?: string;
 } {
   let threadId: string | undefined;
   let errorMessage: string | undefined;
   let usage: import("../../../adapters/contract.js").HostTelemetryCapture["usage"];
+  let lastAgentMessage: string | undefined;
 
   for (const line of stdout.split("\n")) {
     const trimmed = line.trim();
@@ -105,6 +107,17 @@ export function parseExecJsonl(stdout: string): {
             : {})
         };
       }
+      if (
+        event.type === "item.completed" &&
+        event.item &&
+        typeof event.item === "object" &&
+        !Array.isArray(event.item)
+      ) {
+        const item = event.item as Record<string, unknown>;
+        if (item.type === "agent_message" && typeof item.text === "string" && item.text.length > 0) {
+          lastAgentMessage = item.text;
+        }
+      }
     } catch {
       continue;
     }
@@ -113,7 +126,8 @@ export function parseExecJsonl(stdout: string): {
   return {
     ...(threadId ? { threadId } : {}),
     ...(errorMessage ? { errorMessage } : {}),
-    ...(usage ? { usage } : {})
+    ...(usage ? { usage } : {}),
+    ...(lastAgentMessage ? { lastAgentMessage } : {})
   };
 }
 

@@ -820,11 +820,12 @@ test("ctx run exits 0 and records a decision outcome from a fixture", async () =
       recommendedOption: string;
       state: string;
     }>;
-    status: { activeAssignmentIds: string[] };
+    status: { activeAssignmentIds: string[]; currentObjective: string };
   };
 
   assert.equal(snapshot.assignments[0]?.state, "blocked");
   assert.equal(snapshot.assignments[0]?.id, snapshot.status.activeAssignmentIds[0]);
+  assert.equal(snapshot.status.currentObjective, "Need operator guidance before proceeding.");
   assert.equal(snapshot.decisions.length, 1);
   assert.equal(snapshot.decisions[0]?.assignmentId, snapshot.assignments[0]?.id);
   assert.equal(snapshot.decisions[0]?.state, "open");
@@ -1285,9 +1286,10 @@ test("ctx status and resume surface hidden snapshot-fallback active lease blocke
   assert.equal(finalEnvelope, initialEnvelope);
 });
 
-test("ctx status and resume surface in-projection authoritative lease blockers", async () => {
+test("ctx status normalizes in-projection legacy leases and ctx resume reclaims the synthesized attachment", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-in-projection-active-lease-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const resumeFixturePath = join(projectRoot, "codex-resume-fixture.json");
 
   await execFileAsync(process.execPath, [cliPath, "init"], {
     cwd: projectRoot
@@ -1405,6 +1407,27 @@ test("ctx status and resume surface in-projection authoritative lease blockers",
     JSON.stringify(activeLease, null, 2),
     "utf8"
   );
+  await writeFile(
+    resumeFixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [{ type: "thread.resumed", thread_id: "thread-cli-in-projection-active-lease" }],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "partial",
+          resultSummary: "CLI wrapped resume captured partial progress.",
+          changedFiles: ["src/cli/commands.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
 
   const initialEnvelope = await readFile(
     join(runtimeDir, "runtime", "last-resume-envelope.json"),
@@ -1413,31 +1436,66 @@ test("ctx status and resume surface in-projection authoritative lease blockers",
   const status = await runCliCommand(cliPath, "status", {
     cwd: projectRoot
   });
+  const resumeEnv = {
+    ...process.env,
+    COORTEX_CODEX_RESUME_FIXTURE: resumeFixturePath
+  };
   const resume = await runCliCommand(cliPath, "resume", {
-    cwd: projectRoot
+    cwd: projectRoot,
+    env: resumeEnv
   });
   const finalEnvelope = await readFile(
     join(runtimeDir, "runtime", "last-resume-envelope.json"),
     "utf8"
   );
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    attachments: Array<{ id: string; state: string; nativeSessionId?: string }>;
+    claims: Array<{ assignmentId: string; state: string }>;
+  };
+  const repairedEnvelope = JSON.parse(finalEnvelope) as {
+    metadata?: { activeAssignmentId?: string };
+  };
 
   assert.equal(status.exitCode, 0);
   assert.match(status.stderr, /WARNING active-run-present .*active host run lease/);
+  assert.match(status.stderr, /WARNING legacy-lease-normalized/);
   assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Authoritative host leases: 1/);
+  assert.match(status.stdout, /Provisional attachments: 0/);
+  assert.match(status.stdout, /Authoritative attachments: 1/);
+  assert.match(status.stdout, /Resumable attachments: 1/);
   assert.match(
     status.stdout,
     new RegExp(
       `- ${authoritativeAssignmentId} active host run lease within the current projection but outside the current active assignment set`
     )
   );
-  assert.equal(resume.exitCode, 1);
-  assert.doesNotMatch(resume.stdout, /Recovery brief generated/);
   assert.match(
-    resume.stderr,
-    new RegExp(`Assignment ${authoritativeAssignmentId} already has an active host run lease\\.`)
+    status.stdout,
+    /- attachment .* detached_resumable assignment .* native-session thread-cli-in-projection-active-lease/
   );
-  assert.equal(finalEnvelope, initialEnvelope);
+  assert.equal(resume.exitCode, 0);
+  assert.match(resume.stdout, /Reclaimed attachment/);
+  assert.match(resume.stdout, /Host session: thread-cli-in-projection-active-lease/);
+  assert.doesNotMatch(resume.stdout, /Recovery brief generated/);
+  assert.equal(repairedEnvelope.metadata?.activeAssignmentId, authoritativeAssignmentId);
+  assert.equal(repairedSnapshot.attachments.length, 1);
+  assert.equal(repairedSnapshot.attachments[0]?.state, "detached_resumable");
+  assert.equal(
+    repairedSnapshot.attachments[0]?.nativeSessionId,
+    "thread-cli-in-projection-active-lease"
+  );
+  assert.deepEqual(repairedSnapshot.claims.map((claim) => ({
+    assignmentId: claim.assignmentId,
+    state: claim.state
+  })), [
+    {
+      assignmentId: authoritativeAssignmentId,
+      state: "active"
+    }
+  ]);
 });
 
 test("ctx status recovers a completed host run and clears a leftover lease", async () => {

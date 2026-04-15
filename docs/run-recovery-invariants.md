@@ -28,6 +28,8 @@ Adapters must expose explicit hooks for:
 - lease release for abandoned pre-launch claims
 - stale-run artifact reconciliation after runtime state is durably
   updated
+- verified same-session resume callbacks or result surfaces that let the
+  runtime reject foreign reclaim and persist wrapped-resume outcomes
 
 Related documents:
 
@@ -207,11 +209,20 @@ runtime truth on their own.
 
 - `ctx resume`
   Must build its brief from reconciled runtime state.
+  When wrapped same-session reclaim is verified, it must persist result
+  or decision outcomes through the same normalized runtime-event path as
+  `ctx run`.
 
 - `ctx run`
   Must refuse execution if a valid active lease is present.
   When multiple active assignments exist, it must build the envelope and
   recovery brief from the assignment actually being executed.
+
+- `ctx run` and `ctx resume`
+  When a new or recovered decision becomes the active state, the
+  operator-facing `currentObjective` must stop pointing at stale
+  pre-decision work and instead reflect the blocker summary unless the
+  runtime already has newer decision-specific status text.
 
 ---
 
@@ -289,6 +300,12 @@ The test suite should explicitly cover:
   truth
 - durable completed decision recovered into runtime truth
 - durable completed decision recovered at the command surface
+- verified wrapped resume persists partial progress and returns the
+  attachment to resumable state
+- verified wrapped resume persists decision outcomes through the same
+  runtime-owned path as launch
+- verified wrapped resume with a terminal result releases attachment
+  authority
 - stale and completed reconciliation are visible through the command
   surfaces that own them
 - completed-run recovery is idempotent for results and decisions

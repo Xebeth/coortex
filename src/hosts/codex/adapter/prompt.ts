@@ -15,6 +15,7 @@ export interface CodexStructuredOutcome {
 }
 
 export function buildCodexExecutionPrompt(envelope: TaskEnvelope): string {
+  const schema = codexExecutionOutputSchema();
   return [
     "You are executing a Coortex assignment through the Codex host adapter.",
     "Treat the bounded envelope below as the runtime-owned source of truth.",
@@ -22,7 +23,11 @@ export function buildCodexExecutionPrompt(envelope: TaskEnvelope): string {
     "If you can make progress safely, do the work and return a result outcome.",
     "If you are blocked on missing information, an irreversible choice, or an external dependency, return a decision outcome.",
     "Always return structured data that matches the provided schema.",
+    "Your final message must be a JSON object and nothing else.",
     "Use concise durable summaries.",
+    "",
+    "Structured output schema:",
+    JSON.stringify(schema, null, 2),
     "",
     "Bounded envelope:",
     JSON.stringify(envelope, null, 2)

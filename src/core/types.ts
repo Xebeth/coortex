@@ -53,6 +53,64 @@ export interface RuntimeStatus {
   resumeReady: boolean;
 }
 
+export type AttachmentState =
+  | "provisional"
+  | "attached"
+  | "detached_resumable"
+  | "released"
+  | "orphaned";
+
+export interface RuntimeAttachment {
+  id: string;
+  adapter: string;
+  host: string;
+  state: AttachmentState;
+  createdAt: string;
+  updatedAt: string;
+  provenance: {
+    kind: "launch" | "legacy_normalization";
+    source: "ctx.run" | "legacy_live_lease";
+  };
+  nativeSessionId?: string;
+  attachedAt?: string;
+  detachedAt?: string;
+  releasedAt?: string;
+  releasedReason?: string;
+  orphanedAt?: string;
+  orphanedReason?: string;
+  adapterMetadata?: Record<string, unknown>;
+}
+
+export type AssignmentClaimState = "active" | "released" | "orphaned";
+
+export interface AssignmentClaim {
+  id: string;
+  assignmentId: string;
+  attachmentId: string;
+  state: AssignmentClaimState;
+  createdAt: string;
+  updatedAt: string;
+  provenance: {
+    kind: "launch" | "legacy_normalization";
+    source: "ctx.run" | "legacy_live_lease";
+  };
+  releasedAt?: string;
+  releasedReason?: string;
+  orphanedAt?: string;
+  orphanedReason?: string;
+}
+
+export interface RuntimeProvenance {
+  initializedAt?: string;
+  hostSetupAt?: string;
+  lastActivation?: {
+    kind: "launch" | "resume";
+    attachmentId: string;
+    assignmentId: string;
+    at: string;
+  };
+}
+
 export interface RecoveryBrief {
   activeObjective: string;
   activeAssignments: Array<{
@@ -138,6 +196,9 @@ export interface RuntimeSnapshot {
   assignments: Assignment[];
   results: ResultPacket[];
   decisions: DecisionPacket[];
+  attachments?: RuntimeAttachment[];
+  claims?: AssignmentClaim[];
+  provenance?: RuntimeProvenance;
   lastEventId?: string;
 }
 
@@ -149,5 +210,8 @@ export interface RuntimeProjection {
   assignments: Map<string, Assignment>;
   results: Map<string, ResultPacket>;
   decisions: Map<string, DecisionPacket>;
+  attachments: Map<string, RuntimeAttachment>;
+  claims: Map<string, AssignmentClaim>;
+  provenance: RuntimeProvenance;
   lastEventId?: string;
 }

@@ -11,7 +11,8 @@ export async function deriveExecutionOutcome(
   completedAt: string,
   execution: { exitCode: number; stderr: string },
   outputPath: string,
-  errorMessage?: string
+  errorMessage?: string,
+  transcriptLastMessage?: string
 ): Promise<CodexExecutionWithoutArtifacts> {
   if (execution.exitCode !== 0) {
     return buildFailedOutcome(
@@ -22,7 +23,7 @@ export async function deriveExecutionOutcome(
   }
 
   try {
-    const lastMessage = await loadValidatedStructuredOutcome(outputPath);
+    const lastMessage = await loadValidatedStructuredOutcome(outputPath, transcriptLastMessage);
     return normalizeStructuredOutcome(assignmentId, completedAt, lastMessage);
   } catch (error) {
     return buildFailedOutcome(
@@ -120,10 +121,94 @@ function normalizeStructuredOutcome(
   };
 }
 
-async function loadValidatedStructuredOutcome(path: string): Promise<CodexStructuredOutcome> {
+async function loadValidatedStructuredOutcome(
+  path: string,
+  transcriptLastMessage?: string
+): Promise<CodexStructuredOutcome> {
   const { readFile } = await import("node:fs/promises");
-  const raw = await readFile(path, "utf8");
-  return validateCodexStructuredOutcome(JSON.parse(raw));
+  try {
+    const raw = await readFile(path, "utf8");
+    return parseValidatedStructuredOutcome(raw);
+  } catch (fileError) {
+    if (typeof transcriptLastMessage === "string" && transcriptLastMessage.trim().length > 0) {
+      return parseValidatedStructuredOutcome(transcriptLastMessage);
+    }
+    throw fileError;
+  }
+}
+
+function parseValidatedStructuredOutcome(raw: string): CodexStructuredOutcome {
+  return validateCodexStructuredOutcome(parseStructuredOutcomeJson(raw));
+}
+
+function parseStructuredOutcomeJson(raw: string): unknown {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const unfenced = unwrapCodeFence(trimmed);
+    if (unfenced !== trimmed) {
+      try {
+        return JSON.parse(unfenced);
+      } catch {
+        // fall through to object extraction
+      }
+    }
+    const extracted = extractFirstJsonObject(unfenced);
+    if (!extracted) {
+      throw new Error("Codex structured output did not contain a valid JSON object.");
+    }
+    return JSON.parse(extracted);
+  }
+}
+
+function unwrapCodeFence(raw: string): string {
+  const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  return fenced ? fenced[1]!.trim() : raw;
+}
+
+function extractFirstJsonObject(raw: string): string | undefined {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+    if (inString) {
+      continue;
+    }
+    if (char === "{") {
+      if (depth === 0) {
+        start = index;
+      }
+      depth += 1;
+      continue;
+    }
+    if (char === "}") {
+      if (depth === 0) {
+        continue;
+      }
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        return raw.slice(start, index + 1);
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function summarizeCodexFailure(

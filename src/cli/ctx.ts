@@ -133,6 +133,18 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
   const openDecisions = [...projection.decisions.values()].filter((decision) => decision.state === "open");
+  const attachments = [...projection.attachments.values()].sort((left, right) =>
+    left.createdAt.localeCompare(right.createdAt)
+  );
+  const activeClaims = [...projection.claims.values()].filter((claim) => claim.state === "active");
+  const provisionalAttachments = attachments.filter((attachment) => attachment.state === "provisional");
+  const authoritativeAttachments = attachments.filter((attachment) =>
+    attachment.state === "attached" ||
+    attachment.state === "detached_resumable"
+  );
+  const resumableAttachments = attachments.filter((attachment) =>
+    attachment.state === "attached" || attachment.state === "detached_resumable"
+  );
 
   console.log(`Session: ${projection.sessionId}`);
   console.log(`Objective: ${projection.status.currentObjective}`);
@@ -143,10 +155,26 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   if (activeLeases.length > 0) {
     console.log(`Authoritative host leases: ${activeLeases.length}`);
   }
+  console.log(`Provisional attachments: ${provisionalAttachments.length}`);
+  console.log(`Authoritative attachments: ${authoritativeAttachments.length}`);
+  console.log(`Resumable attachments: ${resumableAttachments.length}`);
+  console.log(`Active attachment claims: ${activeClaims.length}`);
+  console.log(`Active host run leases: ${activeLeases.length}`);
   console.log(`Results: ${projection.results.size}`);
   console.log(`Open decisions: ${openDecisions.length}`);
   for (const assignment of activeAssignments) {
     console.log(`- ${assignment.id} ${assignment.state} ${assignment.objective}`);
+  }
+  for (const attachment of attachments) {
+    const claim = [...projection.claims.values()]
+      .filter((candidate) => candidate.attachmentId === attachment.id)
+      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+      .at(-1);
+    console.log(
+      `- attachment ${attachment.id} ${attachment.state} assignment ${claim?.assignmentId ?? "n/a"} native-session ${
+        attachment.nativeSessionId ?? "n/a"
+      }`
+    );
   }
   for (const assignmentId of activeLeases) {
     if (hiddenActiveLeases.includes(assignmentId)) {
@@ -172,12 +200,22 @@ async function resumeCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     return;
   }
 
-  const { projection, envelope, envelopePath, diagnostics } = await resumeRuntime(store, adapter);
+  const resumed = await resumeRuntime(store, adapter);
+  if (resumed.mode === "reclaimed") {
+    console.log(
+      `Reclaimed attachment ${resumed.attachment.id} for assignment ${resumed.claim.assignmentId}`
+    );
+    if (resumed.attachment.nativeSessionId) {
+      console.log(`Host session: ${resumed.attachment.nativeSessionId}`);
+    }
+    printDiagnostics(resumed.diagnostics);
+    return;
+  }
 
-  console.log(`Recovery brief generated for ${projection.status.currentObjective}`);
-  console.log(`Envelope: ${resolve(envelopePath)}`);
-  console.log(toPrettyJson(envelope).trimEnd());
-  printDiagnostics(diagnostics);
+  console.log(`Recovery brief generated for ${resumed.projection.status.currentObjective}`);
+  console.log(`Envelope: ${resolve(resumed.envelopePath)}`);
+  console.log(toPrettyJson(resumed.envelope).trimEnd());
+  printDiagnostics(resumed.diagnostics);
 }
 
 async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<void> {
@@ -239,7 +277,28 @@ async function inspectCommand(
     return;
   }
 
-  console.log(toPrettyJson(record).trimEnd());
+  const projection = (await loadReconciledProjectionWithDiagnostics(store, adapter)).projection;
+  const claim = [...projection.claims.values()]
+    .filter((candidate) => candidate.assignmentId === record.assignmentId)
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+    .at(-1);
+  const attachment = claim ? projection.attachments.get(claim.attachmentId) : undefined;
+  console.log(
+    toPrettyJson({
+      ...record,
+      ...(attachment
+        ? {
+            attachment: {
+              id: attachment.id,
+              state: attachment.state,
+              nativeSessionId: attachment.nativeSessionId ?? "",
+              claimId: claim?.id ?? "",
+              claimState: claim?.state ?? ""
+            }
+          }
+        : {})
+    }).trimEnd()
+  );
 }
 
 function printUsage(): void {

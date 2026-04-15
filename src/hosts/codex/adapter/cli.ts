@@ -11,6 +11,15 @@ export interface CodexExecInput {
   onEvent?: (event: Record<string, unknown>) => Promise<void> | void;
 }
 
+export interface CodexResumeInput {
+  cwd: string;
+  sessionId: string;
+  prompt?: string;
+  outputPath: string;
+  dangerouslyBypassApprovalsAndSandbox?: boolean;
+  onEvent?: (event: Record<string, unknown>) => Promise<void> | void;
+}
+
 export interface CodexExecResult {
   exitCode: number;
   stdout: string;
@@ -28,44 +37,135 @@ export interface RunningExec {
 export interface CodexCommandRunner {
   startExec(input: CodexExecInput): Promise<RunningExec>;
   runExec(input: CodexExecInput): Promise<CodexExecResult>;
+  startResume?(input: CodexResumeInput): Promise<RunningExec>;
+  runResume?(input: CodexResumeInput): Promise<CodexExecResult>;
 }
 
 export interface CodexCommandRunnerOptions {
   dangerouslyBypassApprovalsAndSandbox?: boolean;
 }
 
+interface JsonlCommandOptions {
+  cwd: string;
+  args: string[];
+  outputPath: string;
+  timeoutLabel: "exec" | "resume";
+  fixturePath?: string;
+  initialHostRunId?: string;
+  captureHostRunId?: (event: Record<string, unknown>) => string | undefined;
+  onEvent?: (event: Record<string, unknown>) => Promise<void> | void;
+}
+
 export class DefaultCodexCommandRunner implements CodexCommandRunner {
   constructor(private readonly options: CodexCommandRunnerOptions = {}) {}
 
   async startExec(input: CodexExecInput): Promise<RunningExec> {
+    const options: JsonlCommandOptions = {
+      cwd: input.cwd,
+      args: [
+        "exec",
+        "--json",
+        ...(this.shouldDangerouslyBypass(input)
+          ? ["--dangerously-bypass-approvals-and-sandbox"]
+          : ["--sandbox", "workspace-write"]),
+        "-C",
+        input.cwd,
+        "--output-schema",
+        input.outputSchemaPath,
+        "-o",
+        input.outputPath,
+        input.prompt
+      ],
+      outputPath: input.outputPath,
+      timeoutLabel: "exec",
+      captureHostRunId: readStartedThreadId,
+      ...(input.onEvent ? { onEvent: input.onEvent } : {})
+    };
     const fixturePath = process.env.COORTEX_CODEX_EXEC_FIXTURE;
     if (fixturePath) {
-      return startFixture(fixturePath, input.outputPath, input.onEvent);
+      options.fixturePath = fixturePath;
+    }
+    return this.startJsonlCommand(options);
+  }
+
+  async runExec(input: CodexExecInput): Promise<CodexExecResult> {
+    return (await this.startExec(input)).result;
+  }
+
+  async startResume(input: CodexResumeInput): Promise<RunningExec> {
+    const options: JsonlCommandOptions = {
+      cwd: input.cwd,
+      args: [
+        "exec",
+        "resume",
+        "--json",
+        input.sessionId,
+        ...(this.shouldDangerouslyBypass(input)
+          ? ["--dangerously-bypass-approvals-and-sandbox"]
+          : ["--full-auto"]),
+        "-o",
+        input.outputPath,
+        ...(input.prompt && input.prompt.length > 0 ? [input.prompt] : [])
+      ],
+      outputPath: input.outputPath,
+      timeoutLabel: "resume",
+      initialHostRunId: input.sessionId,
+      captureHostRunId: readThreadEventId,
+      ...(input.onEvent ? { onEvent: input.onEvent } : {})
+    };
+    const fixturePath = process.env.COORTEX_CODEX_RESUME_FIXTURE;
+    if (fixturePath) {
+      options.fixturePath = fixturePath;
+    }
+    return this.startJsonlCommand(options);
+  }
+
+  async runResume(input: CodexResumeInput): Promise<CodexExecResult> {
+    return (await this.startResume(input)).result;
+  }
+
+  describeExecutionMode(): string {
+    return this.options.dangerouslyBypassApprovalsAndSandbox === true
+      ? "dangerously bypass approvals and sandbox"
+      : "sandbox workspace-write";
+  }
+
+  private shouldDangerouslyBypass(
+    input: Pick<CodexExecInput, "dangerouslyBypassApprovalsAndSandbox">
+      | Pick<CodexResumeInput, "dangerouslyBypassApprovalsAndSandbox">
+  ): boolean {
+    return (
+      input.dangerouslyBypassApprovalsAndSandbox ??
+      this.options.dangerouslyBypassApprovalsAndSandbox ??
+      false
+    );
+  }
+
+  private async startJsonlCommand(options: JsonlCommandOptions): Promise<RunningExec> {
+    if (options.fixturePath) {
+      const fixtureOptions: Parameters<typeof startFixture>[1] = {
+        outputPath: options.outputPath
+      };
+      if (options.initialHostRunId) {
+        fixtureOptions.initialHostRunId = options.initialHostRunId;
+      }
+      if (options.captureHostRunId) {
+        fixtureOptions.captureHostRunId = options.captureHostRunId;
+      }
+      if (options.onEvent) {
+        fixtureOptions.onEvent = options.onEvent;
+      }
+      return startFixture(options.fixturePath, fixtureOptions);
     }
 
-    await mkdir(dirname(input.outputPath), { recursive: true });
+    await mkdir(dirname(options.outputPath), { recursive: true });
 
-    const args = [
-      "exec",
-      "--json",
-      ...(this.shouldDangerouslyBypass(input)
-        ? ["--dangerously-bypass-approvals-and-sandbox"]
-        : ["--sandbox", "workspace-write"]),
-      "-C",
-      input.cwd,
-      "--output-schema",
-      input.outputSchemaPath,
-      "-o",
-      input.outputPath,
-      input.prompt
-    ];
-
-    const child = spawn("codex", args, {
-        cwd: input.cwd,
-        detached: process.platform !== "win32",
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
+    const child = spawn("codex", options.args, {
+      cwd: options.cwd,
+      detached: process.platform !== "win32",
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
 
     let stdout = "";
     let stderr = "";
@@ -75,24 +175,24 @@ export class DefaultCodexCommandRunner implements CodexCommandRunner {
     let exited = false;
 
     const running: RunningExec = {
+      ...(options.initialHostRunId ? { hostRunId: options.initialHostRunId } : {}),
       ...(typeof child.pid === "number" ? { pid: child.pid } : {}),
       result: new Promise<CodexExecResult>((resolve, reject) => {
+        const handleEvent = async (event: Record<string, unknown>) => {
+          const hostRunId = options.captureHostRunId?.(event);
+          if (hostRunId) {
+            running.hostRunId = hostRunId;
+          }
+          await options.onEvent?.(event);
+        };
+
         child.stdout.setEncoding("utf8");
         child.stderr.setEncoding("utf8");
         child.stdout.on("data", (chunk: string) => {
           stdout += chunk;
           stdoutBuffer += chunk;
           eventDrain = eventDrain.then(async () => {
-            stdoutBuffer = await emitJsonEvents(stdoutBuffer, async (event) => {
-              if (
-                event.type === "thread.started" &&
-                typeof event.thread_id === "string" &&
-                event.thread_id.length > 0
-              ) {
-                running.hostRunId = event.thread_id;
-              }
-              await input.onEvent?.(event);
-            });
+            stdoutBuffer = await emitJsonEvents(stdoutBuffer, handleEvent);
           });
         });
         child.stderr.on("data", (chunk: string) => {
@@ -104,16 +204,7 @@ export class DefaultCodexCommandRunner implements CodexCommandRunner {
           exited = true;
           void eventDrain
             .then(async () => {
-              stdoutBuffer = await emitFinalJsonEvent(stdoutBuffer, async (event) => {
-                if (
-                  event.type === "thread.started" &&
-                  typeof event.thread_id === "string" &&
-                  event.thread_id.length > 0
-                ) {
-                  running.hostRunId = event.thread_id;
-                }
-                await input.onEvent?.(event);
-              });
+              stdoutBuffer = await emitFinalJsonEvent(stdoutBuffer, handleEvent);
               resolve({
                 exitCode: exitCode ?? 1,
                 stdout,
@@ -153,7 +244,11 @@ export class DefaultCodexCommandRunner implements CodexCommandRunner {
         let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
-            reject(new Error(`Timed out waiting for codex exec ${child.pid ?? "unknown"} to exit.`));
+            reject(
+              new Error(
+                `Timed out waiting for codex ${options.timeoutLabel} ${child.pid ?? "unknown"} to exit.`
+              )
+            );
           }, timeoutMs);
         });
         try {
@@ -170,24 +265,6 @@ export class DefaultCodexCommandRunner implements CodexCommandRunner {
 
     return running;
   }
-
-  async runExec(input: CodexExecInput): Promise<CodexExecResult> {
-    return (await this.startExec(input)).result;
-  }
-
-  describeExecutionMode(): string {
-    return this.options.dangerouslyBypassApprovalsAndSandbox === true
-      ? "dangerously bypass approvals and sandbox"
-      : "sandbox workspace-write";
-  }
-
-  private shouldDangerouslyBypass(input: CodexExecInput): boolean {
-    return (
-      input.dangerouslyBypassApprovalsAndSandbox ??
-      this.options.dangerouslyBypassApprovalsAndSandbox ??
-      false
-    );
-  }
 }
 
 interface FixturePayload {
@@ -199,30 +276,43 @@ interface FixturePayload {
 
 async function startFixture(
   fixturePath: string,
-  outputPath: string,
-  onEvent?: (event: Record<string, unknown>) => Promise<void> | void
+  options: {
+    outputPath?: string;
+    initialHostRunId?: string;
+    captureHostRunId?: (event: Record<string, unknown>) => string | undefined;
+    onEvent?: (event: Record<string, unknown>) => Promise<void> | void;
+  }
 ): Promise<RunningExec> {
   const raw = JSON.parse(await readFile(fixturePath, "utf8")) as FixturePayload;
   let running!: RunningExec;
+  const result = Promise.resolve().then(async () => {
+    const handleEvent = async (event: Record<string, unknown>) => {
+      const hostRunId = options.captureHostRunId?.(event);
+      if (hostRunId) {
+        running.hostRunId = hostRunId;
+      }
+      await options.onEvent?.(event);
+    };
+    for (const line of raw.stdoutLines ?? []) {
+      if (line && typeof line === "object" && !Array.isArray(line)) {
+        await handleEvent(line as Record<string, unknown>);
+      }
+    }
+    if (raw.lastMessage !== undefined && options.outputPath) {
+      await mkdir(dirname(options.outputPath), { recursive: true });
+      await writeFile(options.outputPath, JSON.stringify(raw.lastMessage, null, 2), "utf8");
+    }
+    return {
+      exitCode: raw.exitCode ?? 0,
+      stdout: `${(raw.stdoutLines ?? []).map((line) => JSON.stringify(line)).join("\n")}${
+        (raw.stdoutLines ?? []).length > 0 ? "\n" : ""
+      }`,
+      stderr: raw.stderr ?? ""
+    };
+  });
   running = {
-    result: (async () => {
-      for (const line of raw.stdoutLines ?? []) {
-        if (line && typeof line === "object" && !Array.isArray(line)) {
-          await onEvent?.(line as Record<string, unknown>);
-        }
-      }
-      if (raw.lastMessage !== undefined) {
-        await mkdir(dirname(outputPath), { recursive: true });
-        await writeFile(outputPath, JSON.stringify(raw.lastMessage, null, 2), "utf8");
-      }
-      return {
-        exitCode: raw.exitCode ?? 0,
-        stdout: `${(raw.stdoutLines ?? []).map((line) => JSON.stringify(line)).join("\n")}${
-          (raw.stdoutLines ?? []).length > 0 ? "\n" : ""
-        }`,
-        stderr: raw.stderr ?? ""
-      };
-    })(),
+    ...(options.initialHostRunId ? { hostRunId: options.initialHostRunId } : {}),
+    result,
     terminate: async () => undefined,
     waitForExit: async () => {
       const result = await running.result;
@@ -230,6 +320,16 @@ async function startFixture(
     }
   };
   return running;
+}
+
+function readStartedThreadId(event: Record<string, unknown>): string | undefined {
+  return event.type === "thread.started" ? readThreadEventId(event) : undefined;
+}
+
+function readThreadEventId(event: Record<string, unknown>): string | undefined {
+  return typeof event.thread_id === "string" && event.thread_id.length > 0
+    ? event.thread_id
+    : undefined;
 }
 
 async function emitJsonEvents(

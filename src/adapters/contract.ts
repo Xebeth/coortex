@@ -1,4 +1,8 @@
-import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
+import type {
+  RecoveryBrief,
+  RuntimeAttachment,
+  RuntimeProjection
+} from "../core/types.js";
 import type { DecisionPacket, HostRunRecord, ResultPacket } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
 
@@ -17,7 +21,10 @@ export interface RuntimeArtifactStore {
 export interface AdapterCapabilities {
   supportsProfiles: boolean;
   supportsHooks: boolean;
-  supportsResume: boolean;
+  supportsResume?: boolean;
+  supportsRecoveryEnvelope?: boolean;
+  supportsSessionIdentity?: boolean;
+  supportsNativeSessionResume?: boolean;
   supportsFork: boolean;
   supportsExactUsage: boolean;
   supportsCompactionHooks: boolean;
@@ -90,6 +97,11 @@ export interface HostTelemetryCapture {
   >;
 }
 
+export interface HostSessionIdentity {
+  nativeSessionId: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface HostExecutionOutcome {
   outcome:
     | { kind: "result"; capture: HostResultCapture }
@@ -98,6 +110,32 @@ export interface HostExecutionOutcome {
   telemetry?: HostTelemetryCapture;
   warning?: string;
 }
+
+export interface HostSessionLifecycle {
+  onSessionIdentity?(identity: HostSessionIdentity): Promise<void>;
+}
+
+interface HostSessionResumeResultBase {
+  requestedSessionId: string;
+  nativeSessionId: string;
+  observedSessionId?: string;
+  sessionVerified: boolean;
+  exitCode: number;
+  stoppedAt: string;
+  metadata?: Record<string, unknown>;
+  telemetry?: HostTelemetryCapture;
+  warning?: string;
+}
+
+export type HostSessionResumeResult =
+  | (HostSessionResumeResultBase & {
+      reclaimed: false;
+    })
+  | (HostSessionResumeResultBase & {
+      reclaimed: true;
+      outcome: HostExecutionOutcome["outcome"];
+      run: HostRunRecord;
+    });
 
 export interface HostAdapter {
   readonly id: string;
@@ -115,8 +153,16 @@ export interface HostAdapter {
     store: RuntimeArtifactStore,
     projection: RuntimeProjection,
     envelope: TaskEnvelope,
-    claimedRun?: HostRunRecord
+    claimedRun?: HostRunRecord,
+    lifecycle?: HostSessionLifecycle
   ): Promise<HostExecutionOutcome>;
+  resumeSession?(
+    store: RuntimeArtifactStore,
+    projection: RuntimeProjection,
+    envelope: TaskEnvelope,
+    attachment: RuntimeAttachment,
+    lifecycle?: HostSessionLifecycle
+  ): Promise<HostSessionResumeResult>;
   claimRunLease(
     store: RuntimeArtifactStore,
     projection: RuntimeProjection,

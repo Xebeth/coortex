@@ -118,3 +118,112 @@ test("recovery brief generation is deterministic for unchanged durable state", a
 
   assert.deepEqual(second, first);
 });
+
+test("recovery brief can suppress attachment-resume next actions when wrapped reclaim is unavailable", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-manual-resume-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  const decisionId = randomUUID();
+
+  const events: RuntimeEvent[] = [
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId: "thread-recovery-brief",
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: claimId,
+          assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "decision.created",
+      payload: {
+        decision: {
+          decisionId,
+          assignmentId,
+          requesterId: "worker-1",
+          blockerSummary: "Need a human decision before continuing.",
+          options: [
+            { id: "wait", label: "Wait", summary: "Pause for input." },
+            { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+          ],
+          recommendedOption: "wait",
+          state: "open",
+          createdAt: timestamp
+        }
+      }
+    }
+  ];
+  for (const event of events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const wrapped = buildRecoveryBrief(projection);
+  const manual = buildRecoveryBrief(projection, {
+    allowAttachmentResumeAction: false
+  });
+
+  assert.match(wrapped.nextRequiredAction, /Resume attachment/);
+  assert.match(manual.nextRequiredAction, /Resolve decision/);
+});

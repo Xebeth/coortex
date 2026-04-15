@@ -9,6 +9,8 @@ import type {
   HostDecisionCapture,
   HostExecutionOutcome,
   HostResultCapture,
+  HostSessionLifecycle,
+  HostSessionResumeResult,
   HostTelemetryCapture,
   RuntimeArtifactStore,
   TaskEnvelope
@@ -30,10 +32,11 @@ import type { CodexPaths } from "./types.js";
 import { writeCodexKernel } from "../kernel/static.js";
 import { CodexProfileManager } from "../profile/manager.js";
 import {
-  DefaultCodexCommandRunner,
-  type CodexCommandRunner,
-  type RunningExec
-} from "./cli.js";
+    DefaultCodexCommandRunner,
+    type CodexCommandRunner,
+    type CodexExecResult,
+    type RunningExec
+  } from "./cli.js";
 import {
   buildCodexExecutionPrompt,
   codexExecutionOutputSchema
@@ -70,10 +73,14 @@ export class CodexAdapter implements HostAdapter {
   }
 
   getCapabilities(): AdapterCapabilities {
+    const supportsNativeSessionResume =
+      typeof this.runner.runResume === "function" || typeof this.runner.startResume === "function";
     return {
       supportsProfiles: true,
       supportsHooks: false,
-      supportsResume: true,
+      supportsRecoveryEnvelope: true,
+      supportsSessionIdentity: true,
+      supportsNativeSessionResume,
       supportsFork: false,
       supportsExactUsage: false,
       supportsCompactionHooks: false,
@@ -160,7 +167,8 @@ export class CodexAdapter implements HostAdapter {
     store: RuntimeArtifactStore,
     projection: RuntimeProjection,
     envelope: TaskEnvelope,
-    claimedRun?: HostRunRecord
+    claimedRun?: HostRunRecord,
+    lifecycle?: HostSessionLifecycle
   ): Promise<HostExecutionOutcome> {
     const assignmentId = readEnvelopeAssignmentId(envelope);
     const startedAt = claimedRun?.startedAt ?? nowIso();
@@ -212,7 +220,7 @@ export class CodexAdapter implements HostAdapter {
         }
       };
     }
-    return executeHostRunSession({
+    return executeHostRunSession<CodexExecResult>({
       assignmentId,
       startedAt,
       taskId: projection.sessionId,
@@ -240,21 +248,22 @@ export class CodexAdapter implements HostAdapter {
       buildFailedOutcome,
       deriveCompleted: async (execution, persistedNativeRunId) => {
         const completedAt = nowIso();
-        const transcript = parseExecJsonl(execution.stdout);
-        const nativeRunId = persistedNativeRunId ?? transcript.threadId;
-        const outcome = await deriveExecutionOutcome(
+        const completed = await deriveCodexExecutionCompletion(
           assignmentId,
           completedAt,
           execution,
-          outputPath,
-          transcript.errorMessage
+          outputPath
         );
+        const nativeRunId = persistedNativeRunId ?? completed.nativeRunId;
         return {
-          outcome,
+          outcome: completed.outcome,
           ...(nativeRunId ? { nativeRunId } : {}),
-          ...(transcript.usage ? { usage: transcript.usage } : {})
+          ...(completed.usage ? { usage: completed.usage } : {})
         };
       },
+      ...(lifecycle?.onSessionIdentity
+        ? { onSessionIdentity: lifecycle.onSessionIdentity }
+        : {}),
       setActiveRun: (run) => {
         this.activeRun = run as RunningExec | undefined;
       },
@@ -262,6 +271,128 @@ export class CodexAdapter implements HostAdapter {
         this.activeExecutionSettled = settled;
       }
     });
+  }
+
+  async resumeSession(
+    store: RuntimeArtifactStore,
+    projection: RuntimeProjection,
+    envelope: TaskEnvelope,
+    attachment: import("../../../core/types.js").RuntimeAttachment,
+    lifecycle?: HostSessionLifecycle
+  ): Promise<HostSessionResumeResult> {
+    if (!attachment.nativeSessionId) {
+      throw new Error(`Attachment ${attachment.id} is missing a stored native Codex session id.`);
+    }
+    if (!this.runner.runResume && !this.runner.startResume) {
+      throw new Error("The configured Codex runner does not support wrapped session resume.");
+    }
+
+    const requestedSessionId = attachment.nativeSessionId;
+    const assignmentId = readEnvelopeAssignmentId(envelope);
+    const startedAt = nowIso();
+    const paths = this.paths(store);
+    const executionId = randomUUID();
+    const outputPath = join(paths.runsDir, `${assignmentId}-${executionId}-resume-last-message.json`);
+    let observedSessionId: string | undefined;
+    const executionInput = {
+      cwd: projection.rootPath,
+      sessionId: requestedSessionId,
+      prompt: buildCodexExecutionPrompt(envelope),
+      outputPath,
+      onEvent: async (event: Record<string, unknown>) => {
+        const sessionId = readResumeSessionId(event);
+        if (!sessionId || observedSessionId === sessionId) {
+          return;
+        }
+        observedSessionId = sessionId;
+        if (sessionId === requestedSessionId) {
+          await lifecycle?.onSessionIdentity?.({
+            nativeSessionId: sessionId,
+            metadata: {
+              resumeEventType:
+                typeof event.type === "string" && event.type.length > 0 ? event.type : "thread.event"
+            }
+          });
+        }
+      },
+      ...(this.options.dangerouslyBypassApprovalsAndSandbox !== undefined
+        ? {
+            dangerouslyBypassApprovalsAndSandbox:
+              this.options.dangerouslyBypassApprovalsAndSandbox
+          }
+        : {})
+    };
+    const execution = this.runner.runResume
+      ? await this.runner.runResume(executionInput)
+      : await (await this.runner.startResume!(executionInput)).result;
+
+    const sessionVerified = observedSessionId === requestedSessionId;
+    const stoppedAt = nowIso();
+    const completed = await deriveCodexExecutionCompletion(
+      assignmentId,
+      stoppedAt,
+      execution,
+      outputPath
+    );
+    const runRecord = buildCompletedRunRecord(
+      completed.outcome,
+      assignmentId,
+      startedAt,
+      stoppedAt,
+      requestedSessionId
+    );
+    const runWarning = sessionVerified
+      ? await this.runStore(store).persistWarning(runRecord)
+      : undefined;
+    const telemetry = {
+      eventType: "host.resume.completed",
+      taskId: projection.sessionId,
+      assignmentId,
+      metadata: {
+        requestedSessionId,
+        observedSessionId: observedSessionId ?? "",
+        sessionVerified,
+        exitCode: execution.exitCode,
+        reclaimed: sessionVerified,
+        outcomeKind: completed.outcome.outcome.kind,
+        resultStatus:
+          completed.outcome.outcome.kind === "result" ? completed.outcome.outcome.capture.status : ""
+      },
+      ...(completed.usage ? { usage: completed.usage } : {})
+    } satisfies HostTelemetryCapture;
+
+    if (sessionVerified) {
+      return {
+        reclaimed: true,
+        requestedSessionId,
+        nativeSessionId: requestedSessionId,
+        ...(observedSessionId ? { observedSessionId } : {}),
+        sessionVerified,
+        exitCode: execution.exitCode,
+        stoppedAt,
+        outcome: completed.outcome.outcome,
+        run: runRecord,
+        telemetry,
+        ...(runWarning ? { warning: runWarning } : {})
+      };
+    }
+
+    const verificationWarning = summarizeResumeVerificationFailure(
+      requestedSessionId,
+      observedSessionId,
+      execution
+    );
+    return {
+      reclaimed: false,
+      requestedSessionId,
+      nativeSessionId: requestedSessionId,
+      ...(observedSessionId ? { observedSessionId } : {}),
+      sessionVerified,
+      exitCode: execution.exitCode,
+      stoppedAt,
+      telemetry,
+      warning: verificationWarning
+    };
   }
 
   async claimRunLease(
@@ -354,4 +485,54 @@ function readEnvelopeAssignmentId(envelope: TaskEnvelope): string {
     throw new Error("Codex envelope is missing metadata.activeAssignmentId.");
   }
   return assignmentId;
+}
+
+async function deriveCodexExecutionCompletion(
+  assignmentId: string,
+  completedAt: string,
+  execution: CodexExecResult,
+  outputPath: string
+): Promise<{
+  outcome: Pick<HostExecutionOutcome, "outcome">;
+  nativeRunId?: string;
+  usage?: HostTelemetryCapture["usage"];
+}> {
+  const transcript = parseExecJsonl(execution.stdout);
+  const outcome = await deriveExecutionOutcome(
+    assignmentId,
+    completedAt,
+    execution,
+    outputPath,
+    transcript.errorMessage,
+    transcript.lastAgentMessage
+  );
+  return {
+    outcome,
+    ...(transcript.threadId ? { nativeRunId: transcript.threadId } : {}),
+    ...(transcript.usage ? { usage: transcript.usage } : {})
+  };
+}
+
+function summarizeResumeVerificationFailure(
+  requestedSessionId: string,
+  observedSessionId: string | undefined,
+  execution?: { exitCode: number; stdout: string; stderr: string }
+): string {
+  if (!observedSessionId) {
+    const detail = execution ? execution.stderr.trim() || execution.stdout.trim() : "";
+    return detail.length > 0
+      ? `Codex resume did not confirm the requested session ${requestedSessionId}. ${detail}`
+      : `Codex resume exited successfully but did not confirm the requested session ${requestedSessionId}.`;
+  }
+  return `Codex resume resumed session ${observedSessionId} instead of requested session ${requestedSessionId}.`;
+}
+
+function readResumeSessionId(event: Record<string, unknown>): string | undefined {
+  if (typeof event.thread_id !== "string" || event.thread_id.length === 0) {
+    return undefined;
+  }
+  if (typeof event.type !== "string" || !event.type.startsWith("thread.")) {
+    return undefined;
+  }
+  return event.thread_id;
 }
