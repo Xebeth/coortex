@@ -32,6 +32,7 @@ const RESUMABLE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
   "attached",
   "detached_resumable"
 ]);
+const PENDING_ATTACHMENT_HINT = "coortexPendingAttachment";
 
 export async function loadReconciledProjectionWithDiagnostics(
   store: RuntimeStore,
@@ -160,6 +161,7 @@ async function reconcileLegacyLeaseOnlyAuthority(
     !projection.assignments.has(record.assignmentId) ||
     hasAttachmentHistoryForAssignment(projection, record.assignmentId) ||
     record.state !== "running" ||
+    record.adapterData?.[PENDING_ATTACHMENT_HINT] === true ||
     isRunLeaseExpired(record)
   ) {
     return {
@@ -169,8 +171,8 @@ async function reconcileLegacyLeaseOnlyAuthority(
   }
 
   const timestamp = nowIso();
-  const attachmentId = randomUUID();
-  const claimId = randomUUID();
+  const attachmentId = `legacy-attachment-${record.assignmentId}`;
+  const claimId = `legacy-claim-${record.assignmentId}`;
   const nativeSessionId =
     typeof record.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
       ? record.adapterData.nativeRunId
@@ -226,6 +228,17 @@ async function reconcileLegacyLeaseOnlyAuthority(
   }
   if (canAppendEvents) {
     await store.appendEvents(events);
+    const syncResult = await store.syncSnapshotFromEventsWithRecovery();
+    diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
+    diagnostics.push({
+      level: "warning",
+      code: "legacy-lease-normalized",
+      message: `Normalized legacy live lease for assignment ${record.assignmentId} into attachment ${attachmentId}.`
+    });
+    return {
+      projection: syncResult.projection,
+      changed: true
+    };
   }
   await store.writeSnapshot(toSnapshot(nextProjection));
   diagnostics.push({
@@ -511,6 +524,7 @@ export async function reconcileActiveRuns(
   let staleStatusTransitions: Map<string, string[]> | undefined;
   let handledCompletedRun = false;
   const runtimeKnownAssignmentIds = [...projection.assignments.keys()];
+  const legacyNormalizationEligibleAssignments = new Set(runtimeKnownAssignmentIds);
   const enumeratedRecords = await adapter.inspectRuns(store);
   const enumeratedRecordByAssignmentId = new Map(
     enumeratedRecords.map((record) => [record.assignmentId, record] as const)
@@ -563,13 +577,18 @@ export async function reconcileActiveRuns(
       }
     }
 
-    const legacyNormalization = await reconcileLegacyLeaseOnlyAuthority(
-      store,
-      effectiveProjection,
-      record,
-      diagnostics,
-      { snapshotFallback }
-    );
+    const legacyNormalization = legacyNormalizationEligibleAssignments.has(record.assignmentId)
+      ? await reconcileLegacyLeaseOnlyAuthority(
+          store,
+          effectiveProjection,
+          record,
+          diagnostics,
+          { snapshotFallback }
+        )
+      : {
+          projection: effectiveProjection,
+          changed: false
+        };
     if (legacyNormalization.changed) {
       effectiveProjection = legacyNormalization.projection;
       changed = true;

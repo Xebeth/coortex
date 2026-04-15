@@ -67,6 +67,146 @@ test("runtime store rebuilds projection from durable events and snapshots", asyn
   assert.equal(loaded.status.activeAdapter, "codex");
 });
 
+test("runtime store appendEvents preserves concurrent batch writers", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-concurrent-batches-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+
+  const batches = Array.from({ length: 20 }, (_, index) => {
+    const timestamp = nowIso();
+    return [
+      {
+        eventId: randomUUID(),
+        sessionId,
+        timestamp,
+        type: "host.setup.completed" as const,
+        payload: {
+          adapter: "codex",
+          host: "codex",
+          completedAt: timestamp
+        }
+      },
+      {
+        eventId: randomUUID(),
+        sessionId,
+        timestamp,
+        type: "host.setup.completed" as const,
+        payload: {
+          adapter: "codex",
+          host: "codex",
+          completedAt: timestamp
+        }
+      }
+    ] satisfies RuntimeEvent[];
+  });
+
+  await Promise.all(batches.map((batch) => store.appendEvents(batch)));
+
+  const events = await store.loadEvents();
+  const appendedIds = new Set(events.slice(bootstrap.events.length).map((event) => event.eventId));
+
+  assert.equal(events.length, bootstrap.events.length + batches.length * 2);
+  assert.equal(appendedIds.size, batches.length * 2);
+});
+
+test("runtime store repair serializes with concurrent appenders", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-repair-lock-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await writeFile(store.eventsPath, `${await readFile(store.eventsPath, "utf8")}{"broken":\n`, "utf8");
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const resultId = randomUUID();
+  const resultEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId,
+        assignmentId,
+        producerId: "worker-1",
+        status: "completed",
+        summary: "Concurrent append survives repair.",
+        changedFiles: ["src/persistence/store.ts"],
+        createdAt: nowIso()
+      }
+    }
+  };
+
+  const originalLoadProjectionWithRecovery = store.loadProjectionWithRecovery.bind(store);
+  let releaseRecovery!: () => void;
+  const recoveryReleased = new Promise<void>((resolve) => {
+    releaseRecovery = resolve;
+  });
+  let signalRecoveryEntered!: () => void;
+  const recoveryEntered = new Promise<void>((resolve) => {
+    signalRecoveryEntered = resolve;
+  });
+  let blocked = false;
+  (store as RuntimeStore & {
+    loadProjectionWithRecovery: RuntimeStore["loadProjectionWithRecovery"];
+  }).loadProjectionWithRecovery = async () => {
+    if (!blocked) {
+      blocked = true;
+      signalRecoveryEntered();
+      await recoveryReleased;
+    }
+    return originalLoadProjectionWithRecovery();
+  };
+
+  const syncPromise = store.syncSnapshotFromEventsWithRecovery();
+  await recoveryEntered;
+  const appendPromise = store.appendEvents([resultEvent]);
+  releaseRecovery();
+
+  await Promise.all([syncPromise, appendPromise]);
+  (store as RuntimeStore & {
+    loadProjectionWithRecovery: RuntimeStore["loadProjectionWithRecovery"];
+  }).loadProjectionWithRecovery = originalLoadProjectionWithRecovery;
+
+  const recovered = await store.loadProjectionWithRecovery();
+  const replayedResult = [...recovered.projection.results.values()].find((result) => result.resultId === resultId);
+
+  assert.ok(replayedResult);
+  assert.ok((await store.loadEvents()).some((event) => event.eventId === resultEvent.eventId));
+});
+
 test("runtime store rebuildProjection stays strict on malformed events", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-strict-rebuild-"));
   const store = RuntimeStore.forProject(projectRoot);

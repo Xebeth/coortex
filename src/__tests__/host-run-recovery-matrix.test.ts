@@ -25,6 +25,7 @@ import type { DecisionPacket, HostRunRecord, RecoveryBrief, ResultPacket, Runtim
 import { RuntimeStore } from "../persistence/store.js";
 import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "../cli/runtime-state.js";
 import { getRunnableAssignment, reconcileActiveRuns } from "../cli/run-operations.js";
+import { fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import {
   loadReconciledProjectionWithDiagnostics,
   prepareResumeRuntime,
@@ -803,6 +804,64 @@ test("host-run command matrix preserves duplicate-run protection", async (t) => 
       await testCase.run();
     });
   }
+});
+
+test("host-run recovery matrix preserves concurrent legacy normalization batches", async () => {
+  const ctx = await createMatrixContext();
+  const secondAssignmentId = await appendActiveAssignment(ctx);
+  await ctx.adapter.claimRunLease(
+    ctx.store,
+    ctx.projection,
+    ctx.assignmentId,
+    runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z")
+  );
+  await ctx.adapter.claimRunLease(
+    ctx.store,
+    ctx.projection,
+    secondAssignmentId,
+    runningRecord(secondAssignmentId, "2999-04-11T10:00:30.000Z")
+  );
+
+  const firstProjection = projectionForSingleAssignment(ctx.projection, ctx.assignmentId);
+  const secondProjection = projectionForSingleAssignment(ctx.projection, secondAssignmentId);
+  const originalAppendEvents = ctx.store.appendEvents.bind(ctx.store);
+  let waitingBatches = 0;
+  let releaseConcurrentAppend!: () => void;
+  const concurrentAppend = new Promise<void>((resolve) => {
+    releaseConcurrentAppend = resolve;
+  });
+  (ctx.store as RuntimeStore & {
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = async (events) => {
+    if (events[0]?.type === "attachment.created" && events[1]?.type === "claim.created") {
+      waitingBatches += 1;
+      if (waitingBatches === 2) {
+        releaseConcurrentAppend();
+      }
+      await concurrentAppend;
+    }
+    return originalAppendEvents(events);
+  };
+
+  const [firstResult, secondResult] = await Promise.all([
+    reconcileActiveRuns(ctx.store, ctx.adapter, firstProjection),
+    reconcileActiveRuns(ctx.store, ctx.adapter, secondProjection)
+  ]);
+  (ctx.store as RuntimeStore & {
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = originalAppendEvents;
+
+  const synced = await ctx.store.syncSnapshotFromEventsWithRecovery();
+  const attachmentAssignments = new Set(
+    [...synced.projection.claims.values()].map((claim) => claim.assignmentId)
+  );
+
+  assert.equal(waitingBatches, 2);
+  assert.ok(firstResult.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized"));
+  assert.ok(secondResult.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized"));
+  assert.equal(synced.projection.attachments.size, 2);
+  assert.equal(synced.projection.claims.size, 2);
+  assert.deepEqual(attachmentAssignments, new Set([ctx.assignmentId, secondAssignmentId]));
 });
 
 test("host-run command matrix reconciles operator-visible runtime truth", async (t) => {
@@ -3169,6 +3228,28 @@ async function appendAssignmentBeyondSnapshotBoundary(ctx: MatrixContext): Promi
     }
   });
   return assignmentId;
+}
+
+function projectionForSingleAssignment(
+  projection: RuntimeProjection,
+  assignmentId: string
+): RuntimeProjection {
+  const snapshot = toSnapshot(projection);
+  snapshot.assignments = snapshot.assignments.filter((assignment) => assignment.id === assignmentId);
+  snapshot.results = snapshot.results.filter((result) => result.assignmentId === assignmentId);
+  snapshot.decisions = snapshot.decisions.filter((decision) => decision.assignmentId === assignmentId);
+  snapshot.claims = (snapshot.claims ?? []).filter((claim) => claim.assignmentId === assignmentId);
+  const attachmentIds = new Set(snapshot.claims.map((claim) => claim.attachmentId));
+  snapshot.attachments = (snapshot.attachments ?? []).filter((attachment) => attachmentIds.has(attachment.id));
+  snapshot.status = {
+    ...snapshot.status,
+    activeAssignmentIds: snapshot.status.activeAssignmentIds.filter((id) => id === assignmentId),
+    currentObjective:
+      snapshot.assignments[0]?.objective ??
+      projection.assignments.get(assignmentId)?.objective ??
+      snapshot.status.currentObjective
+  };
+  return fromSnapshot(snapshot);
 }
 
 async function corruptSnapshotBoundary(store: RuntimeStore): Promise<void> {

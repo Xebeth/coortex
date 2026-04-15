@@ -145,6 +145,12 @@ For Milestone 2 reclaim semantics:
 - attachment and claim mutations that together create or change
   authority must become durable as one runtime batch, not as independent
   half-authoritative writes
+- durable runtime event batches use the same serialized append-only
+  persistence boundary as event-log repair, so malformed-log recovery
+  cannot overwrite concurrent authority or recovery writes
+- legacy live-lease normalization excludes the current wrapped-launch
+  lease-first window when host-run metadata still says runtime
+  authority is pending
 
 ## 7. Assignment Claim
 

@@ -8,10 +8,12 @@ import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
 import {
   appendLine,
+  appendText,
   ensureDir,
   readJsonFile,
   readLines,
   readTextFile,
+  withPathLock,
   writeJsonAtomic,
   writeTextAtomic,
   writeTextExclusive
@@ -61,19 +63,15 @@ export class RuntimeStore {
   }
 
   async appendEvent(event: RuntimeEvent): Promise<void> {
-    await appendLine(this.eventsPath, JSON.stringify(event));
+    await this.withEventsLock(() => appendLine(this.eventsPath, JSON.stringify(event)));
   }
 
   async appendEvents(events: RuntimeEvent[]): Promise<void> {
     if (events.length === 0) {
       return;
     }
-    const existing = await readTextFile(this.eventsPath);
-    const appended = events.map((event) => JSON.stringify(event)).join("\n");
-    const content = existing && existing.trim().length > 0
-      ? `${existing.trimEnd()}\n${appended}\n`
-      : `${appended}\n`;
-    await writeTextAtomic(this.eventsPath, content);
+    const content = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+    await this.withEventsLock(() => appendText(this.eventsPath, content));
   }
 
   async loadEvents(): Promise<RuntimeEvent[]> {
@@ -254,6 +252,33 @@ export class RuntimeStore {
   }
 
   async repairEventLog(): Promise<string | undefined> {
+    return this.withEventsLock(() => this.repairEventLogLocked());
+  }
+
+  async syncSnapshotFromEventsWithRecovery(): Promise<{
+    projection: RuntimeProjection;
+    warning?: string;
+  }> {
+    return this.withEventsLock(async () => {
+      const repairWarning = await this.repairEventLogLocked();
+      const recovered = await this.loadProjectionWithRecovery();
+      const projection = recovered.projection;
+      await this.writeSnapshot(toSnapshot(projection));
+      const warning = [repairWarning, recovered.warning].filter(Boolean).join(" ").trim();
+      return warning ? { projection, warning } : { projection };
+    });
+  }
+
+  async syncSnapshotFromEvents(): Promise<RuntimeProjection> {
+    const { projection } = await this.syncSnapshotFromEventsWithRecovery();
+    return projection;
+  }
+
+  private async withEventsLock<T>(action: () => Promise<T>): Promise<T> {
+    return withPathLock(this.eventsPath, action);
+  }
+
+  private async repairEventLogLocked(): Promise<string | undefined> {
     const { events, warning } = await this.loadReplayableEvents();
     if (!warning) {
       return undefined;
@@ -279,23 +304,6 @@ export class RuntimeStore {
     const content = events.map((event) => JSON.stringify(event)).join("\n");
     await writeTextAtomic(this.eventsPath, content.length > 0 ? `${content}\n` : "");
     return `${warning} Rewrote ${this.eventsPath} with ${events.length} replayable event(s).`;
-  }
-
-  async syncSnapshotFromEventsWithRecovery(): Promise<{
-    projection: RuntimeProjection;
-    warning?: string;
-  }> {
-    const repairWarning = await this.repairEventLog();
-    const recovered = await this.loadProjectionWithRecovery();
-    const projection = recovered.projection;
-    await this.writeSnapshot(toSnapshot(projection));
-    const warning = [repairWarning, recovered.warning].filter(Boolean).join(" ").trim();
-    return warning ? { projection, warning } : { projection };
-  }
-
-  async syncSnapshotFromEvents(): Promise<RuntimeProjection> {
-    const { projection } = await this.syncSnapshotFromEventsWithRecovery();
-    return projection;
   }
 
   async readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined> {

@@ -105,6 +105,16 @@ Attachment-plus-claim authority mutations are written as one durable
 runtime batch so interrupted persistence cannot strand half of an
 authoritative pair.
 
+Runtime event batches and malformed-log repair both pass through the
+same serialized append-only store boundary, so concurrent recovery or
+authority writes cannot be lost to stale whole-file replacement.
+
+The lease-first wrapped-launch window may mark host-run metadata as
+pending runtime authority. That hint is non-authoritative and exists
+only so legacy live-lease normalization does not synthesize resumable
+authority for a current launch that has not finished persisting runtime
+truth yet.
+
 ### `prepareResumeRuntime()`
 
 `prepareResumeRuntime()` is read-only over authoritative runtime truth.
