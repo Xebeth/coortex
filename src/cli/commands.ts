@@ -117,9 +117,7 @@ export async function initRuntime(
     workflow: "milestone-2"
   });
 
-  for (const event of bootstrap.events) {
-    await store.appendEvent(event);
-  }
+  await store.appendEvents(bootstrap.events);
 
   let syncResult = await store.syncSnapshotFromEventsWithRecovery();
   const diagnostics = diagnosticsFromWarning(syncResult.warning, "event-log-repaired");
@@ -175,9 +173,7 @@ async function persistProjectionEvents(
   warning?: string;
 }> {
   if (!options?.snapshotFallback) {
-    for (const event of events) {
-      await store.appendEvent(event);
-    }
+    await store.appendEvents(events);
     return store.syncSnapshotFromEventsWithRecovery();
   }
 

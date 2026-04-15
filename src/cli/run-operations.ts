@@ -223,9 +223,9 @@ async function reconcileLegacyLeaseOnlyAuthority(
   const canAppendEvents = !options?.snapshotFallback && (await store.hasEvents());
   for (const event of events) {
     applyRuntimeEvent(nextProjection, event);
-    if (canAppendEvents) {
-      await store.appendEvent(event);
-    }
+  }
+  if (canAppendEvents) {
+    await store.appendEvents(events);
   }
   await store.writeSnapshot(toSnapshot(nextProjection));
   diagnostics.push({
@@ -248,9 +248,7 @@ async function persistProjectionEvents(
   }
 ): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
   if (!options?.snapshotFallback) {
-    for (const event of events) {
-      await store.appendEvent(event);
-    }
+    await store.appendEvents(events);
     return (await store.syncSnapshotFromEventsWithRecovery()).projection;
   }
 
@@ -718,10 +716,7 @@ export async function reconcileActiveRuns(
           }
           await store.writeSnapshot(toSnapshot(effectiveProjection));
         } else {
-          for (const event of pendingEvents) {
-            await store.appendEvent(event);
-            applyRuntimeEvent(effectiveProjection, event);
-          }
+          await store.appendEvents(pendingEvents);
           const syncResult = await store.syncSnapshotFromEventsWithRecovery();
           effectiveProjection = syncResult.projection;
           diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
@@ -876,10 +871,7 @@ export async function reconcileActiveRuns(
       }
       await store.writeSnapshot(toSnapshot(effectiveProjection));
     } else {
-      for (const event of pendingEvents) {
-        await store.appendEvent(event);
-        applyRuntimeEvent(effectiveProjection, event);
-      }
+      await store.appendEvents(pendingEvents);
       const syncResult = await store.syncSnapshotFromEventsWithRecovery();
       effectiveProjection = syncResult.projection;
       diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
@@ -1035,10 +1027,7 @@ async function reconcileCompletedRunRecord(
       }
       await store.writeSnapshot(toSnapshot(effectiveProjection));
     } else {
-      for (const event of completedRecovery.events) {
-        await store.appendEvent(event);
-        applyRuntimeEvent(effectiveProjection, event);
-      }
+      await store.appendEvents(completedRecovery.events);
       const syncResult = await store.syncSnapshotFromEventsWithRecovery();
       effectiveProjection = syncResult.projection;
       diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));

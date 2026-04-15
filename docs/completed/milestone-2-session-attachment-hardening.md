@@ -101,6 +101,10 @@ promotes that authority only after durable native session identity is
 captured, and persists result or decision outcomes through the normal
 runtime-owned outcome path.
 
+Attachment-plus-claim authority mutations are written as one durable
+runtime batch so interrupted persistence cannot strand half of an
+authoritative pair.
+
 ### `prepareResumeRuntime()`
 
 `prepareResumeRuntime()` is read-only over authoritative runtime truth.

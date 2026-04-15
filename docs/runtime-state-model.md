@@ -142,6 +142,9 @@ For Milestone 2 reclaim semantics:
   decision outcomes through the same runtime-owned event path
 - `provisional` is not authoritative resumable truth until runtime
   reconciliation can promote it
+- attachment and claim mutations that together create or change
+  authority must become durable as one runtime batch, not as independent
+  half-authoritative writes
 
 ## 7. Assignment Claim
 

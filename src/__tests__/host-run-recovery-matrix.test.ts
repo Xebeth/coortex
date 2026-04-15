@@ -1886,16 +1886,21 @@ test("host-run recovery matrix repairs missing stale status convergence after qu
   await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", staleRecord);
   await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, staleRecord);
 
-  const originalAppendEvent = ctx.store.appendEvent.bind(ctx.store);
+  const originalAppendEvents = ctx.store.appendEvents.bind(ctx.store);
   let failedStatusUpdate = false;
   (ctx.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = async (event) => {
-    if (!failedStatusUpdate && event.type === "status.updated") {
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = async (events) => {
+    if (
+      !failedStatusUpdate &&
+      events.length === 2 &&
+      events[0]?.type === "assignment.updated" &&
+      events[1]?.type === "status.updated"
+    ) {
       failedStatusUpdate = true;
       throw new Error("simulated stale-run status persistence failure");
     }
-    await originalAppendEvent(event);
+    await originalAppendEvents(events);
   };
 
   await assert.rejects(
@@ -1904,8 +1909,8 @@ test("host-run recovery matrix repairs missing stale status convergence after qu
   );
 
   (ctx.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = originalAppendEvent;
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = originalAppendEvents;
 
   const interrupted = await ctx.store.syncSnapshotFromEventsWithRecovery();
   const secondRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, interrupted.projection);
@@ -1923,7 +1928,7 @@ test("host-run recovery matrix repairs missing stale status convergence after qu
       event.payload.status.currentObjective.startsWith(`Retry assignment ${ctx.assignmentId}:`)
   ).length;
 
-  assert.equal(interrupted.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+  assert.equal(interrupted.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
   assert.doesNotMatch(
     interrupted.projection.status.currentObjective,
     new RegExp(`^Retry assignment ${ctx.assignmentId}:`)
@@ -2131,16 +2136,20 @@ test("host-run recovery matrix does not replay recovered results after a status-
     completedResultRecord(ctx.assignmentId, "completed", "Recovered completed result.")
   );
 
-  const originalAppendEvent = ctx.store.appendEvent.bind(ctx.store);
+  const originalAppendEvents = ctx.store.appendEvents.bind(ctx.store);
   let failedStatusUpdate = false;
   (ctx.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = async (event) => {
-    if (!failedStatusUpdate && event.type === "status.updated") {
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = async (events) => {
+    if (
+      !failedStatusUpdate &&
+      events.some((event) => event.type === "result.submitted") &&
+      events.some((event) => event.type === "status.updated")
+    ) {
       failedStatusUpdate = true;
       throw new Error("simulated completed-run status persistence failure");
     }
-    await originalAppendEvent(event);
+    await originalAppendEvents(events);
   };
 
   await assert.rejects(
@@ -2149,16 +2158,16 @@ test("host-run recovery matrix does not replay recovered results after a status-
   );
 
   (ctx.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = originalAppendEvent;
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = originalAppendEvents;
 
   const interrupted = await ctx.store.syncSnapshotFromEventsWithRecovery();
   const firstEventCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted");
   const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, interrupted.projection);
   const secondEventCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted");
 
-  assert.equal(firstEventCount, 1);
-  assert.equal(secondEventCount, firstEventCount);
+  assert.equal(firstEventCount, 0);
+  assert.equal(secondEventCount, 1);
   assert.equal(recovered.projection.results.size, 1);
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "completed");
   assert.deepEqual(recovered.projection.status.activeAssignmentIds, []);
@@ -2172,16 +2181,20 @@ test("host-run recovery matrix repairs completed decisions after an assignment-u
     completedDecisionRecord(ctx.assignmentId, "Need operator confirmation before proceeding.")
   );
 
-  const originalAppendEvent = ctx.store.appendEvent.bind(ctx.store);
+  const originalAppendEvents = ctx.store.appendEvents.bind(ctx.store);
   let failedAssignmentUpdate = false;
   (ctx.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = async (event) => {
-    if (!failedAssignmentUpdate && event.type === "assignment.updated") {
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = async (events) => {
+    if (
+      !failedAssignmentUpdate &&
+      events.some((event) => event.type === "decision.created") &&
+      events.some((event) => event.type === "assignment.updated")
+    ) {
       failedAssignmentUpdate = true;
       throw new Error("simulated completed-run assignment persistence failure");
     }
-    await originalAppendEvent(event);
+    await originalAppendEvents(events);
   };
 
   await assert.rejects(
@@ -2190,17 +2203,17 @@ test("host-run recovery matrix repairs completed decisions after an assignment-u
   );
 
   (ctx.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = originalAppendEvent;
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = originalAppendEvents;
 
   const interrupted = await ctx.store.syncSnapshotFromEventsWithRecovery();
   const firstDecisionCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "decision.created");
   const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, interrupted.projection);
   const secondDecisionCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "decision.created");
 
-  assert.equal(firstDecisionCount, 1);
-  assert.equal(secondDecisionCount, firstDecisionCount);
-  assert.equal(interrupted.projection.decisions.size, 1);
+  assert.equal(firstDecisionCount, 0);
+  assert.equal(secondDecisionCount, 1);
+  assert.equal(interrupted.projection.decisions.size, 0);
   assert.equal(interrupted.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
   assert.equal(recovered.projection.decisions.size, 1);
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "blocked");

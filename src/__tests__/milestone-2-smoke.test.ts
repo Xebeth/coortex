@@ -133,111 +133,178 @@ test("milestone-2 smoke: decision path persists a blocker through the real run p
   assert.equal(resumed.brief.unresolvedDecisions.length, 1);
 });
 
-test("milestone-2 smoke: completed host outcomes are reconciled after runtime event persistence fails", async () => {
-  const setup = await createSmokeSetup(async (input) => {
-    await writeStructuredOutput(input.outputPath, {
-      outcomeType: "result",
-      resultStatus: "completed",
-      resultSummary: "Completed host run was recovered after runtime event persistence failed.",
-      changedFiles: ["src/cli/run-operations.ts"],
-      blockerSummary: "",
-      decisionOptions: [],
-      recommendedOption: ""
-    });
-    await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-completed-recovery" });
-    return {
-      exitCode: 0,
-      stdout: "",
-      stderr: ""
-    };
+test("milestone-2 smoke: completed host outcomes are reconciled from terminal-only durable state", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in completed recovery smoke setup");
   });
+  const completedAt = nowIso();
+  const resultId = "smoke-completed-recovery-result";
+  const summary = "Completed host run was recovered from terminal-only durable state.";
+  const sessionId = (await loadOperatorProjection(setup.store)).sessionId;
 
-  const originalAppendEvent = setup.store.appendEvent.bind(setup.store);
-  let failedOutcomeAppend = false;
-  (setup.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = async (event) => {
-    if (!failedOutcomeAppend && event.type === "result.submitted") {
-      failedOutcomeAppend = true;
-      throw new Error("simulated runtime event persistence failure");
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    startedAt: completedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId,
+        producerId: "codex",
+        status: "completed",
+        summary,
+        changedFiles: ["src/cli/run-operations.ts"],
+        createdAt: completedAt
+      }
+    },
+    adapterData: {
+      nativeRunId: "smoke-thread-completed-recovery"
     }
-    await originalAppendEvent(event);
-  };
+  });
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    startedAt: completedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId,
+        producerId: "codex",
+        status: "completed",
+        summary,
+        changedFiles: ["src/cli/run-operations.ts"],
+        createdAt: completedAt
+      }
+    },
+    adapterData: {
+      nativeRunId: "smoke-thread-completed-recovery"
+    }
+  });
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: completedAt,
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId,
+        assignmentId: setup.assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary,
+        changedFiles: ["src/cli/run-operations.ts"],
+        createdAt: completedAt
+      }
+    }
+  });
+  await setup.store.syncSnapshotFromEvents();
 
-  const run = await runRuntime(setup.store, setup.adapter);
-
-  (setup.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = originalAppendEvent;
-
+  const recovered = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
   const snapshot = await setup.store.loadSnapshot();
   const persistedRun = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
 
-  assert.equal(run.execution.outcome.kind, "result");
-  assert.equal(run.execution.outcome.capture.status, "completed");
-  assert.ok(
-    run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed")
-  );
-  assert.ok(
-    run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled")
-  );
-  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(persistedRun?.state, "completed");
   assert.equal(persistedRun?.terminalOutcome?.kind, "result");
   assert.equal(snapshot?.results.at(-1)?.assignmentId, setup.assignmentId);
-  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.equal(recovered.projection.assignments.get(setup.assignmentId)?.state, "completed");
   assert.equal(
-    [...run.projectionAfter.results.values()].at(-1)?.summary,
-    "Completed host run was recovered after runtime event persistence failed."
+    [...recovered.projection.results.values()].at(-1)?.summary,
+    summary
   );
-  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, []);
   assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 0);
 });
 
-test("milestone-2 smoke: failed host outcomes are recovered in place after runtime event persistence fails", async () => {
-  const setup = await createSmokeSetup(async (input) => {
-    await writeStructuredOutput(input.outputPath, {
-      outcomeType: "result",
-      resultStatus: "failed",
-      resultSummary: "Durable failed host outcome was recovered after runtime event persistence failed.",
-      changedFiles: [],
-      blockerSummary: "",
-      decisionOptions: [],
-      recommendedOption: ""
-    });
-    await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-failed-recovery" });
-    return {
-      exitCode: 2,
-      stdout: "",
-      stderr: ""
-    };
+test("milestone-2 smoke: failed host outcomes are recovered in place from terminal-only durable state", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in failed recovery smoke setup");
   });
+  const completedAt = nowIso();
+  const resultId = "smoke-failed-recovery-result";
+  const summary = "Durable failed host outcome was recovered from terminal-only durable state.";
+  const sessionId = (await loadOperatorProjection(setup.store)).sessionId;
 
-  const originalAppendEvent = setup.store.appendEvent.bind(setup.store);
-  let failedOutcomeAppend = false;
-  (setup.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = async (event) => {
-    if (!failedOutcomeAppend && event.type === "result.submitted") {
-      failedOutcomeAppend = true;
-      throw new Error("simulated failed-result persistence interruption");
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    startedAt: completedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "failed",
+    summary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId,
+        producerId: "codex",
+        status: "failed",
+        summary,
+        changedFiles: [],
+        createdAt: completedAt
+      }
+    },
+    adapterData: {
+      nativeRunId: "smoke-thread-failed-recovery"
     }
-    await originalAppendEvent(event);
-  };
+  });
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    startedAt: completedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "failed",
+    summary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId,
+        producerId: "codex",
+        status: "failed",
+        summary,
+        changedFiles: [],
+        createdAt: completedAt
+      }
+    },
+    adapterData: {
+      nativeRunId: "smoke-thread-failed-recovery"
+    }
+  });
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: completedAt,
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId,
+        assignmentId: setup.assignmentId,
+        producerId: "codex",
+        status: "failed",
+        summary,
+        changedFiles: [],
+        createdAt: completedAt
+      }
+    }
+  });
+  await setup.store.syncSnapshotFromEvents();
 
-  const run = await runRuntime(setup.store, setup.adapter);
+  const recovered = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
 
-  (setup.store as RuntimeStore & {
-    appendEvent: RuntimeStore["appendEvent"];
-  }).appendEvent = originalAppendEvent;
-
-  assert.equal(run.execution.outcome.kind, "result");
-  assert.equal(run.execution.outcome.capture.status, "failed");
-  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
-  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
-  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
-  assert.equal(run.projectionAfter.assignments.get(setup.assignmentId)?.state, "failed");
-  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(recovered.projection.assignments.get(setup.assignmentId)?.state, "failed");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, []);
   assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 0);
 });
 

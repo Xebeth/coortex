@@ -64,6 +64,18 @@ export class RuntimeStore {
     await appendLine(this.eventsPath, JSON.stringify(event));
   }
 
+  async appendEvents(events: RuntimeEvent[]): Promise<void> {
+    if (events.length === 0) {
+      return;
+    }
+    const existing = await readTextFile(this.eventsPath);
+    const appended = events.map((event) => JSON.stringify(event)).join("\n");
+    const content = existing && existing.trim().length > 0
+      ? `${existing.trimEnd()}\n${appended}\n`
+      : `${appended}\n`;
+    await writeTextAtomic(this.eventsPath, content);
+  }
+
   async loadEvents(): Promise<RuntimeEvent[]> {
     const lines = await readLines(this.eventsPath);
     return lines.map((line, index) =>

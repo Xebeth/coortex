@@ -119,6 +119,10 @@ effective host-run state follows these rules:
 
 - Lease acquisition must happen before Coortex mutates runtime state for
   a new run.
+- When one runtime mutation creates or updates attachment-and-claim
+  authority together, those runtime events must be durably appended as
+  one batch. A persistence failure must not strand only half of the
+  authority pair.
 - Initial lease creation must be atomic.
 - Claim-time metadata failure must not leave a live lease behind.
 - If rollback cleanup cannot remove the claimed lease, the claim must
