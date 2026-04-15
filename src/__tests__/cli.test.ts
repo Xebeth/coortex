@@ -15,6 +15,10 @@ const liveCodexEnv = {
   COORTEX_CODEX_DANGEROUS_BYPASS: "1"
 };
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function runCliCommand(
   cliPath: string,
   command: string,
@@ -855,6 +859,45 @@ test("ctx status and resume recover from snapshot when the event log is missing"
   assert.match(resume.stdout, /Recovery brief generated/);
 });
 
+test("ctx status falls back to the snapshot when the event log is cleanly truncated", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-clean-truncation-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    status: { currentObjective: string };
+  };
+  const eventsPath = join(runtimeDir, "runtime", "events.ndjson");
+  const cleanTruncatedEvents = (await readFile(eventsPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .filter((line) => {
+      const parsed = JSON.parse(line) as { type?: string };
+      return parsed.type === "assignment.created";
+    });
+  assert.equal(cleanTruncatedEvents.length, 1);
+  await writeFile(eventsPath, `${cleanTruncatedEvents[0]}\n`, "utf8");
+
+  const status = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+
+  assert.match(status.stderr, /WARNING event-log-salvaged .*(runtime\.initialized|snapshot boundary)/);
+  assert.match(status.stdout, /Active assignments: 1/);
+  assert.match(
+    status.stdout,
+    new RegExp(`Objective: ${escapeRegExp(snapshot.status.currentObjective)}`)
+  );
+  assert.doesNotMatch(status.stdout, /Host: unknown/);
+  assert.doesNotMatch(status.stdout, /No active objective/);
+});
+
 test("ctx status and resume ignore a malformed convenience last-run pointer", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-malformed-last-run-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -1064,7 +1107,8 @@ test("ctx status repairs stale host run leases after snapshot fallback", async (
     })
   );
   originalEvents[boundaryIndex] = '{"broken":';
-  await writeFile(eventsPath, `${originalEvents.join("\n")}\n`, "utf8");
+  const brokenEventsContent = `${originalEvents.join("\n")}\n`;
+  await writeFile(eventsPath, brokenEventsContent, "utf8");
 
   const status = await execFileAsync(process.execPath, [cliPath, "status"], {
     cwd: projectRoot
@@ -1079,6 +1123,7 @@ test("ctx status repairs stale host run leases after snapshot fallback", async (
   assert.match(status.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
   assert.match(status.stdout, new RegExp(`- ${assignmentId} queued `));
   assert.equal(repairedSnapshot.assignments[0]?.state, "queued");
+  assert.equal(await readFile(eventsPath, "utf8"), brokenEventsContent);
   await assert.rejects(
     readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
     /ENOENT/
@@ -1739,6 +1784,8 @@ test("ctx status, resume, and run repair a completed result despite older matchi
 
   await appendHistoricalRecoveredCompletedResultStatusEvent(runtimeDir);
   await corruptSnapshotBoundary(runtimeDir);
+  const eventsPath = join(runtimeDir, "runtime", "events.ndjson");
+  const brokenEventsContent = await readFile(eventsPath, "utf8");
 
   const status = await execFileAsync(process.execPath, [cliPath, "status"], {
     cwd: projectRoot
@@ -1770,7 +1817,8 @@ test("ctx status, resume, and run repair a completed result despite older matchi
     changedFiles: ["src/cli/ctx.ts"],
     createdAt: completedAt
   });
-  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 1);
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 0);
+  assert.equal(await readFile(eventsPath, "utf8"), brokenEventsContent);
 
   await assert.rejects(
     execFileAsync(process.execPath, [cliPath, "resume"], {
@@ -1803,6 +1851,8 @@ test("ctx status repairs snapshot-fallback completed results when the snapshot b
 
   await appendHistoricalRecoveredCompletedResultSequence(runtimeDir, assignmentId, completedAt);
   await corruptSnapshotBoundary(runtimeDir);
+  const eventsPath = join(runtimeDir, "runtime", "events.ndjson");
+  const brokenEventsContent = await readFile(eventsPath, "utf8");
 
   const status = await execFileAsync(process.execPath, [cliPath, "status"], {
     cwd: projectRoot
@@ -1823,6 +1873,7 @@ test("ctx status repairs snapshot-fallback completed results when the snapshot b
   assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
   assert.equal(repairedSnapshot.status.currentObjective, "Await the next assignment.");
   assert.equal(repairedSnapshot.results.length, 1);
+  assert.equal(await readFile(eventsPath, "utf8"), brokenEventsContent);
   assert.deepEqual(repairedSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
     assignmentId,
@@ -2375,12 +2426,20 @@ test("ctx status does not reopen a resolved recovered decision", async () => {
   );
 });
 
-test("ctx status preserves later durable decision progression during snapshot fallback recovery", async () => {
+test("ctx status preserves later snapshot-backed decision progression during snapshot fallback recovery", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } = await createCompletedDecisionRecoverySetup();
   const initialSnapshot = JSON.parse(
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
   ) as {
     sessionId: string;
+    assignments: Array<{ id: string; state: string; updatedAt: string }>;
+    decisions: Array<{
+      decisionId: string;
+      assignmentId: string;
+      state: string;
+      resolvedAt?: string;
+      resolutionSummary?: string;
+    }>;
     status: {
       activeMode: string;
       currentObjective: string;
@@ -2408,100 +2467,48 @@ test("ctx status preserves later durable decision progression during snapshot fa
     };
   };
   const resolutionTimestamp = new Date(Date.now() - 100_000).toISOString();
-  const existingEvents = (await readFile(join(runtimeDir, "runtime", "events.ndjson"), "utf8"))
-    .split("\n")
-    .filter(Boolean);
-  existingEvents.push(
-    JSON.stringify({
-      eventId: "snapshot-fallback-decision-created",
-      sessionId: initialSnapshot.sessionId,
-      timestamp: completedAt,
-      type: "decision.created",
-      payload: {
-        decision: {
-          ...completedRecord.terminalOutcome.decision,
-          assignmentId
-        }
-      }
-    }),
-    JSON.stringify({
-      eventId: "snapshot-fallback-assignment-blocked",
-      sessionId: initialSnapshot.sessionId,
-      timestamp: completedAt,
-      type: "assignment.updated",
-      payload: {
-        assignmentId,
-        patch: {
-          state: "blocked",
-          updatedAt: completedAt
-        }
-      }
-    }),
-    JSON.stringify({
-      eventId: "snapshot-fallback-status-blocked",
-      sessionId: initialSnapshot.sessionId,
-      timestamp: completedAt,
-      type: "status.updated",
-      payload: {
-        status: {
-          ...initialSnapshot.status,
-          currentObjective: "Resolve the recovered decision before continuing.",
-          lastDurableOutputAt: completedAt
-        }
-      }
-    }),
-    JSON.stringify({
-      eventId: "snapshot-fallback-decision-resolved",
-      sessionId: initialSnapshot.sessionId,
-      timestamp: resolutionTimestamp,
-      type: "decision.resolved",
-      payload: {
-        decisionId: completedRecord.terminalOutcome.decision.decisionId,
-        resolvedAt: resolutionTimestamp,
-        resolutionSummary: "Operator chose to continue after snapshot fallback recovery."
-      }
-    }),
-    JSON.stringify({
-      eventId: "snapshot-fallback-assignment-in-progress",
-      sessionId: initialSnapshot.sessionId,
-      timestamp: resolutionTimestamp,
-      type: "assignment.updated",
-      payload: {
-        assignmentId,
-        patch: {
-          state: "in_progress",
-          updatedAt: resolutionTimestamp
-        }
-      }
-    }),
-    JSON.stringify({
-      eventId: "snapshot-fallback-status-progressed",
-      sessionId: initialSnapshot.sessionId,
-      timestamp: resolutionTimestamp,
-      type: "status.updated",
-      payload: {
+  await writeFile(
+    join(runtimeDir, "runtime", "snapshot.json"),
+    JSON.stringify(
+      {
+        ...initialSnapshot,
+        assignments: initialSnapshot.assignments.map((assignment) =>
+          assignment.id === assignmentId
+            ? {
+                ...assignment,
+                state: "in_progress",
+                updatedAt: resolutionTimestamp
+              }
+            : assignment
+        ),
+        decisions: [
+          {
+            decisionId: completedRecord.terminalOutcome.decision.decisionId,
+            assignmentId,
+            requesterId: completedRecord.terminalOutcome.decision.requesterId,
+            blockerSummary: completedRecord.terminalOutcome.decision.blockerSummary,
+            options: completedRecord.terminalOutcome.decision.options,
+            recommendedOption: completedRecord.terminalOutcome.decision.recommendedOption,
+            state: "resolved",
+            createdAt: completedAt,
+            resolvedAt: resolutionTimestamp,
+            resolutionSummary: "Operator chose to continue after snapshot fallback recovery."
+          }
+        ],
         status: {
           ...initialSnapshot.status,
           currentObjective: "Continue after snapshot fallback recovery.",
           lastDurableOutputAt: resolutionTimestamp
         }
-      }
-    }),
-    JSON.stringify({
-      eventId: "snapshot-fallback-invalid-suffix",
-      sessionId: initialSnapshot.sessionId,
-      timestamp: new Date(Date.now() - 90_000).toISOString(),
-      type: "assignment.updated",
-      payload: {
-        assignmentId: "missing-snapshot-fallback-assignment",
-        patch: {
-          state: "queued",
-          updatedAt: new Date(Date.now() - 90_000).toISOString()
-        }
-      }
-    })
+      },
+      null,
+      2
+    ),
+    "utf8"
   );
-  await writeFile(join(runtimeDir, "runtime", "events.ndjson"), `${existingEvents.join("\n")}\n`, "utf8");
+  await corruptSnapshotBoundary(runtimeDir);
+  const eventsPath = join(runtimeDir, "runtime", "events.ndjson");
+  const brokenEventsContent = await readFile(eventsPath, "utf8");
 
   const status = await execFileAsync(process.execPath, [cliPath, "status"], {
     cwd: projectRoot
@@ -2515,6 +2522,7 @@ test("ctx status preserves later durable decision progression during snapshot fa
   };
 
   assert.match(status.stderr, /WARNING completed-run-reconciled/);
+  assert.match(status.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
   assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Open decisions: 0/);
   assert.match(status.stdout, new RegExp(`- ${assignmentId} in_progress `));
@@ -2526,7 +2534,8 @@ test("ctx status preserves later durable decision progression during snapshot fa
   assert.equal(repairedSnapshot.decisions[0]?.resolvedAt, resolutionTimestamp);
   assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
   assert.equal(repairedSnapshot.status.currentObjective, "Continue after snapshot fallback recovery.");
-  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 1);
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 0);
+  assert.equal(await readFile(eventsPath, "utf8"), brokenEventsContent);
 });
 
 test("ctx resume repairs snapshot-fallback completed decisions when the snapshot boundary is unusable", async () => {

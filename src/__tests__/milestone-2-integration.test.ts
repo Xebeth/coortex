@@ -1308,6 +1308,53 @@ test("milestone-2 integration: pre-launch claim failures leave runtime state unc
   );
 });
 
+test("milestone-2 integration: launch authority persistence failures roll back the claimed lease", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used when authority persistence fails");
+  });
+
+  const originalClaimRunLease = setup.adapter.claimRunLease.bind(setup.adapter);
+  let claimAttempted = false;
+  setup.adapter.claimRunLease = async (store, projection, assignmentId) => {
+    claimAttempted = true;
+    return originalClaimRunLease(store, projection, assignmentId);
+  };
+
+  const originalAppendEvent = setup.store.appendEvent.bind(setup.store);
+  let failedAuthorityAppend = false;
+  (setup.store as RuntimeStore & {
+    appendEvent: RuntimeStore["appendEvent"];
+  }).appendEvent = async (event) => {
+    if (!failedAuthorityAppend && event.type === "attachment.created") {
+      failedAuthorityAppend = true;
+      throw new Error("simulated launch authority persistence failure");
+    }
+    return originalAppendEvent(event);
+  };
+
+  await assert.rejects(
+    runRuntime(setup.store, setup.adapter),
+    /simulated launch authority persistence failure/
+  );
+  const projection = await loadOperatorProjection(setup.store);
+  const snapshot = await setup.store.loadSnapshot();
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+
+  assert.equal(claimAttempted, true);
+  assert.equal(projection.attachments.size, 0);
+  assert.equal(projection.claims.size, 0);
+  assert.equal(snapshot?.attachments?.length ?? 0, 0);
+  assert.equal(snapshot?.claims?.length ?? 0, 0);
+  assert.equal(inspected, undefined);
+  await assert.rejects(
+    readFile(
+      join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
+      "utf8"
+    ),
+    /ENOENT/
+  );
+});
+
 test("milestone-2 integration: equivalent executions produce stable persisted shapes", async () => {
   const [first, second] = await Promise.all([
     createSmokeSetup(stableRunner("repeatable thread", "Repeatable smoke result.")),

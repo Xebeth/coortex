@@ -135,34 +135,67 @@ export class RuntimeStore {
   }> {
     const snapshot = await this.loadSnapshot();
     const { events, warning } = await this.loadReplayableEvents();
-    if (warning && snapshot) {
+    const fallbackToSnapshot = (reason: string) => ({
+      projection: fromSnapshot(snapshot!),
+      warning: [warning, reason].filter(Boolean).join(" ").trim(),
+      snapshotFallback: true as const
+    });
+    const replayAfterSnapshot = () => {
       try {
-        const replayed = replayEventsAfterSnapshot(snapshot, events);
-        if (replayed) {
-          return {
-            projection: replayed,
-            warning: `${warning} Rebuilt runtime state from ${this.snapshotPath} plus replayable events after ${snapshot.lastEventId ?? "the snapshot boundary"}.`,
-            snapshotFallback: false
-          };
-        }
+        return {
+          replayed: replayEventsAfterSnapshot(snapshot!, events)
+        };
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         return {
-          projection: fromSnapshot(snapshot),
-          warning: `${warning} Event replay after ${this.snapshotPath} could not rebuild runtime state; fell back to ${this.snapshotPath}. ${detail}`.trim(),
-          snapshotFallback: true
+          fallback: fallbackToSnapshot(
+            `Event replay after ${this.snapshotPath} could not rebuild runtime state; fell back to ${this.snapshotPath}. ${detail}`
+          )
         };
       }
-      return {
-        projection: fromSnapshot(snapshot),
-        warning: `${warning} Fell back to ${this.snapshotPath} to avoid rewriting rolled-back salvaged state.`,
-        snapshotFallback: true
-      };
+    };
+    if (warning && snapshot) {
+      const replayAttempt = replayAfterSnapshot();
+      if (replayAttempt.fallback) {
+        return replayAttempt.fallback;
+      }
+      if (replayAttempt.replayed) {
+        return {
+          projection: replayAttempt.replayed,
+          warning: `${warning} Rebuilt runtime state from ${this.snapshotPath} plus replayable events after ${snapshot.lastEventId ?? "the snapshot boundary"}.`,
+          snapshotFallback: false
+        };
+      }
+      return fallbackToSnapshot(
+        `Fell back to ${this.snapshotPath} to avoid rewriting rolled-back salvaged state.`
+      );
     }
     if (events.length > 0) {
-      if (warning && !snapshot && events[0]?.type !== "runtime.initialized") {
+      if (snapshot) {
+        const replayAttempt = replayAfterSnapshot();
+        if (replayAttempt.fallback) {
+          return replayAttempt.fallback;
+        }
+        if (replayAttempt.replayed) {
+          return warning
+            ? { projection: replayAttempt.replayed, warning, snapshotFallback: false }
+            : { projection: replayAttempt.replayed, snapshotFallback: false };
+        }
+        if (snapshot.lastEventId) {
+          return fallbackToSnapshot(
+            `${this.eventsPath} no longer contains snapshot boundary ${snapshot.lastEventId}. Fell back to ${this.snapshotPath} to avoid replacing newer durable state.`
+          );
+        }
+      }
+      if (events[0]?.type !== "runtime.initialized") {
+        const message = `${this.eventsPath} no longer starts at runtime.initialized.`;
+        if (snapshot) {
+          return fallbackToSnapshot(
+            `Event replay could not rebuild runtime state because ${message} Fell back to ${this.snapshotPath} to avoid replacing newer durable state.`
+          );
+        }
         throw new Error(
-          `Event replay could not rebuild runtime state from salvaged events because ${this.eventsPath} no longer starts at runtime.initialized.`
+          `Event replay could not rebuild runtime state from replayable events because ${message}`
         );
       }
       const config = await this.loadConfig();

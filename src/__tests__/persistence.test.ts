@@ -159,6 +159,60 @@ test("runtime store falls back to the snapshot when the event log is malformed",
   assert.equal(projection.assignments.size, snapshot.assignments.length);
 });
 
+test("runtime store falls back to the snapshot when the event log is cleanly truncated past runtime.initialized", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-clean-truncation-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const rebuilt = await store.rebuildProjection();
+  const snapshot = toSnapshot(rebuilt);
+  await store.writeSnapshot(snapshot);
+
+  const cleanTruncatedEvents = (await readFile(store.eventsPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .filter((line) => {
+      const parsed = JSON.parse(line) as { type?: string };
+      return parsed.type === "assignment.created";
+    });
+  assert.equal(cleanTruncatedEvents.length, 1);
+  await writeFile(store.eventsPath, `${cleanTruncatedEvents[0]}\n`, "utf8");
+
+  const recovered = await store.loadProjectionWithRecovery();
+  const synced = await store.syncSnapshotFromEventsWithRecovery();
+  const repairedSnapshot = await store.loadSnapshot();
+
+  assert.equal(recovered.snapshotFallback, true);
+  assert.match(recovered.warning ?? "", /(runtime\.initialized|snapshot boundary)/);
+  assert.equal(recovered.projection.status.activeHost, snapshot.status.activeHost);
+  assert.equal(recovered.projection.status.currentObjective, snapshot.status.currentObjective);
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, snapshot.status.activeAssignmentIds);
+  assert.match(synced.warning ?? "", /(runtime\.initialized|snapshot boundary)/);
+  assert.equal(repairedSnapshot?.status.activeHost, snapshot.status.activeHost);
+  assert.equal(repairedSnapshot?.status.currentObjective, snapshot.status.currentObjective);
+  assert.deepEqual(repairedSnapshot?.status.activeAssignmentIds, snapshot.status.activeAssignmentIds);
+});
+
 test("runtime store recovery matrix follows the snapshot boundary rule", async () => {
   const cases = [
     {
@@ -272,6 +326,54 @@ test("runtime store recovery matrix follows the snapshot boundary rule", async (
     assert.equal(recovered.projection.results.size, testCase.expectedResultCount, testCase.name);
     assert.match(recovered.warning ?? "", testCase.warningPattern, testCase.name);
   }
+});
+
+test("runtime store falls back to the snapshot when a parseable suffix no longer applies cleanly", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-invalid-suffix-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const snapshot = toSnapshot(await store.rebuildProjection());
+  await store.writeSnapshot(snapshot);
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "assignment.updated",
+    payload: {
+      assignmentId: randomUUID(),
+      patch: {
+        state: "queued",
+        updatedAt: nowIso()
+      }
+    }
+  });
+
+  const recovered = await store.loadProjectionWithRecovery();
+
+  assert.equal(recovered.snapshotFallback, true);
+  assert.match(recovered.warning ?? "", /could not rebuild runtime state; fell back to .*snapshot\.json/i);
+  assert.equal(recovered.projection.status.currentObjective, snapshot.status.currentObjective);
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, snapshot.status.activeAssignmentIds);
 });
 
 test("runtime store rebuilds from snapshot plus replayable events after a malformed tail", async () => {

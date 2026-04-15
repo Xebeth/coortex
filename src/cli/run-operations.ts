@@ -700,10 +700,6 @@ export async function reconcileActiveRuns(
         }
 
         changed = true;
-        for (const event of pendingEvents) {
-          await store.appendEvent(event);
-          applyRuntimeEvent(effectiveProjection, event);
-        }
         if (!staleRecoveryState.queuedTransitionTimestamp) {
           queuedTransitions.set(assignmentId, [
             ...(queuedTransitions.get(assignmentId) ?? []),
@@ -717,8 +713,15 @@ export async function reconcileActiveRuns(
           ]);
         }
         if (snapshotFallback) {
+          for (const event of pendingEvents) {
+            applyRuntimeEvent(effectiveProjection, event);
+          }
           await store.writeSnapshot(toSnapshot(effectiveProjection));
         } else {
+          for (const event of pendingEvents) {
+            await store.appendEvent(event);
+            applyRuntimeEvent(effectiveProjection, event);
+          }
           const syncResult = await store.syncSnapshotFromEventsWithRecovery();
           effectiveProjection = syncResult.projection;
           diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
@@ -855,10 +858,6 @@ export async function reconcileActiveRuns(
     }
 
     changed = true;
-    for (const event of pendingEvents) {
-      await store.appendEvent(event);
-      applyRuntimeEvent(effectiveProjection, event);
-    }
     if (!staleRecoveryState.queuedTransitionTimestamp) {
       queuedTransitions.set(assignmentId, [
         ...(queuedTransitions.get(assignmentId) ?? []),
@@ -872,8 +871,15 @@ export async function reconcileActiveRuns(
       ]);
     }
     if (snapshotFallback) {
+      for (const event of pendingEvents) {
+        applyRuntimeEvent(effectiveProjection, event);
+      }
       await store.writeSnapshot(toSnapshot(effectiveProjection));
     } else {
+      for (const event of pendingEvents) {
+        await store.appendEvent(event);
+        applyRuntimeEvent(effectiveProjection, event);
+      }
       const syncResult = await store.syncSnapshotFromEventsWithRecovery();
       effectiveProjection = syncResult.projection;
       diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
@@ -1023,13 +1029,16 @@ async function reconcileCompletedRunRecord(
 
   if (completedRecovery.events.length > 0) {
     changed = true;
-    for (const event of completedRecovery.events) {
-      await store.appendEvent(event);
-      applyRuntimeEvent(effectiveProjection, event);
-    }
     if (options.snapshotFallback) {
+      for (const event of completedRecovery.events) {
+        applyRuntimeEvent(effectiveProjection, event);
+      }
       await store.writeSnapshot(toSnapshot(effectiveProjection));
     } else {
+      for (const event of completedRecovery.events) {
+        await store.appendEvent(event);
+        applyRuntimeEvent(effectiveProjection, event);
+      }
       const syncResult = await store.syncSnapshotFromEventsWithRecovery();
       effectiveProjection = syncResult.projection;
       diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));

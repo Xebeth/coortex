@@ -577,31 +577,33 @@ export async function runRuntime(
       `Assignment ${blocking.claim.assignmentId} already has an active host run lease. Claimed by attachment ${blocking.attachment.id}.`
     );
   }
-  const launchAuthority = createLaunchAuthority(adapter, projectionBefore, assignment.id);
-  projectionBefore = await appendAttachmentAuthority(
-    store,
-    projectionBefore,
-    launchAuthority.attachment,
-    launchAuthority.claim,
-    launchWriteOptions
-  );
   let claimedRun: Awaited<ReturnType<HostAdapter["claimRunLease"]>>;
   try {
     claimedRun = await adapter.claimRunLease(store, projectionBefore, assignment.id);
   } catch (error) {
-    projectionBefore = await releaseAttachmentClaim(
+    throw error;
+  }
+  const launchAuthority = createLaunchAuthority(adapter, projectionBefore, assignment.id);
+  let authorityPersisted = false;
+  try {
+    projectionBefore = await appendAttachmentAuthority(
       store,
       projectionBefore,
-      launchAuthority.attachment.id,
-      launchAuthority.claim.id,
-      {
-        attachment: `Wrapped launch failed before host execution started. ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        claim: "Wrapped launch did not begin."
-      },
+      launchAuthority.attachment,
+      launchAuthority.claim,
       launchWriteOptions
     );
+    authorityPersisted = true;
+  } catch (error) {
+    try {
+      await adapter.releaseRunLease(store, assignment.id);
+    } catch (releaseError) {
+      throw new Error(
+        `Wrapped launch failed after claiming the host run lease and lease cleanup also failed. ${
+          error instanceof Error ? error.message : String(error)
+        } ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`
+      );
+    }
     throw error;
   }
   let executionStarted = false;
@@ -692,19 +694,21 @@ export async function runRuntime(
   } catch (error) {
     if (!executionStarted) {
       await adapter.releaseRunLease(store, assignment.id);
-      projectionBefore = await releaseAttachmentClaim(
-        store,
-        projectionBefore,
-        launchAuthority.attachment.id,
-        launchAuthority.claim.id,
-        {
-          attachment: `Wrapped launch failed before native session identity was observed. ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          claim: "Wrapped launch did not begin."
-        },
-        launchWriteOptions
-      );
+      if (authorityPersisted) {
+        projectionBefore = await releaseAttachmentClaim(
+          store,
+          projectionBefore,
+          launchAuthority.attachment.id,
+          launchAuthority.claim.id,
+          {
+            attachment: `Wrapped launch failed before native session identity was observed. ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            claim: "Wrapped launch did not begin."
+          },
+          launchWriteOptions
+        );
+      }
     } else if (launchedProjection && envelope) {
       const recoveredExecution = synthesizeRecoveredExecution(
         await adapter.inspectRun(store, assignment.id)

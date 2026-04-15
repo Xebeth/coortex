@@ -2324,6 +2324,7 @@ test("host-run recovery matrix retries snapshot-fallback completed-run repair wi
     })
   );
   await writeFile(ctx.store.eventsPath, `${eventLines.join("\n")}\n`, "utf8");
+  const brokenEventsContent = await readFile(ctx.store.eventsPath, "utf8");
 
   const originalWriteSnapshot = ctx.store.writeSnapshot.bind(ctx.store);
   let failedWriteSnapshot = false;
@@ -2357,11 +2358,12 @@ test("host-run recovery matrix retries snapshot-fallback completed-run repair wi
   });
   const recoveredEventCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted");
 
-  assert.equal(recoveredEventCount, 1);
+  assert.equal(recoveredEventCount, 0);
   assert.equal(recovered.projection.results.size, 1);
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "completed");
   assert.deepEqual(recovered.projection.status.activeAssignmentIds, []);
   assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(await readFile(ctx.store.eventsPath, "utf8"), brokenEventsContent);
 });
 
 test("host-run recovery matrix preserves orphaned attachment truth across snapshot-only reclaim failure", async () => {

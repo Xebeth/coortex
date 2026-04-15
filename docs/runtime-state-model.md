@@ -257,6 +257,15 @@ missing or unusable, recovery-side attachment normalization or reclaim
 may update `snapshot.json` directly rather than fabricating a truncated
 replacement event log.
 
+When a replayable log no longer starts at `runtime.initialized` or no
+longer contains the current snapshot boundary, recovery must preserve
+the newer snapshot instead of treating the remaining clean suffix as a
+full authoritative log.
+
+That same fail-closed rule applies when the replayable suffix parses but
+cannot be applied cleanly to snapshot truth. Clean JSON alone is not
+enough to outrank the snapshot boundary.
+
 When one command performs multiple snapshot-fallback mutations, each
 later mutation must start from the projection produced by the earlier
 durable write rather than from the stale pre-write projection loaded at

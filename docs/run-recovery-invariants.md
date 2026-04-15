@@ -258,13 +258,21 @@ runtime truth on their own.
 
 ### Snapshot boundary rule
 
-If a snapshot exists and the event log is malformed:
+If a snapshot exists and the event log is malformed, truncated, or no
+longer contains the snapshot boundary:
 
 1. try to rebuild from the snapshot plus replayable events after the
    snapshot's `lastEventId`
-2. if that suffix replay fails, fall back to the snapshot
-3. do not rewrite the authoritative event log when an existing snapshot
+2. if that suffix replay fails or the boundary is missing, fall back to
+   the snapshot
+3. if no snapshot exists, full replay is valid only when the replayable
+   log still starts at `runtime.initialized`
+4. do not rewrite the authoritative event log when an existing snapshot
    is the safer durable source
+
+A clean but semantically invalid suffix, such as an assignment update
+whose assignment is absent from snapshot truth, still counts as suffix
+replay failure and must fail closed to the snapshot.
 
 The goal is to preserve the latest durable state without silently
 rolling back to an older salvaged projection.
