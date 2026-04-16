@@ -80,6 +80,15 @@ The current repository now guarantees:
 - both normalize outcomes through the same runtime event path
 - both finalize attachment and claim state through the same authority
   rules
+- that shared authority rule also applies to completed-run recovery:
+  recovered decisions and recovered partial results detach active
+  attached authority back to resumable state, while only recovered
+  terminal results release attachment/claim authority; if the active
+  binding is still provisional but the completed host record contains a
+  durable native session id, recovery promotes it into resumable state
+  before provisional cleanup can clear it; if the binding is already
+  detached but missing that id, recovery backfills it from durable host
+  metadata before wrapped reclaim is considered available
 - `ctx resume` adds one extra guard only: same-session identity
   verification against the existing authoritative attachment
 
@@ -132,10 +141,11 @@ or reconcile stale or completed runs.
 `ctx resume` is the wrapped same-session reclaim path.
 
 It first reconciles runtime truth, targets the single authoritative
-attached or detached-but-resumable attachment, verifies that the native
-session being reclaimed matches the requested attachment, and then
-persists the resumed result or decision through the same runtime-owned
-outcome path used by `ctx run`.
+attached or detached-but-resumable attachment that still carries a
+stored native session id, verifies that the native session being
+reclaimed matches the requested attachment, and then persists the
+resumed result or decision through the same runtime-owned outcome path
+used by `ctx run`.
 
 If reclaim cannot be verified, Coortex orphans the attachment/claim and
 requeues the assignment instead of silently transferring authority.
@@ -174,6 +184,9 @@ missing or unusable:
 - multi-step transitions such as orphan-and-requeue must preserve the
   earlier attachment, claim, assignment, and status mutations from the
   same command
+- stale recovery now orphans active attachment/claim authority before
+  requeueing the assignment, and completed-run recovery releases active
+  authority when the recovered outcome is terminal
 
 ## Out of scope
 

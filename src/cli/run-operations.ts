@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { HostAdapter, HostExecutionOutcome } from "../adapters/contract.js";
 import { isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
+import { isWrappedResumeCapableAttachment } from "../core/types.js";
 import type {
   AssignmentClaim,
   DecisionPacket,
@@ -21,6 +22,10 @@ import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionW
 interface AttachmentClaimBinding {
   attachment: RuntimeAttachment;
   claim: AssignmentClaim;
+}
+
+export interface ProjectionWriteOptions {
+  snapshotFallback?: boolean;
 }
 
 const AUTHORITATIVE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
@@ -122,7 +127,8 @@ export function listResumableAttachmentClaims(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>
 ): AttachmentClaimBinding[] {
   return listActiveClaimBindings(projection).filter(({ attachment }) =>
-    RESUMABLE_ATTACHMENT_STATES.has(attachment.state)
+    RESUMABLE_ATTACHMENT_STATES.has(attachment.state) &&
+    isWrappedResumeCapableAttachment(attachment)
   );
 }
 
@@ -266,13 +272,11 @@ async function reconcileLegacyLeaseOnlyAuthority(
   };
 }
 
-async function persistProjectionEvents(
+export async function persistProjectionEvents(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   events: RuntimeEvent[],
-  options?: {
-    snapshotFallback?: boolean;
-  }
+  options?: ProjectionWriteOptions
 ): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
   if (!options?.snapshotFallback) {
     await store.appendEvents(events);
@@ -287,7 +291,7 @@ async function persistProjectionEvents(
   return nextProjection;
 }
 
-async function transitionAttachmentClaim(
+export async function transitionAttachmentClaim(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   attachmentId: string,
@@ -296,9 +300,7 @@ async function transitionAttachmentClaim(
     attachment: Partial<RuntimeAttachment>;
     claim: Partial<AssignmentClaim>;
   },
-  options?: {
-    snapshotFallback?: boolean;
-  }
+  options?: ProjectionWriteOptions
 ): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
   const timestamp = nowIso();
   return persistProjectionEvents(
@@ -330,14 +332,123 @@ async function transitionAttachmentClaim(
   );
 }
 
+export async function updateAttachmentToDetachedResumable(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  attachmentId: string,
+  options?: ProjectionWriteOptions,
+  detachedAt = nowIso()
+): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
+  return persistProjectionEvents(
+    store,
+    projection,
+    [
+      {
+        eventId: randomUUID(),
+        sessionId: projection.sessionId,
+        timestamp: detachedAt,
+        type: "attachment.updated",
+        payload: {
+          attachmentId,
+          patch: {
+            state: "detached_resumable",
+            updatedAt: detachedAt,
+            detachedAt
+          }
+        }
+      }
+    ],
+    options
+  );
+}
+
+export async function releaseAttachmentClaim(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  attachmentId: string,
+  claimId: string,
+  reason: {
+    attachment: string;
+    claim: string;
+  },
+  options?: ProjectionWriteOptions
+): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
+  const timestamp = nowIso();
+  return transitionAttachmentClaim(
+    store,
+    projection,
+    attachmentId,
+    claimId,
+    {
+      attachment: {
+        state: "released",
+        updatedAt: timestamp,
+        releasedAt: timestamp,
+        releasedReason: reason.attachment
+      },
+      claim: {
+        state: "released",
+        updatedAt: timestamp,
+        releasedAt: timestamp,
+        releasedReason: reason.claim
+      }
+    },
+    options
+  );
+}
+
+export async function orphanAttachmentClaim(
+  store: RuntimeStore,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  attachmentId: string,
+  claimId: string,
+  reason: {
+    attachment: string;
+    claim: string;
+  },
+  options?: ProjectionWriteOptions
+): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
+  const timestamp = nowIso();
+  return transitionAttachmentClaim(
+    store,
+    projection,
+    attachmentId,
+    claimId,
+    {
+      attachment: {
+        state: "orphaned",
+        updatedAt: timestamp,
+        orphanedAt: timestamp,
+        orphanedReason: reason.attachment
+      },
+      claim: {
+        state: "orphaned",
+        updatedAt: timestamp,
+        orphanedAt: timestamp,
+        orphanedReason: reason.claim
+      }
+    },
+    options
+  );
+}
+
+export function authorityFinalizationDispositionForOutcome(
+  outcome: HostExecutionOutcome["outcome"] | NonNullable<HostRunRecord["terminalOutcome"]>
+): "release" | "detach" {
+  if (outcome.kind !== "result") {
+    return "detach";
+  }
+
+  const status = "capture" in outcome ? outcome.capture.status : outcome.result.status;
+  return status === "completed" || status === "failed" ? "release" : "detach";
+}
+
 async function requeueAssignmentForRetry(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   assignmentId: string,
   objective: string,
-  options?: {
-    snapshotFallback?: boolean;
-  }
+  options?: ProjectionWriteOptions
 ): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
   const timestamp = nowIso();
   return persistProjectionEvents(
@@ -376,15 +487,222 @@ async function requeueAssignmentForRetry(
   );
 }
 
+function buildRecoveredAuthorityRepairEvents(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string,
+  repair:
+    | {
+        kind: "release";
+        attachmentReason: string;
+        claimReason: string;
+      }
+    | {
+        kind: "orphan";
+        attachmentReason: string;
+        claimReason: string;
+      },
+  timestamp: string
+): RuntimeEvent[] {
+  const activeBinding = getActiveClaimForAssignment(projection, assignmentId);
+  if (!activeBinding) {
+    return [];
+  }
+
+  return [
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "attachment.updated",
+      payload: {
+        attachmentId: activeBinding.attachment.id,
+        patch:
+          repair.kind === "release"
+            ? {
+                state: "released",
+                updatedAt: timestamp,
+                releasedAt: timestamp,
+                releasedReason: repair.attachmentReason
+              }
+            : {
+                state: "orphaned",
+                updatedAt: timestamp,
+                orphanedAt: timestamp,
+                orphanedReason: repair.attachmentReason
+              }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "claim.updated",
+      payload: {
+        claimId: activeBinding.claim.id,
+        patch:
+          repair.kind === "release"
+            ? {
+                state: "released",
+                updatedAt: timestamp,
+                releasedAt: timestamp,
+                releasedReason: repair.claimReason
+              }
+            : {
+                state: "orphaned",
+                updatedAt: timestamp,
+                orphanedAt: timestamp,
+                orphanedReason: repair.claimReason
+              }
+      }
+    }
+  ];
+}
+
+function buildRecoveredDetachedAuthorityRepairEvents(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  record: HostRunRecord,
+  assignmentId: string,
+  timestamp: string
+): RuntimeEvent[] {
+  const activeBinding = getActiveClaimForAssignment(projection, assignmentId);
+  if (!activeBinding) {
+    return [];
+  }
+
+  const recoveredNativeSessionId =
+    typeof record.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
+      ? record.adapterData.nativeRunId
+      : activeBinding.attachment.nativeSessionId;
+  const adapterMetadata = sanitizeAttachmentAdapterMetadata(record.adapterData);
+
+  if (activeBinding.attachment.state === "attached") {
+    return [
+      {
+        eventId: randomUUID(),
+        sessionId: projection.sessionId,
+        timestamp,
+        type: "attachment.updated",
+        payload: {
+          attachmentId: activeBinding.attachment.id,
+          patch: {
+            state: "detached_resumable",
+            updatedAt: timestamp,
+            detachedAt: timestamp,
+            ...(recoveredNativeSessionId ? { nativeSessionId: recoveredNativeSessionId } : {}),
+            ...(adapterMetadata ? { adapterMetadata } : {})
+          }
+        }
+      }
+    ];
+  }
+
+  if (activeBinding.attachment.state === "detached_resumable") {
+    if (activeBinding.attachment.nativeSessionId || !recoveredNativeSessionId) {
+      return [];
+    }
+    return [
+      {
+        eventId: randomUUID(),
+        sessionId: projection.sessionId,
+        timestamp,
+        type: "attachment.updated",
+        payload: {
+          attachmentId: activeBinding.attachment.id,
+          patch: {
+            updatedAt: timestamp,
+            nativeSessionId: recoveredNativeSessionId,
+            ...(adapterMetadata ? { adapterMetadata } : {})
+          }
+        }
+      }
+    ];
+  }
+
+  if (activeBinding.attachment.state !== "provisional") {
+    return [];
+  }
+
+  if (!recoveredNativeSessionId) {
+    return [];
+  }
+
+  return [
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "attachment.updated",
+        payload: {
+          attachmentId: activeBinding.attachment.id,
+          patch: {
+            state: "detached_resumable",
+            updatedAt: timestamp,
+            detachedAt: timestamp,
+            nativeSessionId: recoveredNativeSessionId,
+            ...(adapterMetadata ? { adapterMetadata } : {})
+          }
+        }
+      }
+  ];
+}
+
+function buildCompletedAuthorityRepairEvents(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  record: HostRunRecord,
+  timestamp: string
+): RuntimeEvent[] {
+  if (!record.terminalOutcome) {
+    return [];
+  }
+
+  if (authorityFinalizationDispositionForOutcome(record.terminalOutcome) === "detach") {
+    return buildRecoveredDetachedAuthorityRepairEvents(
+      projection,
+      record,
+      record.assignmentId,
+      timestamp
+    );
+  }
+
+  return buildRecoveredAuthorityRepairEvents(
+    projection,
+    record.assignmentId,
+    {
+      kind: "release",
+      attachmentReason:
+        record.terminalOutcome?.kind === "result"
+          ? `Recovered completed assignment finished with ${record.terminalOutcome.result.status}.`
+          : "Recovered completed assignment finished with a decision.",
+      claimReason: "Recovered completed assignment finished."
+    },
+    timestamp
+  );
+}
+
+function buildStaleAuthorityRepairEvents(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string,
+  timestamp: string
+): RuntimeEvent[] {
+  return buildRecoveredAuthorityRepairEvents(
+    projection,
+    assignmentId,
+    {
+      kind: "orphan",
+      attachmentReason: "Stale host run was requeued for retry.",
+      claimReason: "Stale host run was requeued for retry."
+    },
+    timestamp
+  );
+}
+
 async function reconcileProvisionalAttachmentClaims(
   store: RuntimeStore,
   adapter: HostAdapter,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   diagnostics: CommandDiagnostic[],
   recordByAssignmentId: Map<string, HostRunRecord>,
-  options?: {
-    snapshotFallback?: boolean;
-  }
+  options?: ProjectionWriteOptions
 ): Promise<{
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
   changed: boolean;
@@ -434,6 +752,9 @@ async function reconcileProvisionalAttachmentClaims(
 
     const startedHostRun = !!record;
     const shouldRequeue = assignment?.state === "in_progress";
+    const cleanupReason = hasLiveLease
+      ? "Wrapped launch left only unverifiable provisional session state."
+      : "Wrapped launch ended before native session identity could be finalized.";
     effectiveProjection = await transitionAttachmentClaim(
       store,
       effectiveProjection,
@@ -445,17 +766,13 @@ async function reconcileProvisionalAttachmentClaims(
               state: "orphaned",
               updatedAt: nowIso(),
               orphanedAt: nowIso(),
-              orphanedReason: hasLiveLease
-                ? "Wrapped launch left only unverifiable provisional session state."
-                : "Wrapped launch ended before native session identity could be finalized."
+              orphanedReason: cleanupReason
             },
             claim: {
               state: "orphaned",
               updatedAt: nowIso(),
               orphanedAt: nowIso(),
-              orphanedReason: hasLiveLease
-                ? "Wrapped launch left only unverifiable provisional session state."
-                : "Wrapped launch ended before native session identity could be finalized."
+              orphanedReason: cleanupReason
             }
           }
         : {
@@ -471,26 +788,26 @@ async function reconcileProvisionalAttachmentClaims(
               releasedAt: nowIso(),
               releasedReason: "Wrapped launch did not establish a durable host session."
             }
-          },
-      options
+        },
+        options
     );
-    if (hasLiveLease && record) {
-      try {
-        await adapter.reconcileStaleRun(store, {
-          ...record,
-          state: "completed",
-          staleAt: nowIso(),
-          staleReason: "Wrapped launch left only unverifiable provisional session state."
-        });
-      } catch {
-        // runtime authority has already been cleared; artifact cleanup remains best-effort
+    const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
+      store,
+      adapter,
+      claim.assignmentId,
+      {
+        staleAt: nowIso(),
+        staleReason: cleanupReason,
+        ...(record ? { inspectedRecord: record } : {})
       }
-    } else if (record?.state === "running") {
-      try {
-        await adapter.releaseRunLease(store, claim.assignmentId);
-      } catch {
-        // runtime authority has already been cleared; artifact cleanup remains best-effort
-      }
+    );
+    if (cleanupError) {
+      diagnostics.push(
+        ...diagnosticsFromWarning(
+          `Host run cleanup artifacts could not be updated for assignment ${claim.assignmentId}. ${cleanupError.message}`,
+          "host-run-persist-failed"
+        )
+      );
     }
     if (shouldRequeue && assignment) {
       effectiveProjection = await requeueAssignmentForRetry(
@@ -708,7 +1025,13 @@ export async function reconcileActiveRuns(
           reconciliation.events,
           staleRecoveryState
         );
-        if (pendingEvents.length === 0) {
+        const authorityRepairEvents = buildStaleAuthorityRepairEvents(
+          effectiveProjection,
+          assignmentId,
+          reconciliation.events[0]?.timestamp ?? nowIso()
+        );
+        const recoveryEvents = [...pendingEvents, ...authorityRepairEvents];
+        if (recoveryEvents.length === 0) {
           changed = true;
           for (const event of reconciliation.events) {
             applyRuntimeEvent(effectiveProjection, event);
@@ -745,12 +1068,12 @@ export async function reconcileActiveRuns(
           ]);
         }
         if (snapshotFallback) {
-          for (const event of pendingEvents) {
+          for (const event of recoveryEvents) {
             applyRuntimeEvent(effectiveProjection, event);
           }
           await store.writeSnapshot(toSnapshot(effectiveProjection));
         } else {
-          await store.appendEvents(pendingEvents);
+          await store.appendEvents(recoveryEvents);
           const syncResult = await store.syncSnapshotFromEventsWithRecovery();
           effectiveProjection = syncResult.projection;
           diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
@@ -850,7 +1173,13 @@ export async function reconcileActiveRuns(
     }
 
     const pendingEvents = selectPendingStaleRecoveryEvents(reconciliation.events, staleRecoveryState);
-    if (pendingEvents.length === 0) {
+    const authorityRepairEvents = buildStaleAuthorityRepairEvents(
+      effectiveProjection,
+      assignmentId,
+      reconciliation.events[0]?.timestamp ?? nowIso()
+    );
+    const recoveryEvents = [...pendingEvents, ...authorityRepairEvents];
+    if (recoveryEvents.length === 0) {
       if (snapshotFallback) {
         changed = true;
         for (const event of reconciliation.events) {
@@ -900,12 +1229,12 @@ export async function reconcileActiveRuns(
       ]);
     }
     if (snapshotFallback) {
-      for (const event of pendingEvents) {
+      for (const event of recoveryEvents) {
         applyRuntimeEvent(effectiveProjection, event);
       }
       await store.writeSnapshot(toSnapshot(effectiveProjection));
     } else {
-      await store.appendEvents(pendingEvents);
+      await store.appendEvents(recoveryEvents);
       const syncResult = await store.syncSnapshotFromEventsWithRecovery();
       effectiveProjection = syncResult.projection;
       diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
@@ -1053,15 +1382,22 @@ async function reconcileCompletedRunRecord(
     };
   }
 
-  if (completedRecovery.events.length > 0) {
+  const completedAuthorityEvents = buildCompletedAuthorityRepairEvents(
+    effectiveProjection,
+    record,
+    completedRecovery.allEvents[0]?.timestamp ?? nowIso()
+  );
+  const completedEvents = [...completedRecovery.events, ...completedAuthorityEvents];
+
+  if (completedEvents.length > 0) {
     changed = true;
     if (options.snapshotFallback) {
-      for (const event of completedRecovery.events) {
+      for (const event of completedEvents) {
         applyRuntimeEvent(effectiveProjection, event);
       }
       await store.writeSnapshot(toSnapshot(effectiveProjection));
     } else {
-      await store.appendEvents(completedRecovery.events);
+      await store.appendEvents(completedEvents);
       const syncResult = await store.syncSnapshotFromEventsWithRecovery();
       effectiveProjection = syncResult.projection;
       diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
@@ -1098,27 +1434,66 @@ async function reconcileCompletedRunRecord(
   };
 }
 
-async function reconcileStaleRunWithLeaseVerification(
+export async function cleanupHostRunArtifactsWithLeaseVerification(
   store: RuntimeStore,
   adapter: HostAdapter,
-  record: HostRunRecord
+  assignmentId: string,
+  options?: {
+    reconcileRecord?: HostRunRecord;
+    inspectedRecord?: HostRunRecord;
+    staleAt?: string;
+    staleReasonCode?: HostRunRecord["staleReasonCode"];
+    staleReason?: string;
+    failureLabel?: string;
+  }
 ): Promise<Error | undefined> {
   let cleanupError: Error | undefined;
   try {
-    await adapter.reconcileStaleRun(store, record);
+    if (options?.reconcileRecord) {
+      await adapter.reconcileStaleRun(store, options.reconcileRecord);
+    } else {
+      const inspected = options?.inspectedRecord ?? await adapter.inspectRun(store, assignmentId);
+      if (inspected?.state === "running") {
+        await adapter.reconcileStaleRun(store, {
+          ...inspected,
+          state: "completed",
+          staleAt: options?.staleAt ?? nowIso(),
+          ...(options?.staleReasonCode ? { staleReasonCode: options.staleReasonCode } : {}),
+          ...(options?.staleReason ? { staleReason: options.staleReason } : {})
+        });
+      } else if (await adapter.hasRunLease(store, assignmentId)) {
+        await adapter.releaseRunLease(store, assignmentId);
+      }
+    }
   } catch (error) {
     cleanupError = error instanceof Error ? error : new Error(String(error));
   }
 
-  if (await adapter.hasRunLease(store, record.assignmentId)) {
+  if (await adapter.hasRunLease(store, assignmentId)) {
     throw new Error(
-      `Host run reconciliation failed to clear the active lease for assignment ${record.assignmentId}. ${
+      `Host run ${options?.failureLabel ?? "cleanup"} failed to clear the active lease for assignment ${assignmentId}. ${
         cleanupError?.message ?? "The lease artifact remained on disk."
       }`
     );
   }
 
   return cleanupError;
+}
+
+async function reconcileStaleRunWithLeaseVerification(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  record: HostRunRecord
+): Promise<Error | undefined> {
+  return cleanupHostRunArtifactsWithLeaseVerification(
+    store,
+    adapter,
+    record.assignmentId,
+    {
+      reconcileRecord: record,
+      failureLabel: "reconciliation"
+    }
+  );
 }
 
 function selectCompletedRunCleanupRecord(
@@ -1160,6 +1535,7 @@ function isStaleRunAlreadyReconciled(
   const assignment = projection.assignments.get(assignmentId);
   return (
     assignment?.state === "queued" &&
+    !getActiveClaimForAssignment(projection, assignmentId) &&
     (
       (snapshotFallback && hasEquivalentRuntimeStatus(projection.status, expectedStatus)) ||
       (

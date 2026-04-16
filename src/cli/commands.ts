@@ -25,15 +25,21 @@ import { nowIso } from "../utils/time.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 import {
+  authorityFinalizationDispositionForOutcome,
   buildOutcomeEvents,
+  cleanupHostRunArtifactsWithLeaseVerification,
   getRunnableAssignment,
   listAuthoritativeAttachmentClaims,
   loadReconciledProjectionWithDiagnostics,
   listResumableAttachmentClaims,
   markAssignmentInProgress,
+  orphanAttachmentClaim,
   projectionForRunnableAssignment,
-  reconcileActiveRuns
+  reconcileActiveRuns,
+  releaseAttachmentClaim,
+  updateAttachmentToDetachedResumable
 } from "./run-operations.js";
+import type { ProjectionWriteOptions } from "./run-operations.js";
 
 export type { CommandDiagnostic } from "./types.js";
 export { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
@@ -70,10 +76,6 @@ export interface RunRuntimeResult {
   execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>;
   recoveredOutcome: boolean;
   diagnostics: CommandDiagnostic[];
-}
-
-interface ProjectionWriteOptions {
-  snapshotFallback?: boolean;
 }
 
 type SessionExecution = Pick<HostExecutionOutcome, "outcome" | "run">;
@@ -895,56 +897,6 @@ async function updateAttachmentState(
   return (await persistProjectionEvents(store, projection, events, options)).projection;
 }
 
-async function transitionAttachmentClaim(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  patch: {
-    attachment: Partial<RuntimeAttachment>;
-    claim: Partial<AssignmentClaim>;
-  },
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return (await persistProjectionEvents(store, projection, [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "attachment.updated",
-      payload: {
-        attachmentId,
-        patch: patch.attachment
-      }
-    },
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "claim.updated",
-      payload: {
-        claimId,
-        patch: patch.claim
-      }
-    }
-  ], options)).projection;
-}
-
-async function updateAttachmentToDetachedResumable(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  options?: ProjectionWriteOptions,
-  detachedAt = nowIso()
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  return updateAttachmentState(store, projection, attachmentId, {
-    state: "detached_resumable",
-    updatedAt: detachedAt,
-    detachedAt
-  }, options);
-}
-
 async function activateAttachmentSession(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
@@ -984,76 +936,6 @@ async function activateAttachmentSession(
   );
 }
 
-async function releaseAttachmentClaim(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  reason: {
-    attachment: string;
-    claim: string;
-  },
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return transitionAttachmentClaim(
-    store,
-    projection,
-    attachmentId,
-    claimId,
-    {
-      attachment: {
-        state: "released",
-        updatedAt: timestamp,
-        releasedAt: timestamp,
-        releasedReason: reason.attachment
-      },
-      claim: {
-        state: "released",
-        updatedAt: timestamp,
-        releasedAt: timestamp,
-        releasedReason: reason.claim
-      }
-    },
-    options
-  );
-}
-
-async function orphanAttachmentClaim(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  reason: {
-    attachment: string;
-    claim: string;
-  },
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return transitionAttachmentClaim(
-    store,
-    projection,
-    attachmentId,
-    claimId,
-    {
-      attachment: {
-        state: "orphaned",
-        updatedAt: timestamp,
-        orphanedAt: timestamp,
-        orphanedReason: reason.attachment
-      },
-      claim: {
-        state: "orphaned",
-        updatedAt: timestamp,
-        orphanedAt: timestamp,
-        orphanedReason: reason.claim
-      }
-    },
-    options
-  );
-}
-
 async function finalizeAttachmentAuthority(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
@@ -1064,8 +946,7 @@ async function finalizeAttachmentAuthority(
   options?: ProjectionWriteOptions,
   detachedAt?: string
 ): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const terminal = isTerminalExecution(execution);
-  if (terminal) {
+  if (authorityFinalizationDispositionForOutcome(execution.outcome) === "release") {
     return releaseAttachmentClaim(
       store,
       projection,
@@ -1124,20 +1005,22 @@ async function orphanAttachmentClaimAndRequeue(
     options
   );
   const diagnostics: CommandDiagnostic[] = [];
-  try {
-    const inspected = await adapter.inspectRun(store, claim.assignmentId);
-    if (inspected?.state === "running") {
-      await adapter.reconcileStaleRun(store, {
-        ...inspected,
-        state: "completed",
-        staleAt: timestamp,
-        staleReason: reason
-      });
-    } else if (await adapter.hasRunLease(store, claim.assignmentId)) {
-      await adapter.releaseRunLease(store, claim.assignmentId);
+  const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
+    store,
+    adapter,
+    claim.assignmentId,
+    {
+      staleAt: timestamp,
+      staleReason: reason
     }
-  } catch {
-    // runtime authority is already cleared; lease cleanup remains best-effort here
+  );
+  if (cleanupError) {
+    diagnostics.push(
+      ...diagnosticsFromWarning(
+        `Host run cleanup artifacts could not be updated for assignment ${claim.assignmentId}. ${cleanupError.message}`,
+        "host-run-persist-failed"
+      )
+    );
   }
   const assignment = effectiveProjection.assignments.get(claim.assignmentId);
   if (assignment) {
@@ -1183,30 +1066,19 @@ async function cleanupResumeLeaseArtifacts(
   stoppedAt: string,
   reason: string
 ): Promise<string | undefined> {
-  try {
-    const inspected = await adapter.inspectRun(store, assignmentId);
-    if (inspected?.state === "running") {
-      await adapter.reconcileStaleRun(store, {
-        ...inspected,
-        state: "completed",
-        staleAt: stoppedAt,
-        staleReason: reason
-      });
-      return undefined;
+  const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
+    store,
+    adapter,
+    assignmentId,
+    {
+      staleAt: stoppedAt,
+      staleReason: reason
     }
-    if (await adapter.hasRunLease(store, assignmentId)) {
-      await adapter.releaseRunLease(store, assignmentId);
-    }
+  );
+  if (!cleanupError) {
     return undefined;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return `Failed to clear host run lease metadata after wrapped resume for assignment ${assignmentId}. ${message}`;
   }
-}
-
-function isTerminalExecution(execution: SessionExecution): boolean {
-  return execution.outcome.kind === "result" &&
-    (execution.outcome.capture.status === "completed" || execution.outcome.capture.status === "failed");
+  return `Failed to clear host run lease metadata after wrapped resume for assignment ${assignmentId}. ${cleanupError.message}`;
 }
 
 export async function inspectRuntimeRun(

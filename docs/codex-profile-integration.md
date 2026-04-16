@@ -133,9 +133,10 @@ For the current hardening slice:
 - `ctx init` initializes the runtime and prepares Codex host artifacts
 - `ctx run` performs the wrapped Codex launch path
 - `ctx resume` reclaims the authoritative Codex session when one
-  attached or detached-but-resumable attachment exists, then returns
-  that attachment to `detached-but-resumable` when the wrapped reclaim
-  exits without a terminal runtime outcome
+  attached or detached-but-resumable attachment still carries a stored
+  native session id, then returns that attachment to
+  `detached-but-resumable` when the wrapped reclaim exits without a
+  terminal runtime outcome
 - wrapped reclaim uses the structured `exec resume` path so successful
   resume records result/decision outcomes and completion telemetry
   through the same runtime-owned outcome pipeline as wrapped launch
@@ -143,6 +144,19 @@ For the current hardening slice:
   aligned on runtime-owned persistence, attachment finalization, and
   operator-visible status semantics; reclaim adds only the prior
   attachment / same-session verification requirement
+- the same finalization rule applies when a completed Codex host run is
+  recovered after an interruption: recovered decisions and recovered
+  partial results detach back to detached-but-resumable authority,
+  while only recovered terminal results release the attachment and
+  claim; if the binding is still provisional but Codex already
+  persisted a durable native session id, recovery promotes it into
+  detached resumable authority instead of clearing it as abandoned; if
+  the binding is already detached but missing that id, recovery
+  backfills it from durable host metadata before wrapped reclaim is
+  considered available
+- wrapped launch and wrapped reclaim use the same default sandbox /
+  approval mode selection at the Codex CLI boundary; reclaim must not
+  introduce a second unmodeled execution policy difference
 - if Codex does not materialize the `-o` last-message file, Coortex
   falls back to the streamed `agent_message` JSONL item and validates
   the same structured outcome there instead

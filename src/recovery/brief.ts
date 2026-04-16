@@ -1,4 +1,8 @@
-import type { RecoveryBrief, RuntimeProjection } from "../core/types.js";
+import {
+  isWrappedResumeCapableAttachment,
+  type RecoveryBrief,
+  type RuntimeProjection
+} from "../core/types.js";
 
 export interface RecoveryBriefOptions {
   allowAttachmentResumeAction?: boolean;
@@ -59,7 +63,7 @@ function determineNextAction(
       return false;
     }
     const attachment = projection.attachments.get(claim.attachmentId);
-    return attachment?.state === "attached" || attachment?.state === "detached_resumable";
+    return !!attachment && isWrappedResumeCapableAttachment(attachment);
   });
   if (allowAttachmentResumeAction && resumableClaim) {
     const attachment = projection.attachments.get(resumableClaim.attachmentId);

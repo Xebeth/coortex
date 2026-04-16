@@ -257,7 +257,8 @@ test("default codex runner uses exec resume with structured last-message output 
 
     const args = JSON.parse(await readFile(argsPath, "utf8")) as string[];
     assert.deepEqual(args.slice(0, 4), ["exec", "resume", "--json", "thread-resume-default"]);
-    assert.ok(args.includes("--full-auto"));
+    assert.ok(args.includes("--sandbox"));
+    assert.ok(args.includes("workspace-write"));
     assert.ok(!args.includes("--dangerously-bypass-approvals-and-sandbox"));
     assert.ok(args.includes("-o"));
     assert.ok(args.includes(outputPath));
@@ -296,7 +297,8 @@ test("default codex runner uses dangerous bypass for exec resume when enabled", 
     const args = JSON.parse(await readFile(argsPath, "utf8")) as string[];
     assert.deepEqual(args.slice(0, 4), ["exec", "resume", "--json", "thread-resume-danger"]);
     assert.ok(args.includes("--dangerously-bypass-approvals-and-sandbox"));
-    assert.ok(!args.includes("--full-auto"));
+    assert.ok(!args.includes("--sandbox"));
+    assert.ok(!args.includes("workspace-write"));
   } finally {
     process.env.PATH = originalPath;
   }

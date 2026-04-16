@@ -227,3 +227,83 @@ test("recovery brief can suppress attachment-resume next actions when wrapped re
   assert.match(wrapped.nextRequiredAction, /Resume attachment/);
   assert.match(manual.nextRequiredAction, /Resolve decision/);
 });
+
+test("recovery brief does not advertise wrapped resume without a stored native session id", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-missing-native-id-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+
+  await store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: claimId,
+          assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+
+  assert.doesNotMatch(brief.nextRequiredAction, /Resume attachment/);
+  assert.match(brief.nextRequiredAction, /Continue assignment/);
+});

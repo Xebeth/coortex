@@ -182,7 +182,7 @@ node dist/cli/ctx.js inspect
 node dist/cli/ctx.js resume
 ```
 
-`ctx resume` first targets the single authoritative attached or detached-but-resumable attachment. During a verified wrapped reclaim the runtime marks that attachment attached, then returns it to `detached_resumable` when the wrapped resume process exits without a terminal runtime outcome. If no authoritative attachment exists after legacy lease normalization, it refreshes the derived recovery envelope from current runtime state instead.
+`ctx resume` first targets the single authoritative attached or detached-but-resumable attachment that still carries a stored native session id. During a verified wrapped reclaim the runtime marks that attachment attached, then returns it to `detached_resumable` when the wrapped resume process exits without a terminal runtime outcome. If no such reclaimable attachment exists, it refreshes the derived recovery envelope from current runtime state instead.
 
 Successful wrapped reclaim now records result or decision outcomes
 through the same runtime-owned durable path as `ctx run`, using the

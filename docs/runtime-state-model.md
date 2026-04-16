@@ -140,8 +140,24 @@ For Milestone 2 reclaim semantics:
   the attachment back to `detached_resumable`
 - wrapped launch and wrapped resume both durably capture result or
   decision outcomes through the same runtime-owned event path
+- stale-run reconciliation orphans any active attachment/claim
+  authority before the assignment is made retryable again
+- completed-run reconciliation uses the same finalization policy as the
+  live wrapped launch/resume path:
+  terminal recovered results release active attachment/claim authority,
+  while recovered decisions and recovered partial results detach active
+  attached authority back to `detached_resumable` and preserve the
+  active claim; if the active binding is still `provisional` but the
+  completed host record carries a durable native session id,
+  reconciliation must first promote that binding into
+  `detached_resumable` truth instead of orphaning it; if the active
+  binding is already detached but missing that id, reconciliation must
+  backfill it from durable host metadata before leaving wrapped reclaim
+  available
 - `provisional` is not authoritative resumable truth until runtime
   reconciliation can promote it
+- authoritative attachment truth may exist without wrapped-reclaim
+  eligibility; wrapped reclaim requires a stored native session id
 - attachment and claim mutations that together create or change
   authority must become durable as one runtime batch, not as independent
   half-authoritative writes
@@ -154,6 +170,8 @@ For Milestone 2 reclaim semantics:
 - host-run-local control hints used only for reconciliation must be
   stripped before host metadata is copied into runtime attachment
   metadata
+- reclaim/provisional cleanup may not advertise queued retry truth while
+  a host lease blocker is still live
 
 ## 7. Assignment Claim
 

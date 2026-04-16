@@ -2,6 +2,7 @@
 import { join, resolve } from "node:path";
 
 import type { HostAdapter } from "../adapters/contract.js";
+import { isWrappedResumeCapableAttachment } from "../core/types.js";
 import { getNativeRunId } from "../core/run-state.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
@@ -143,7 +144,7 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     attachment.state === "detached_resumable"
   );
   const resumableAttachments = attachments.filter((attachment) =>
-    attachment.state === "attached" || attachment.state === "detached_resumable"
+    isWrappedResumeCapableAttachment(attachment)
   );
 
   console.log(`Session: ${projection.sessionId}`);

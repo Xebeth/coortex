@@ -2306,6 +2306,193 @@ test("host-run recovery matrix retries completed-run cleanup after the outcome i
   assert.notEqual(firstLeaseContents, undefined);
 });
 
+test("host-run recovery matrix releases authoritative attachment truth during completed-run recovery", async () => {
+  const ctx = await createMatrixContext();
+  const { attachmentId, claimId } = await appendDetachedResumableAttachmentClaim(ctx, ctx.assignmentId);
+  const completedRecord = completedResultRecord(
+    ctx.assignmentId,
+    "completed",
+    "Recovered completed result releases attachment authority."
+  );
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "released");
+  assert.equal(recovered.projection.claims.get(claimId)?.state, "released");
+  assert.match(
+    recovered.projection.attachments.get(attachmentId)?.releasedReason ?? "",
+    /Recovered completed assignment finished/
+  );
+  await assert.rejects(
+    resumeRuntime(ctx.store, ctx.adapter),
+    /No active assignment is available to resume/
+  );
+});
+
+test("host-run recovery matrix detaches attached authority for recovered completed decisions", async () => {
+  const ctx = await createMatrixContext();
+  const { attachmentId, claimId } = await appendAttachedAttachmentClaim(ctx, ctx.assignmentId);
+  const completedRecord = completedDecisionRecord(
+    ctx.assignmentId,
+    "Recovered decision keeps the same-session claim resumable."
+  );
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "detached_resumable");
+  assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+  assert.equal(recovered.projection.status.activeAssignmentIds[0], ctx.assignmentId);
+  assert.equal(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
+  );
+});
+
+test("host-run recovery matrix detaches attached authority for recovered partial results", async () => {
+  const ctx = await createMatrixContext();
+  const { attachmentId, claimId } = await appendAttachedAttachmentClaim(ctx, ctx.assignmentId);
+  const completedRecord = completedResultRecord(
+    ctx.assignmentId,
+    "partial",
+    "Recovered partial host completion keeps the claim resumable."
+  );
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "detached_resumable");
+  assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
+  assert.equal(getRunnableAssignment(recovered.projection).id, ctx.assignmentId);
+  assert.equal(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
+  );
+});
+
+test("host-run recovery matrix promotes provisional authority for recovered completed decisions", async () => {
+  const ctx = await createMatrixContext();
+  const { attachmentId, claimId } = await appendProvisionalAttachmentClaim(ctx, ctx.assignmentId);
+  const completedRecord = completedDecisionRecord(
+    ctx.assignmentId,
+    "Recovered decision promotes provisional authority into resumable state."
+  );
+  completedRecord.adapterData = {
+    nativeRunId: "matrix-thread-provisional-decision"
+  };
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "detached_resumable");
+  assert.equal(
+    recovered.projection.attachments.get(attachmentId)?.nativeSessionId,
+    "matrix-thread-provisional-decision"
+  );
+  assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+  assert.equal(recovered.projection.status.activeAssignmentIds[0], ctx.assignmentId);
+  assert.equal(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
+  );
+});
+
+test("host-run recovery matrix promotes provisional authority for recovered partial results", async () => {
+  const ctx = await createMatrixContext();
+  const { attachmentId, claimId } = await appendProvisionalAttachmentClaim(ctx, ctx.assignmentId);
+  const completedRecord = completedResultRecord(
+    ctx.assignmentId,
+    "partial",
+    "Recovered partial host completion promotes provisional authority into resumable state."
+  );
+  completedRecord.adapterData = {
+    nativeRunId: "matrix-thread-provisional-partial"
+  };
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "detached_resumable");
+  assert.equal(
+    recovered.projection.attachments.get(attachmentId)?.nativeSessionId,
+    "matrix-thread-provisional-partial"
+  );
+  assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
+  assert.equal(getRunnableAssignment(recovered.projection).id, ctx.assignmentId);
+  assert.equal(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
+  );
+});
+
+test("host-run recovery matrix backfills missing native session id on detached authority for recovered partial results", async () => {
+  const ctx = await createMatrixContext();
+  const { attachmentId, claimId } = await appendDetachedResumableAttachmentClaim(
+    ctx,
+    ctx.assignmentId,
+    null
+  );
+  const completedRecord = completedResultRecord(
+    ctx.assignmentId,
+    "partial",
+    "Recovered partial host completion heals detached authority identity."
+  );
+  completedRecord.adapterData = {
+    nativeRunId: "matrix-thread-detached-missing-id"
+  };
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, completedRecord);
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "detached_resumable");
+  assert.equal(
+    recovered.projection.attachments.get(attachmentId)?.nativeSessionId,
+    "matrix-thread-detached-missing-id"
+  );
+  assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
+});
+
+test("host-run recovery matrix orphans authoritative attachment truth during stale-run recovery", async () => {
+  const ctx = await createMatrixContext();
+  const { attachmentId, claimId } = await appendDetachedResumableAttachmentClaim(ctx, ctx.assignmentId);
+  await ctx.adapter.runStore.write(runningRecord(ctx.assignmentId, "2000-01-01T00:00:00.000Z"));
+
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection);
+
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "orphaned");
+  assert.equal(recovered.projection.claims.get(claimId)?.state, "orphaned");
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+  assert.match(
+    recovered.projection.attachments.get(attachmentId)?.orphanedReason ?? "",
+    /Stale host run was requeued for retry/
+  );
+});
+
 test("host-run recovery matrix flushes completed-decision snapshot before cleanup on retry when recovery events are already durable", async () => {
   const ctx = await createMatrixContext();
   await ctx.adapter.runStore.write(
@@ -3228,6 +3415,103 @@ async function appendAssignmentBeyondSnapshotBoundary(ctx: MatrixContext): Promi
     }
   });
   return assignmentId;
+}
+
+async function appendDetachedResumableAttachmentClaim(
+  ctx: MatrixContext,
+  assignmentId: string,
+  nativeSessionId: string | null = `native-${assignmentId}`
+): Promise<{ attachmentId: string; claimId: string }> {
+  return appendAttachmentClaimBinding(ctx, assignmentId, {
+    state: "detached_resumable",
+    nativeSessionId
+  });
+}
+
+async function appendAttachedAttachmentClaim(
+  ctx: MatrixContext,
+  assignmentId: string,
+  nativeSessionId = `native-${assignmentId}`
+): Promise<{ attachmentId: string; claimId: string }> {
+  return appendAttachmentClaimBinding(ctx, assignmentId, {
+    state: "attached",
+    nativeSessionId
+  });
+}
+
+async function appendProvisionalAttachmentClaim(
+  ctx: MatrixContext,
+  assignmentId: string
+): Promise<{ attachmentId: string; claimId: string }> {
+  return appendAttachmentClaimBinding(ctx, assignmentId, {
+    state: "provisional"
+  });
+}
+
+async function appendAttachmentClaimBinding(
+  ctx: MatrixContext,
+  assignmentId: string,
+  options: {
+    state: "attached" | "detached_resumable" | "provisional";
+    nativeSessionId?: string | null;
+  }
+): Promise<{ attachmentId: string; claimId: string }> {
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  const timestamp = nowIso();
+  const nativeSessionId =
+    options.nativeSessionId === undefined ? `native-${assignmentId}` : options.nativeSessionId;
+  await ctx.store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "matrix",
+          host: "matrix",
+          state: options.state,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          ...(options.state === "attached"
+            ? { attachedAt: timestamp }
+            : options.state === "detached_resumable"
+              ? { detachedAt: timestamp }
+              : {}),
+          ...(options.state === "provisional" || !nativeSessionId ? {} : { nativeSessionId }),
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: claimId,
+          assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
+  await ctx.store.syncSnapshotFromEvents();
+  ctx.projection = await loadOperatorProjection(ctx.store);
+  return { attachmentId, claimId };
 }
 
 function projectionForSingleAssignment(

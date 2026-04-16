@@ -158,6 +158,9 @@ effective host-run state follows these rules:
 - Warning-only degradation is allowed only after lease cleanup is
   confirmed. If lease cleanup fails, the command must surface a stronger
   persistence failure than a normal warning.
+- Wrapped reclaim failure and provisional-authority cleanup may clear
+  runtime attachment truth before host cleanup finishes, but they must
+  not surface queued retry truth unless lease cleanup has been proved.
 
 ---
 
@@ -169,10 +172,11 @@ When an active lease is stale, reconciliation must:
 
 1. rewrite the host run record to a non-running stale-completed state
 2. remove the active lease
-3. move the assignment back to `queued`
-4. update runtime status from the latest projection, not the original
+3. orphan any active attachment and claim authority for that assignment
+4. move the assignment back to `queued`
+5. update runtime status from the latest projection, not the original
    one from the beginning of reconciliation
-5. emit stale-run reconciliation telemetry
+6. emit stale-run reconciliation telemetry
 
 The operation must be idempotent. Re-running `status`, `resume`, or
 `run` after reconciliation must not repeatedly requeue the same stale
@@ -203,6 +207,20 @@ still active, already expired, missing an expiry, invalid, or malformed.
 Recovery must absorb the terminal outcome into runtime truth and then
 clear the leftover lease; it must not requeue the assignment or fall
 back to stale-run handling.
+
+If the recovered assignment still has active attachment/claim authority,
+completed-run reconciliation must finalize that authority through the
+same stateful repair surface used by wrapped launch/resume finalization:
+recovered terminal results release attachment/claim authority, while
+recovered decisions and recovered partial results keep the active claim
+and detach active attached authority back to `detached_resumable`.
+If the active binding is still `provisional` but the completed host run
+contains a durable native session id, reconciliation must promote that
+binding into `detached_resumable` authority before provisional cleanup
+can treat it as abandoned launch state.
+If the active binding is already `detached_resumable` but missing a
+stored native session id, completed-run reconciliation must backfill
+that id from durable host metadata before leaving the claim resumable.
 
 Completed-run reconciliation must be idempotent. Once the runtime has
 absorbed the terminal result or decision, later commands must not
@@ -235,6 +253,8 @@ runtime truth on their own.
 
 - `ctx resume`
   Must build its brief from reconciled runtime state.
+  It may attempt wrapped same-session reclaim only when the targeted
+  authoritative attachment still carries a stored native session id.
   When wrapped same-session reclaim is verified, it must persist result
   or decision outcomes through the same normalized runtime-event path as
   `ctx run`.
@@ -251,6 +271,20 @@ runtime truth on their own.
   telemetry semantics. The only intentional extra guard on `ctx resume`
   is same-session identity verification against an existing
   authoritative attachment.
+  The same alignment applies when completed host runs are recovered:
+  recovered decisions and recovered partial results must preserve the
+  active claim and detach active attached authority back to
+  `detached_resumable`, while only recovered terminal results may
+  release attachment/claim authority. The same non-terminal rule
+  applies when a durable native session id exists only on a provisional
+  binding's host-run metadata: recovery must promote that binding into
+  detached resumable authority instead of orphaning it. If the binding
+  is already detached but missing that id, recovery must backfill it
+  from durable host metadata before wrapped reclaim is considered
+  available again.
+  They must also use the same host approval and sandbox mode selection
+  unless the runtime contract is updated to model a real host-imposed
+  difference.
 
 - `ctx run` and `ctx resume`
   When a new or recovered decision becomes the active state, the

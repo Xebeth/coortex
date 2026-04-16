@@ -81,6 +81,24 @@ export interface RuntimeAttachment {
   adapterMetadata?: Record<string, unknown>;
 }
 
+export function hasStoredNativeSessionId(
+  attachment: Pick<RuntimeAttachment, "nativeSessionId">
+): boolean {
+  return (
+    typeof attachment.nativeSessionId === "string" &&
+    attachment.nativeSessionId.length > 0
+  );
+}
+
+export function isWrappedResumeCapableAttachment(
+  attachment: Pick<RuntimeAttachment, "state" | "nativeSessionId">
+): boolean {
+  return (
+    (attachment.state === "attached" || attachment.state === "detached_resumable") &&
+    hasStoredNativeSessionId(attachment)
+  );
+}
+
 export type AssignmentClaimState = "active" | "released" | "orphaned";
 
 export interface AssignmentClaim {
