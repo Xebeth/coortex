@@ -76,6 +76,14 @@ The current repository now guarantees:
 - both normalize outcomes through the same runtime event path
 - both finalize attachment and claim state through the same authority
   rules
+- attachment and claim provenance are now runtime-owned lifecycle facts:
+  launch-created authority records `launch`, live wrapped reclaim
+  records `resume`, and reconciliation-promoted resumable authority
+  records `recovery`
+- wrapped reclaim keeps typed reclaim proof at the adapter/runtime seam:
+  `verified_then_failed` remains distinct from `unverified_failed` so
+  runtime cleanup and recovery can preserve verified same-session
+  ownership through later persistence errors
 - that shared authority rule also applies to completed-run recovery:
   recovered decisions and recovered partial results detach active
   attached authority back to resumable state, while only recovered
@@ -87,6 +95,8 @@ The current repository now guarantees:
   metadata before wrapped reclaim is considered available
 - `ctx resume` adds one extra guard only: same-session identity
   verification against the existing authoritative attachment
+- while a wrapped reclaim is live, it holds the same lease-backed host
+  run attempt boundary as `ctx run`
 
 ## Command model
 
@@ -106,6 +116,11 @@ promotes that authority only after durable native session identity is
 captured, and persists result or decision outcomes through the normal
 runtime-owned outcome path.
 
+If the thread-start metadata write itself degrades, the host outcome may
+still finish successfully, but the native session id is intentionally
+withheld from the runtime attachment and completed host-run record
+because Coortex never durably proved that identity boundary.
+
 Attachment-plus-claim authority mutations are written as one durable
 runtime batch so interrupted persistence cannot strand half of an
 authoritative pair.
@@ -118,9 +133,8 @@ authority writes cannot be lost to stale whole-file replacement.
 
 `prepareResumeRuntime()` is read-only over authoritative runtime truth.
 
-It may refresh telemetry and regenerate the derived resume envelope, but
-it must not synthesize attachments or claims, or reconcile stale or
-completed runs.
+It must not refresh telemetry, regenerate the derived resume envelope,
+synthesize attachments or claims, or reconcile stale or completed runs.
 
 ### `ctx resume`
 
@@ -132,6 +146,15 @@ stored native session id, verifies that the native session being
 reclaimed matches the requested attachment, and then persists the
 resumed result or decision through the same runtime-owned outcome path
 used by `ctx run`.
+While the wrapped reclaim is still live, Codex resume keeps the same
+lease-backed host-run attempt boundary and heartbeat semantics as a
+wrapped launch.
+That reclaim boundary, including takeover of an already-live eligible
+lease, is acquired atomically inside the adapter / host-run store
+surface rather than by command-layer inspection.
+If a second reclaim hits that already-live boundary, Coortex blocks it
+as a duplicate reclaim attempt; it does not orphan or requeue the
+current authoritative attachment truth.
 
 If reclaim cannot be verified, Coortex orphans the attachment/claim and
 requeues the assignment instead of silently transferring authority.

@@ -181,12 +181,27 @@ node dist/cli/ctx.js inspect
 node dist/cli/ctx.js resume
 ```
 
+`ctx inspect` prints adapter-owned host-run metadata under `hostRun` and,
+when available, the matching runtime-owned attachment context under
+`runtimeAttachment`. It is a host-run inspection surface with runtime
+context, not a second source of attachment authority.
+
 `ctx resume` first targets the single authoritative attached or detached-but-resumable attachment that still carries a stored native session id. During a verified wrapped reclaim the runtime marks that attachment attached, then returns it to `detached_resumable` when the wrapped resume process exits without a terminal runtime outcome. If no such reclaimable attachment exists, it refreshes the derived recovery envelope from current runtime state instead.
+
+Attachment and claim provenance follow the same rule: launch-created
+authority records `launch`, live wrapped reclaim records `resume`, and
+recovery-promoted resumable authority records `recovery`.
 
 Successful wrapped reclaim now records result or decision outcomes
 through the same runtime-owned durable path as `ctx run`, using the
 captured last-message artifact or the streamed agent message when the
 artifact is absent.
+
+Failed wrapped reclaim now keeps three distinct states at the
+adapter/runtime seam: `reclaimed`, `verified_then_failed`, and
+`unverified_failed`. Once the requested native session is verified,
+later persistence failure does not collapse that proof back into a
+foreign/unverified failure shape.
 
 Execute the active assignment through the Codex adapter:
 

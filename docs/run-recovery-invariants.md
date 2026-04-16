@@ -209,6 +209,9 @@ same stateful repair surface used by wrapped launch/resume finalization:
 recovered terminal results release attachment/claim authority, while
 recovered decisions and recovered partial results keep the active claim
 and detach active attached authority back to `detached_resumable`.
+When this happens through live wrapped reclaim, attachment/claim
+provenance must move to `resume`; when it happens through reconciliation,
+attachment/claim provenance must move to `recovery`.
 If the active binding is still `provisional` but the completed host run
 contains a durable native session id, reconciliation must promote that
 binding into `detached_resumable` authority before provisional cleanup
@@ -232,10 +235,10 @@ runtime truth on their own.
 ### Command consistency
 
 - `prepareResumeRuntime()`
-  Must stay read-only over authoritative runtime truth. It may emit
-  telemetry and rewrite derived envelope artifacts, but it must not
-  synthesize attachments or claims, reconcile stale or completed runs,
-  or otherwise mutate runtime-owned authority.
+  Must stay read-only over authoritative runtime truth. It must not
+  emit telemetry, rewrite derived envelope artifacts, synthesize
+  attachments or claims, reconcile stale or completed runs, or
+  otherwise mutate runtime-owned authority.
 
 - `loadReconciledProjectionWithDiagnostics()`
   Is a stateful repair surface. `ctx status`, `ctx run`, and
@@ -245,11 +248,26 @@ runtime truth on their own.
 - `ctx status`
   Must show the same reconciled state that `ctx resume` and `ctx run`
   would see, including stale-run and completed-run reconciliation.
+  Reported active host leases must come from post-repair host state, not
+  from a pre-cleanup lease scan.
 
 - `ctx resume`
   Must build its brief from reconciled runtime state.
   It may attempt wrapped same-session reclaim only when the targeted
   authoritative attachment still carries a stored native session id.
+  While wrapped reclaim is in flight, it must hold the same lease-backed
+  host-run boundary as `ctx run`.
+  That boundary must be acquired atomically inside the adapter /
+  host-run store surface, including reclaim of an already-live eligible
+  lease.
+  Failure to acquire that boundary because another reclaim already owns
+  it is duplicate blocking, not reclaim failure; it must not orphan or
+  requeue the current authoritative attachment/claim.
+  Wrapped reclaim failures must distinguish `verified_then_failed` from
+  `unverified_failed`: once the requested native session has been
+  verified, later persistence failure must preserve that proof for
+  runtime-owned cleanup and recovery instead of collapsing back to a
+  foreign/unverified failure shape.
   When wrapped same-session reclaim is verified, it must persist result
   or decision outcomes through the same normalized runtime-event path as
   `ctx run`.

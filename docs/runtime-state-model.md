@@ -140,6 +140,10 @@ For Milestone 2 reclaim semantics:
   the attachment back to `detached_resumable`
 - wrapped launch and wrapped resume both durably capture result or
   decision outcomes through the same runtime-owned event path
+- attachment and claim provenance are runtime-owned authority facts:
+  launch-created authority records `launch`, live wrapped reclaim
+  reactivation records `resume`, and recovery-promoted resumable
+  authority records `recovery`
 - stale-run reconciliation orphans any active attachment/claim
   authority before the assignment is made retryable again
 - completed-run reconciliation uses the same finalization policy as the
@@ -158,6 +162,11 @@ For Milestone 2 reclaim semantics:
   reconciliation can promote it
 - authoritative attachment truth may exist without wrapped-reclaim
   eligibility; wrapped reclaim requires a stored native session id
+- host-session identity only becomes runtime-significant after the
+  matching host-run metadata update succeeds; a successful host outcome
+  may therefore remain durable while the attachment and completed
+  host-run record intentionally omit a native session id if the
+  thread-start metadata write degraded
 - attachment and claim mutations that together create or change
   authority must become durable as one runtime batch, not as independent
   half-authoritative writes
@@ -269,12 +278,12 @@ append-only during normal read/status/resume inspection paths.
 
 `snapshot.json` and generated recovery artifacts such as
 `last-resume-envelope.json` are derived caches. Rewriting them during
-resume or projection refresh is acceptable because they summarize
+stateful resume execution is acceptable because they summarize
 authoritative runtime state rather than replace it.
 
 `prepareResumeRuntime()` is part of that derived-artifact surface. It
-may refresh telemetry or the generated resume envelope, but it must not
-repair or normalize authoritative runtime truth.
+must not persist telemetry or rewrite the generated resume envelope, and
+it must not repair or normalize authoritative runtime truth.
 
 When recovery has to operate from snapshot truth because the event log is
 missing or unusable, recovery-side attachment repair or reclaim may

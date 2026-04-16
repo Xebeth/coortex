@@ -162,8 +162,14 @@ test("milestone-2 integration: prepareResumeRuntime stays read-only against live
   await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
 
   const projectionBefore = await loadOperatorProjection(setup.store);
+  const telemetryBefore = await setup.store.loadTelemetry();
   const prepared = await prepareResumeRuntime(setup.store, setup.adapter);
   const projectionAfter = await loadOperatorProjection(setup.store);
+  const telemetryAfter = await setup.store.loadTelemetry();
+  const persistedEnvelope = await setup.store.readJsonArtifact(
+    "runtime/last-resume-envelope.json",
+    "resume envelope"
+  );
 
   assert.equal(prepared.brief.activeAssignments.length, 1);
   assert.equal(prepared.envelope.metadata.activeAssignmentId, setup.assignmentId);
@@ -172,6 +178,8 @@ test("milestone-2 integration: prepareResumeRuntime stays read-only against live
   assert.equal(projectionBefore.claims.size, 0);
   assert.equal(projectionAfter.attachments.size, 0);
   assert.equal(projectionAfter.claims.size, 0);
+  assert.equal(telemetryAfter.length, telemetryBefore.length);
+  assert.equal(persistedEnvelope, undefined);
 });
 
 test("milestone-2 integration: failed same-session reclaim orphans the attachment and requeues the assignment", serial, async () => {
@@ -274,6 +282,101 @@ test("milestone-2 integration: wrapped resume rejects a foreign native session r
   assert.equal(projection.assignments.get(setup.assignmentId)?.state, "queued");
   assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, false);
   assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, false);
+});
+
+test("milestone-2 integration: wrapped resume claims a host lease and blocks duplicate reclaim", serial, async () => {
+  let releaseResume!: () => void;
+  let resumeReleasedOnce = false;
+  const resumeReleased = new Promise<void>((resolve) => {
+    releaseResume = resolve;
+  });
+  const releaseResumeOnce = () => {
+    if (!resumeReleasedOnce) {
+      resumeReleasedOnce = true;
+      releaseResume();
+    }
+  };
+  let resumeStarted!: () => void;
+  const resumeStartedPromise = new Promise<void>((resolve) => {
+    resumeStarted = resolve;
+  });
+  let resumeAttempts = 0;
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch produced partial progress before concurrent reclaim coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-duplicate-reclaim" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      resumeAttempts += 1;
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      resumeStarted();
+      await resumeReleased;
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Wrapped reclaim completed without duplicating the host attempt.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  const firstResume = resumeRuntime(setup.store, setup.adapter);
+  try {
+    await resumeStartedPromise;
+    await waitFor(async () => {
+      const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+      return inspected?.state === "running";
+    });
+
+    const inFlight = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+    const inFlightReconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+
+    assert.equal(inFlight?.state, "running");
+    assert.equal(getNativeRunId(inFlight), "smoke-thread-duplicate-reclaim");
+    assert.deepEqual(inFlightReconciled.activeLeases, [setup.assignmentId]);
+    assert.ok(
+      inFlightReconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present")
+    );
+    await assert.rejects(
+      resumeRuntime(setup.store, setup.adapter),
+      /already has an active host run lease/
+    );
+    const projectionDuringBlock = await loadOperatorProjection(setup.store);
+    const blockedAttachment = [...projectionDuringBlock.attachments.values()][0];
+    const blockedClaim = [...projectionDuringBlock.claims.values()][0];
+    assert.equal(blockedAttachment?.state, "attached");
+    assert.equal(blockedClaim?.state, "active");
+    assert.equal(projectionDuringBlock.assignments.get(setup.assignmentId)?.state, "in_progress");
+  } finally {
+    releaseResumeOnce();
+  }
+
+  const resumed = await firstResume;
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.equal(resumeAttempts, 1);
 });
 
 test("milestone-2 integration: snapshot-only reclaim failure preserves orphaned attachment truth and queued retry state", serial, async () => {
@@ -487,6 +590,86 @@ test("milestone-2 integration: provisional cleanup failure does not surface queu
   );
 });
 
+test("milestone-2 integration: provisional cleanup removes the lease before reconciled status surfaces blocker truth", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in successful provisional cleanup coverage");
+  });
+
+  const projection = await loadOperatorProjection(setup.store);
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  await setup.store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "provisional",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: claimId,
+          assignmentId: setup.assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
+  await setup.store.syncSnapshotFromEvents();
+
+  const runningRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    startedAt: timestamp,
+    heartbeatAt: timestamp,
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
+
+  const reconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+  const repairedAttachment = reconciled.projection.attachments.get(attachmentId);
+  const repairedClaim = reconciled.projection.claims.get(claimId);
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+
+  assert.deepEqual(reconciled.activeLeases, []);
+  assert.equal(
+    reconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"),
+    false
+  );
+  assert.equal(repairedAttachment?.state, "orphaned");
+  assert.equal(repairedClaim?.state, "orphaned");
+  assert.equal(reconciled.projection.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.equal(inspected?.state, "completed");
+});
+
 test("milestone-2 integration: provisional live-lease authority is promoted before same-session resume selection", serial, async () => {
   let resumedSessionId = "";
   const setup = await createSmokeSetupWithRunner({
@@ -589,6 +772,151 @@ test("milestone-2 integration: provisional live-lease authority is promoted befo
   );
   assert.equal(attachment?.state, "detached_resumable");
   assert.equal(attachment?.nativeSessionId, "smoke-thread-provisional-promoted");
+});
+
+test("milestone-2 integration: provisional live-lease reclaim takeover is atomic", serial, async () => {
+  let releaseResume!: () => void;
+  let resumeReleasedOnce = false;
+  const resumeReleased = new Promise<void>((resolve) => {
+    releaseResume = resolve;
+  });
+  const releaseResumeOnce = () => {
+    if (!resumeReleasedOnce) {
+      resumeReleasedOnce = true;
+      releaseResume();
+    }
+  };
+  let resumeStarted!: () => void;
+  const resumeStartedPromise = new Promise<void>((resolve) => {
+    resumeStarted = resolve;
+  });
+  let resumeAttempts = 0;
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async () => {
+      throw new Error("runExec should not be used in provisional reclaim takeover coverage");
+    },
+    runResume: async (input) => {
+      resumeAttempts += 1;
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      resumeStarted();
+      await resumeReleased;
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Atomic provisional reclaim takeover avoided duplicate resume.",
+        changedFiles: ["src/hosts/codex/adapter/index.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  const projection = await loadOperatorProjection(setup.store);
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+  const claimId = randomUUID();
+  const provisionalEvents: RuntimeEvent[] = [
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "provisional",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: claimId,
+          assignmentId: setup.assignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ];
+  for (const event of provisionalEvents) {
+    await setup.store.appendEvent(event);
+  }
+  await setup.store.syncSnapshotFromEvents();
+
+  const runningRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    startedAt: nowIso(),
+    heartbeatAt: nowIso(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    adapterData: {
+      nativeRunId: "smoke-thread-provisional-atomic"
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
+
+  const firstResume = resumeRuntime(setup.store, setup.adapter);
+  try {
+    await resumeStartedPromise;
+    await waitFor(async () => {
+      const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+      return inspected?.state === "running";
+    });
+
+    const inFlight = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+    const inFlightReconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+
+    assert.equal(inFlight?.state, "running");
+    assert.equal(getNativeRunId(inFlight), "smoke-thread-provisional-atomic");
+    assert.deepEqual(inFlightReconciled.activeLeases, [setup.assignmentId]);
+    assert.ok(
+      inFlightReconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present")
+    );
+    await assert.rejects(
+      resumeRuntime(setup.store, setup.adapter),
+      /already has an active host run lease/
+    );
+    const projectionDuringBlock = await loadOperatorProjection(setup.store);
+    const blockedAttachment = projectionDuringBlock.attachments.get(attachmentId);
+    const blockedClaim = projectionDuringBlock.claims.get(claimId);
+    assert.equal(blockedAttachment?.state, "attached");
+    assert.equal(blockedClaim?.state, "active");
+    assert.equal(projectionDuringBlock.assignments.get(setup.assignmentId)?.state, "in_progress");
+  } finally {
+    releaseResumeOnce();
+  }
+
+  const resumed = await firstResume;
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.equal(resumeAttempts, 1);
 });
 
 test("milestone-2 integration: wrapped resume persists a terminal completed result and releases attachment authority", serial, async () => {
@@ -708,7 +1036,15 @@ test("milestone-2 integration: wrapped resume persists a decision outcome and ke
 
   assert.equal(resumed.mode, "reclaimed");
   assert.equal(attachment?.state, "detached_resumable");
+  assert.deepEqual(attachment?.provenance, {
+    kind: "resume",
+    source: "ctx.resume"
+  });
   assert.equal(claim?.state, "active");
+  assert.deepEqual(claim?.provenance, {
+    kind: "resume",
+    source: "ctx.resume"
+  });
   assert.equal(projection.assignments.get(setup.assignmentId)?.state, "blocked");
   assert.deepEqual(projection.status.activeAssignmentIds, [setup.assignmentId]);
   assert.equal(
@@ -946,7 +1282,15 @@ test("milestone-2 integration: completed decision recovery promotes provisional 
     recovered.projection.attachments.get(attachmentId)?.nativeSessionId,
     "smoke-thread-recovered-provisional-decision"
   );
+  assert.deepEqual(recovered.projection.attachments.get(attachmentId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.deepEqual(recovered.projection.claims.get(claimId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.equal(recovered.projection.assignments.get(setup.assignmentId)?.state, "blocked");
   assert.deepEqual(recovered.projection.status.activeAssignmentIds, [setup.assignmentId]);
   await assert.rejects(
@@ -1110,7 +1454,7 @@ test("milestone-2 integration: run rejects foreign resumable claims and prevents
   await assert.rejects(
     runRuntime(setup.store, setup.adapter),
     new RegExp(
-      `Assignment ${foreignAssignmentId} already has an active host run lease\\. Claimed by attachment ${attachmentId}\\.`
+      `Assignment ${foreignAssignmentId} is already claimed by authoritative attachment ${attachmentId}\\.`
     )
   );
 
@@ -2155,14 +2499,12 @@ test("milestone-2 integration: malformed lease JSON is ignored and recovery stil
     "utf8"
   );
 
-  const inspectedBeforeRun = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
   const leaseBeforeRun = await readFile(
     join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
     "utf8"
   );
   const run = await runRuntime(setup.store, setup.adapter);
 
-  assert.equal(inspectedBeforeRun?.state, "running");
   assert.equal(leaseBeforeRun, "{");
   assert.equal(run.execution.outcome.kind, "result");
   assert.equal(run.execution.outcome.capture.status, "completed");

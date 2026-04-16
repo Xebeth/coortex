@@ -10,6 +10,7 @@ import type { RuntimeConfig } from "../config/types.js";
 import {
   initRuntime,
   inspectRuntimeRun,
+  inspectRuntimeRunWithContext,
   loadReconciledProjectionWithDiagnostics,
   loadOperatorProjectionWithDiagnostics,
   resumeRuntime,
@@ -153,14 +154,11 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   console.log(`Adapter: ${projection.status.activeAdapter}`);
   console.log(`Last durable output: ${projection.status.lastDurableOutputAt || "n/a"}`);
   console.log(`Active assignments: ${activeAssignments.length}`);
-  if (activeLeases.length > 0) {
-    console.log(`Authoritative host leases: ${activeLeases.length}`);
-  }
   console.log(`Provisional attachments: ${provisionalAttachments.length}`);
   console.log(`Authoritative attachments: ${authoritativeAttachments.length}`);
   console.log(`Resumable attachments: ${resumableAttachments.length}`);
   console.log(`Active attachment claims: ${activeClaims.length}`);
-  console.log(`Active host run leases: ${activeLeases.length}`);
+  console.log(`Live host run leases: ${activeLeases.length}`);
   console.log(`Results: ${projection.results.size}`);
   console.log(`Open decisions: ${openDecisions.length}`);
   for (const assignment of activeAssignments) {
@@ -271,35 +269,13 @@ async function inspectCommand(
     return;
   }
 
-  const record = await inspectRuntimeRun(store, adapter, assignmentId);
-  if (!record) {
+  const inspection = await inspectRuntimeRunWithContext(store, adapter, assignmentId);
+  if (!inspection) {
     console.log("No recorded host run found.");
     process.exitCode = 1;
     return;
   }
-
-  const projection = (await loadReconciledProjectionWithDiagnostics(store, adapter)).projection;
-  const claim = [...projection.claims.values()]
-    .filter((candidate) => candidate.assignmentId === record.assignmentId)
-    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
-    .at(-1);
-  const attachment = claim ? projection.attachments.get(claim.attachmentId) : undefined;
-  console.log(
-    toPrettyJson({
-      ...record,
-      ...(attachment
-        ? {
-            attachment: {
-              id: attachment.id,
-              state: attachment.state,
-              nativeSessionId: attachment.nativeSessionId ?? "",
-              claimId: claim?.id ?? "",
-              claimState: claim?.state ?? ""
-            }
-          }
-        : {})
-    }).trimEnd()
-  );
+  console.log(toPrettyJson(inspection).trimEnd());
 }
 
 function printUsage(): void {

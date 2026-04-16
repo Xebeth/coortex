@@ -9,7 +9,7 @@ import type { RuntimeConfig } from "../config/types.js";
 import { withPathLock } from "../persistence/files.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
-import { toSnapshot } from "../projections/runtime-projection.js";
+import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { nowIso } from "../utils/time.js";
 
@@ -206,6 +206,88 @@ test("runtime store repair serializes with concurrent appenders", async () => {
 
   assert.ok(replayedResult);
   assert.ok((await store.loadEvents()).some((event) => event.eventId === resultEvent.eventId));
+});
+
+test("runtime store serializes concurrent snapshot projection mutations", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-snapshot-mutate-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await store.syncSnapshotFromEvents();
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const buildResultEvent = (summary: string): RuntimeEvent => ({
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: randomUUID(),
+        assignmentId,
+        producerId: "worker-1",
+        status: "partial",
+        summary,
+        changedFiles: ["src/persistence/store.ts"],
+        createdAt: nowIso()
+      }
+    }
+  });
+
+  let releaseFirstMutation!: () => void;
+  const firstMutationReleased = new Promise<void>((resolve) => {
+    releaseFirstMutation = resolve;
+  });
+  let signalFirstMutation!: () => void;
+  const firstMutationEntered = new Promise<void>((resolve) => {
+    signalFirstMutation = resolve;
+  });
+
+  const applyEvent = (
+    projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>,
+    event: RuntimeEvent
+  ) => {
+    const nextProjection = fromSnapshot(toSnapshot(projection));
+    applyRuntimeEvent(nextProjection, event);
+    return nextProjection;
+  };
+
+  const firstMutation = store.mutateSnapshotProjection(async (projection) => {
+    signalFirstMutation();
+    await firstMutationReleased;
+    return applyEvent(projection, buildResultEvent("First serialized snapshot mutation."));
+  });
+
+  await firstMutationEntered;
+  const secondMutation = store.mutateSnapshotProjection(async (projection) =>
+    applyEvent(projection, buildResultEvent("Second serialized snapshot mutation."))
+  );
+  releaseFirstMutation();
+
+  await Promise.all([firstMutation, secondMutation]);
+  const snapshot = await store.loadSnapshot();
+  const summaries = snapshot?.results.map((result) => result.summary).sort();
+
+  assert.deepEqual(summaries, [
+    "First serialized snapshot mutation.",
+    "Second serialized snapshot mutation."
+  ]);
 });
 
 test("withPathLock times out instead of reaping a live holder", async () => {

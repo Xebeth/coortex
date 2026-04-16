@@ -12,6 +12,7 @@ export function buildRecoveryBrief(
   projection: RuntimeProjection,
   options: RecoveryBriefOptions = {}
 ): RecoveryBrief {
+  assertUniqueActiveClaims(projection);
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
@@ -49,6 +50,28 @@ export function buildRecoveryBrief(
     nextRequiredAction: determineNextAction(projection, activeAssignments, unresolvedDecisions, options),
     generatedAt: deriveGeneratedAt(projection)
   };
+}
+
+function assertUniqueActiveClaims(projection: RuntimeProjection): void {
+  const activeClaimsByAssignment = new Map<string, string[]>();
+  for (const claim of projection.claims.values()) {
+    if (claim.state !== "active") {
+      continue;
+    }
+    activeClaimsByAssignment.set(claim.assignmentId, [
+      ...(activeClaimsByAssignment.get(claim.assignmentId) ?? []),
+      claim.id
+    ]);
+  }
+  const duplicates = [...activeClaimsByAssignment.entries()].filter(([, ids]) => ids.length > 1);
+  if (duplicates.length === 0) {
+    return;
+  }
+  throw new Error(
+    `Invalid runtime state: multiple active claims are present (${duplicates
+      .map(([assignmentId, ids]) => `${assignmentId}: ${ids.join(", ")}`)
+      .join("; ")}).`
+  );
 }
 
 function determineNextAction(

@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { executeHostRunSession, type HostRunHandle } from "../adapters/host-run-session.js";
+import {
+  executeHostResumeSession,
+  executeHostRunSession,
+  type HostRunHandle
+} from "../adapters/host-run-session.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../adapters/host-run-store.js";
 import type { RuntimeArtifactStore } from "../adapters/contract.js";
 import { createRunningRunRecord } from "../adapters/host-run-records.js";
@@ -11,15 +15,24 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
   readonly rootDir = "/memory";
   readonly runtimeDir = "/memory/runtime";
   readonly adaptersDir = "/memory/adapters";
-  private readonly artifacts = new Map<string, string>();
+  private readonly artifacts = new Map<string, { content: string; version: string }>();
+  private versionCounter = 0;
 
   async readJsonArtifact<T>(relativePath: string): Promise<T | undefined> {
-    const content = this.artifacts.get(relativePath);
-    return content === undefined ? undefined : (JSON.parse(content) as T);
+    const artifact = this.artifacts.get(relativePath);
+    return artifact === undefined ? undefined : (JSON.parse(artifact.content) as T);
   }
 
   async readTextArtifact(relativePath: string): Promise<string | undefined> {
-    return this.artifacts.get(relativePath);
+    return this.artifacts.get(relativePath)?.content;
+  }
+
+  async readVersionedTextArtifact(relativePath: string): Promise<{
+    content?: string;
+    version: string | null;
+  }> {
+    const artifact = this.artifacts.get(relativePath);
+    return artifact ? { content: artifact.content, version: artifact.version } : { version: null };
   }
 
   async claimTextArtifact(relativePath: string, content: string): Promise<string> {
@@ -28,22 +41,45 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
       error.code = "EEXIST";
       throw error;
     }
-    this.artifacts.set(relativePath, content);
+    this.artifacts.set(relativePath, { content, version: this.nextVersion() });
     return `${this.rootDir}/${relativePath}`;
   }
 
+  async writeTextArtifactCas(
+    relativePath: string,
+    expectedVersion: string | null,
+    nextContent: string
+  ): Promise<{ ok: boolean; version: string | null }> {
+    const current = this.artifacts.get(relativePath);
+    const currentVersion = current?.version ?? null;
+    if (currentVersion !== expectedVersion) {
+      return { ok: false, version: currentVersion };
+    }
+    const version = this.nextVersion();
+    this.artifacts.set(relativePath, { content: nextContent, version });
+    return { ok: true, version };
+  }
+
   async writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {
-    this.artifacts.set(relativePath, JSON.stringify(value));
+    this.artifacts.set(relativePath, {
+      content: JSON.stringify(value),
+      version: this.nextVersion()
+    });
     return `${this.rootDir}/${relativePath}`;
   }
 
   async writeTextArtifact(relativePath: string, content: string): Promise<string> {
-    this.artifacts.set(relativePath, content);
+    this.artifacts.set(relativePath, { content, version: this.nextVersion() });
     return `${this.rootDir}/${relativePath}`;
   }
 
   async deleteArtifact(relativePath: string): Promise<void> {
     this.artifacts.delete(relativePath);
+  }
+
+  private nextVersion(): string {
+    this.versionCounter += 1;
+    return `v${this.versionCounter}`;
   }
 }
 
@@ -508,5 +544,153 @@ test("host-run session matrix persists a terminal failure if post-exit outcome d
       assert.equal(inspected?.resultStatus, "failed");
       assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
     });
+  }
+});
+
+test("host-run session does not surface launch identity when metadata persistence fails", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-launch-identity-failure";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (
+      relativePath === artifacts.runLeasePath(assignmentId) &&
+      typeof value === "object" &&
+      value !== null &&
+      "adapterData" in value
+    ) {
+      throw new Error("simulated thread-start metadata failure");
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  let seenIdentity: string | undefined;
+  try {
+    const execution = await executeHostRunSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-launch-identity-failure",
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async ({ onNativeRunId }) => {
+        await onNativeRunId("native-launch-failure-1");
+        return {
+          result: Promise.resolve({ exitCode: 0 }),
+          terminate: async () => undefined,
+          waitForExit: async () => ({ code: 0 })
+        };
+      },
+      onSessionIdentity: async (identity) => {
+        seenIdentity = identity.nativeSessionId;
+      },
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+        outcome: {
+          kind: "result",
+          capture: {
+            assignmentId: failedAssignmentId,
+            producerId: "matrix-host",
+            status: "failed",
+            summary,
+            changedFiles: [],
+            createdAt: completedAt
+          }
+        }
+      }),
+      deriveCompleted: async (_execution, nativeRunId) => ({
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "partial",
+              summary: "Completed despite missing durable identity persistence.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        },
+        ...(nativeRunId ? { nativeRunId } : {})
+      }),
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.equal(seenIdentity, undefined);
+    assert.equal(execution.run.adapterData?.nativeRunId, undefined);
+    assert.match(execution.warning ?? "", /thread-start metadata failure/);
+  } finally {
+    store.writeJsonArtifact = originalWriteJsonArtifact;
+  }
+});
+
+test("host-run resume preserves verified reclaim proof after post-exit failure", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-resume-verified-failure";
+  const requestedSessionId = "native-resume-verified-1";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, requestedSessionId);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  try {
+    const result = await executeHostResumeSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-resume-verified-failure",
+      requestedSessionId,
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async () => ({
+        result: Promise.resolve({ exitCode: 0 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      }),
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      summarizeVerificationFailure: (_requestedSessionId, _observedSessionId, execution) =>
+        `verification failed after exit ${execution.exitCode}`,
+      deriveCompleted: async () => {
+        throw new Error("simulated resume post-exit failure");
+      },
+      getObservedSessionId: () => requestedSessionId,
+      getVerifiedSessionId: () => requestedSessionId,
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.equal(result.reclaimed, false);
+    assert.equal(result.reclaimState, "verified_then_failed");
+    assert.equal(result.verifiedSessionId, requestedSessionId);
+    assert.equal(result.sessionVerified, true);
+    assert.match(result.warning ?? "", /simulated resume post-exit failure/);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
   }
 });

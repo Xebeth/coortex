@@ -137,13 +137,27 @@ For the current hardening slice:
   native session id, then returns that attachment to
   `detached-but-resumable` when the wrapped reclaim exits without a
   terminal runtime outcome
+- wrapped reclaim claims and heartbeats the same lease-backed host-run
+  attempt boundary as wrapped launch while the Codex resume process is
+  still live
+- the claim-or-adopt step for that reclaim boundary is atomic inside the
+  adapter / host-run store seam, including the path that reuses an
+  already-live eligible lease
 - wrapped reclaim uses the structured `exec resume` path so successful
   resume records result/decision outcomes and completion telemetry
   through the same runtime-owned outcome pipeline as wrapped launch
+- wrapped reclaim reports three states at the adapter/runtime seam:
+  `reclaimed`, `verified_then_failed`, and `unverified_failed`; the
+  runtime must not collapse a verified same-session reclaim back into an
+  unverified/foreign failure once the requested native session has been
+  observed and matched
 - wrapped launch and wrapped reclaim are expected to remain behaviorally
   aligned on runtime-owned persistence, attachment finalization, and
   operator-visible status semantics; reclaim adds only the prior
   attachment / same-session verification requirement
+- attachment and claim provenance remain runtime-owned facts through the
+  same lifecycle: wrapped reclaim records `resume`, and reconciliation-
+  promoted resumable authority records `recovery`
 - the same finalization rule applies when a completed Codex host run is
   recovered after an interruption: recovered decisions and recovered
   partial results detach back to detached-but-resumable authority,
@@ -163,6 +177,13 @@ For the current hardening slice:
 
 The native Codex session id remains metadata on the runtime-owned
 attachment, not a replacement for that attachment record.
+
+Launch-side native session identity is surfaced to runtime lifecycle
+callbacks only after the matching running host-run record has been
+persisted successfully. If that thread-start metadata write degrades,
+the host outcome may still complete successfully, but Coortex
+intentionally withholds the native session id from both runtime
+attachment truth and the completed host-run record.
 
 ---
 

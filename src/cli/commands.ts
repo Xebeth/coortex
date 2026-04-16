@@ -5,10 +5,10 @@ import type { RuntimeConfig } from "../config/types.js";
 import type {
   HostAdapter,
   HostExecutionOutcome,
-  HostSessionIdentity,
   HostSessionResumeResult,
   TaskEnvelope
 } from "../adapters/contract.js";
+import { isActiveHostRunLeaseError } from "../adapters/host-run-store.js";
 import type {
   Assignment,
   AssignmentClaim,
@@ -19,25 +19,28 @@ import type {
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
-import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 import {
-  authorityFinalizationDispositionForOutcome,
-  buildOutcomeEvents,
-  cleanupHostRunArtifactsWithLeaseVerification,
+  activateAttachmentSession,
+  createLaunchAuthority,
+  cleanupWrappedResumeLeaseArtifacts,
+  finalizeAttachmentAuthority,
   getRunnableAssignment,
   listAuthoritativeAttachmentClaims,
   loadReconciledProjectionWithDiagnostics,
   listResumableAttachmentClaims,
   markAssignmentInProgress,
+  orphanAttachmentClaimAndRequeue,
   orphanAttachmentClaim,
+  persistAttachmentAuthority,
+  persistWrappedExecutionOutcome,
   projectionForRunnableAssignment,
   reconcileActiveRuns,
+  recoverCompletedWrappedExecution,
   releaseAttachmentClaim,
-  updateAttachmentToDetachedResumable
 } from "./run-operations.js";
 import type { ProjectionWriteOptions } from "./run-operations.js";
 
@@ -140,7 +143,7 @@ export async function initRuntime(
   diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
   projection = syncResult.projection;
   const prepared = await prepareResumeRuntimeInternal(store, adapter, {
-    telemetryEventType: undefined
+    seedDiagnostics: []
   });
   diagnostics.push(...prepared.diagnostics);
   const telemetry = await recordNormalizedTelemetry(
@@ -165,55 +168,11 @@ export async function initRuntime(
   };
 }
 
-async function persistProjectionEvents(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  events: import("../core/events.js").RuntimeEvent[],
-  options?: ProjectionWriteOptions
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  warning?: string;
-}> {
-  if (!options?.snapshotFallback) {
-    await store.appendEvents(events);
-    return store.syncSnapshotFromEventsWithRecovery();
-  }
-
-  const nextProjection = fromSnapshot(toSnapshot(projection));
-  for (const event of events) {
-    applyRuntimeEvent(nextProjection, event);
-  }
-  await store.writeSnapshot(toSnapshot(nextProjection));
-  return { projection: nextProjection };
-}
-
-async function persistRuntimeOutcome(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  execution: SessionExecution,
-  adapter: HostAdapter,
-  options?: ProjectionWriteOptions
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  diagnostics: CommandDiagnostic[];
-}> {
-  const projectionAfterResult = await persistProjectionEvents(
-    store,
-    projection,
-    buildOutcomeEvents(projection, execution, adapter),
-    options
-  );
-  return {
-    projection: projectionAfterResult.projection,
-    diagnostics: diagnosticsFromWarning(projectionAfterResult.warning, "event-log-repaired")
-  };
-}
-
 async function prepareResumeRuntimeInternal(
   store: RuntimeStore,
   adapter: HostAdapter,
   options: {
-    telemetryEventType: string | undefined;
+    seedDiagnostics: CommandDiagnostic[];
   }
 ): Promise<PrepareResumeRuntimeResult> {
   const config = await store.loadConfig();
@@ -226,8 +185,7 @@ async function prepareResumeRuntimeInternal(
     store,
     adapter,
     loaded.projection,
-    loaded.diagnostics,
-    options.telemetryEventType
+    [...loaded.diagnostics, ...options.seedDiagnostics]
   );
 }
 
@@ -235,8 +193,7 @@ async function prepareResumeFromProjection(
   store: RuntimeStore,
   adapter: HostAdapter,
   effectiveProjection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  seedDiagnostics: CommandDiagnostic[],
-  telemetryEventType: string | undefined
+  seedDiagnostics: CommandDiagnostic[]
 ): Promise<PrepareResumeRuntimeResult> {
   const diagnostics = [...seedDiagnostics];
   const brief = buildRecoveryBrief(effectiveProjection, {
@@ -247,31 +204,40 @@ async function prepareResumeFromProjection(
     throw new Error("No active assignment is available to resume.");
   }
   const envelope = await adapter.buildResumeEnvelope(store, effectiveProjection, brief);
-  const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
-  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
-  if (telemetryEventType) {
-    const telemetry = await recordNormalizedTelemetry(
-      store,
-      adapter.normalizeTelemetry({
-        eventType: telemetryEventType,
-        taskId: effectiveProjection.sessionId,
-        metadata: {
-          envelopeChars: envelope.estimatedChars,
-          trimApplied: envelope.trimApplied,
-          trimmedFields: envelope.trimmedFields.length
-        }
-      })
-    );
-    diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
-  }
 
   return {
     projection: effectiveProjection,
     brief,
     envelope,
-    envelopePath: resolve(envelopePath),
+    envelopePath: resolve(join(store.runtimeDir, "last-resume-envelope.json")),
     diagnostics
   };
+}
+
+async function persistResumeEnvelopeAndTelemetry(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>,
+  telemetryEventType: string | undefined
+): Promise<CommandDiagnostic[]> {
+  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
+  if (!telemetryEventType) {
+    return [];
+  }
+  const telemetry = await recordNormalizedTelemetry(
+    store,
+    adapter.normalizeTelemetry({
+      eventType: telemetryEventType,
+      taskId: projection.sessionId,
+      metadata: {
+        envelopeChars: envelope.estimatedChars,
+        trimApplied: envelope.trimApplied,
+        trimmedFields: envelope.trimmedFields.length
+      }
+    })
+  );
+  return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
 }
 
 export async function prepareResumeRuntime(
@@ -279,7 +245,7 @@ export async function prepareResumeRuntime(
   adapter: HostAdapter
 ): Promise<PrepareResumeRuntimeResult> {
   return prepareResumeRuntimeInternal(store, adapter, {
-    telemetryEventType: "resume.requested"
+    seedDiagnostics: []
   });
 }
 
@@ -305,7 +271,16 @@ export async function resumeRuntime(
   const buildPreparedResult = async (
     projection: Awaited<ReturnType<typeof loadOperatorProjection>>
   ): Promise<ResumeRuntimeResult> => {
-    const prepared = await prepareResumeFromProjection(store, adapter, projection, [], undefined);
+    const prepared = await prepareResumeFromProjection(store, adapter, projection, []);
+    diagnostics.push(
+      ...(await persistResumeEnvelopeAndTelemetry(
+        store,
+        adapter,
+        projection,
+        prepared.envelope,
+        "resume.requested"
+      ))
+    );
     return {
       mode: "prepared",
       ...prepared,
@@ -316,16 +291,18 @@ export async function resumeRuntime(
     throw new Error(`Assignment ${unmatchedActiveLeases[0]!} already has an active host run lease.`);
   }
   if (resumableClaims.length === 0) {
-    const prepared = await prepareResumeFromProjection(
+    const prepared = await prepareResumeFromProjection(store, adapter, reconciled.projection, []);
+    const persistDiagnostics = await persistResumeEnvelopeAndTelemetry(
       store,
       adapter,
       reconciled.projection,
-      diagnostics,
+      prepared.envelope,
       "resume.requested"
     );
     return {
       mode: "prepared",
-      ...prepared
+      ...prepared,
+      diagnostics: [...diagnostics, ...persistDiagnostics]
     };
   }
   if (resumableClaims.length > 1) {
@@ -343,16 +320,18 @@ export async function resumeRuntime(
     );
   }
   if (!adapter.getCapabilities().supportsNativeSessionResume || !adapter.resumeSession) {
-    const prepared = await prepareResumeFromProjection(
+    const prepared = await prepareResumeFromProjection(store, adapter, reconciled.projection, []);
+    const persistDiagnostics = await persistResumeEnvelopeAndTelemetry(
       store,
       adapter,
       reconciled.projection,
-      diagnostics,
+      prepared.envelope,
       "resume.requested"
     );
     return {
       mode: "prepared",
-      ...prepared
+      ...prepared,
+      diagnostics: [...diagnostics, ...persistDiagnostics]
     };
   }
 
@@ -360,20 +339,15 @@ export async function resumeRuntime(
   const resumeBrief = buildRecoveryBrief(resumeProjection);
   const resumeEnvelope = await adapter.buildResumeEnvelope(store, resumeProjection, resumeBrief);
   const envelopePath = resolve(join(store.runtimeDir, "last-resume-envelope.json"));
-  await store.writeJsonArtifact("runtime/last-resume-envelope.json", resumeEnvelope);
-  const telemetry = await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry({
-      eventType: "resume.requested",
-      taskId: reconciled.projection.sessionId,
-      metadata: {
-        envelopeChars: resumeEnvelope.estimatedChars,
-        trimApplied: resumeEnvelope.trimApplied,
-        trimmedFields: resumeEnvelope.trimmedFields.length
-      }
-    })
+  diagnostics.push(
+    ...(await persistResumeEnvelopeAndTelemetry(
+      store,
+      adapter,
+      reconciled.projection,
+      resumeEnvelope,
+      "resume.requested"
+    ))
   );
-  diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
   const startedTelemetry = await recordNormalizedTelemetry(
     store,
     adapter.normalizeTelemetry({
@@ -397,26 +371,35 @@ export async function resumeRuntime(
     if (!target.attachment.nativeSessionId) {
       throw new Error(`Attachment ${target.attachment.id} is missing a stored native session id.`);
     }
-    resumeResult = await adapter.resumeSession(store, resumeProjection, resumeEnvelope, target.attachment, {
-      onSessionIdentity: async (identity) => {
-        effectiveProjection = await markAssignmentInProgress(
-          store,
-          effectiveProjection,
-          assignment.id,
-          resumeWriteOptions
-        );
-        effectiveProjection = await activateAttachmentSession(
-          store,
-          effectiveProjection,
-          target.attachment.id,
-          assignment.id,
-          "resume",
-          identity,
-          resumeWriteOptions
-        );
+    resumeResult = await adapter.resumeSession(
+      store,
+      resumeProjection,
+      resumeEnvelope,
+      target.attachment,
+      {
+        onSessionIdentity: async (identity) => {
+          effectiveProjection = await markAssignmentInProgress(
+            store,
+            effectiveProjection,
+            assignment.id,
+            resumeWriteOptions
+          );
+          effectiveProjection = await activateAttachmentSession(
+            store,
+            effectiveProjection,
+            target.attachment.id,
+            assignment.id,
+            "resume",
+            identity,
+            resumeWriteOptions
+          );
+        }
       }
-    });
+    );
   } catch (error) {
+    if (isActiveHostRunLeaseError(error)) {
+      throw error;
+    }
     const failedResume = await orphanAttachmentClaimAndRequeue(
       store,
       adapter,
@@ -439,7 +422,46 @@ export async function resumeRuntime(
     diagnostics.push(...diagnosticsFromWarning(completedTelemetry.warning, "telemetry-write-failed"));
   }
 
-  if (!resumeResult.reclaimed) {
+  switch (resumeResult.reclaimState) {
+    case "verified_then_failed": {
+      const recoveredResume = await recoverCompletedWrappedExecution(
+        store,
+        adapter,
+        effectiveProjection,
+        assignment.id,
+        target.attachment.id,
+        target.claim.id,
+        resumeResult.verifiedSessionId,
+        resumeWriteOptions,
+        `Wrapped same-session resume verified the requested session but runtime persistence did not complete cleanly. ${
+          resumeResult.warning ?? "No durable host completion could be recovered."
+        }`,
+        resumeResult.stoppedAt
+      );
+      diagnostics.push(...recoveredResume.diagnostics);
+      if (!recoveredResume.execution) {
+        return buildPreparedResult(recoveredResume.projection);
+      }
+      effectiveProjection = recoveredResume.projection;
+      const recoveredAttachment = effectiveProjection.attachments.get(target.attachment.id);
+      const recoveredClaim = effectiveProjection.claims.get(target.claim.id);
+      if (!recoveredAttachment || !recoveredClaim) {
+        throw new Error(
+          `Attachment ${target.attachment.id} or claim ${target.claim.id} disappeared during recovered resume finalization.`
+        );
+      }
+      return {
+        mode: "reclaimed",
+        projection: effectiveProjection,
+        brief: resumeBrief,
+        envelope: resumeEnvelope,
+        envelopePath,
+        diagnostics,
+        attachment: recoveredAttachment,
+        claim: recoveredClaim
+      };
+    }
+    case "unverified_failed": {
     const failedResume = await orphanAttachmentClaimAndRequeue(
       store,
       adapter,
@@ -451,45 +473,75 @@ export async function resumeRuntime(
     );
     diagnostics.push(...failedResume.diagnostics);
     return buildPreparedResult(failedResume.projection);
+    }
+    case "reclaimed":
+      break;
   }
+  if (!resumeResult.reclaimed) {
+    throw new Error(`Unexpected wrapped resume reclaim state ${resumeResult.reclaimState}.`);
+  }
+  const reclaimedResume = resumeResult;
 
   diagnostics.push(
     ...diagnosticsFromWarning(
-      await cleanupResumeLeaseArtifacts(
+      await cleanupWrappedResumeLeaseArtifacts(
         store,
         adapter,
         assignment.id,
-        resumeResult.stoppedAt,
+        reclaimedResume.stoppedAt,
         `Wrapped same-session resume reclaimed attachment ${target.attachment.id} and released stale lease blockers.`
       ),
       "host-run-persist-failed"
     )
   );
-  const persistedOutcome = await persistRuntimeOutcome(
-    store,
-    effectiveProjection,
-    {
-      outcome: resumeResult.outcome,
-      run: resumeResult.run
-    },
-    adapter,
-    resumeWriteOptions
-  );
-  effectiveProjection = persistedOutcome.projection;
-  diagnostics.push(...persistedOutcome.diagnostics);
-  effectiveProjection = await finalizeAttachmentAuthority(
-    store,
-    effectiveProjection,
-    target.attachment.id,
-    target.claim.id,
-    {
-      outcome: resumeResult.outcome,
-      run: resumeResult.run
-    },
-    true,
-    resumeWriteOptions,
-    resumeResult.stoppedAt
-  );
+  try {
+    const persistedOutcome = await persistWrappedExecutionOutcome(
+      store,
+      effectiveProjection,
+      {
+        outcome: reclaimedResume.outcome,
+        run: reclaimedResume.run
+      },
+      adapter,
+      resumeWriteOptions
+    );
+    effectiveProjection = persistedOutcome.projection;
+    diagnostics.push(...persistedOutcome.diagnostics);
+      effectiveProjection = await finalizeAttachmentAuthority(
+        store,
+        effectiveProjection,
+        target.attachment.id,
+        target.claim.id,
+      {
+          outcome: reclaimedResume.outcome,
+          run: reclaimedResume.run
+        },
+        "resume",
+        reclaimedResume.verifiedSessionId,
+        resumeWriteOptions,
+        reclaimedResume.stoppedAt
+      );
+  } catch (error) {
+      const recoveredResume = await recoverCompletedWrappedExecution(
+        store,
+        adapter,
+        effectiveProjection,
+        assignment.id,
+        target.attachment.id,
+        target.claim.id,
+        reclaimedResume.verifiedSessionId,
+        resumeWriteOptions,
+        `Runtime event persistence was interrupted after wrapped same-session resume completed durably. ${
+          error instanceof Error ? error.message : String(error)
+      }`,
+      reclaimedResume.stoppedAt
+    );
+    diagnostics.push(...recoveredResume.diagnostics);
+    if (!recoveredResume.execution) {
+      return buildPreparedResult(recoveredResume.projection);
+    }
+    effectiveProjection = recoveredResume.projection;
+  }
   const resumedAttachment = effectiveProjection.attachments.get(target.attachment.id);
   const resumedClaim = effectiveProjection.claims.get(target.claim.id);
   if (!resumedAttachment || !resumedClaim) {
@@ -572,7 +624,7 @@ export async function runRuntime(
   if (authoritativeClaims.length === 1) {
     const blocking = authoritativeClaims[0]!;
     throw new Error(
-      `Assignment ${blocking.claim.assignmentId} already has an active host run lease. Claimed by attachment ${blocking.attachment.id}.`
+      `Assignment ${blocking.claim.assignmentId} is already claimed by authoritative attachment ${blocking.attachment.id}.`
     );
   }
   let claimedRun: Awaited<ReturnType<HostAdapter["claimRunLease"]>>;
@@ -584,7 +636,7 @@ export async function runRuntime(
   const launchAuthority = createLaunchAuthority(adapter, projectionBefore, assignment.id);
   let authorityPersisted = false;
   try {
-    projectionBefore = await appendAttachmentAuthority(
+    projectionBefore = await persistAttachmentAuthority(
       store,
       projectionBefore,
       launchAuthority.attachment,
@@ -608,7 +660,7 @@ export async function runRuntime(
   let launchedProjection: Awaited<ReturnType<typeof loadOperatorProjection>> | undefined;
   let envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>> | undefined;
   let execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>> | undefined;
-  let sessionIdentitySeen = false;
+  let verifiedNativeSessionId: string | undefined;
   try {
     const envelopeProjection = projectionForRunnableAssignment(projectionBefore, assignment.id);
     const brief = buildRecoveryBrief(envelopeProjection);
@@ -638,7 +690,7 @@ export async function runRuntime(
     executionStarted = true;
     execution = await adapter.executeAssignment(store, launchedProjection, envelope, claimedRun, {
       onSessionIdentity: async (identity) => {
-        sessionIdentitySeen = true;
+        verifiedNativeSessionId = identity.nativeSessionId;
         launchedProjection = await activateAttachmentSession(
           store,
           launchedProjection ?? projectionBefore,
@@ -651,7 +703,7 @@ export async function runRuntime(
       }
     });
     diagnostics.push(...diagnosticsFromWarning(execution.warning, "host-run-persist-failed"));
-    const persistedOutcome = await persistRuntimeOutcome(
+    const persistedOutcome = await persistWrappedExecutionOutcome(
       store,
       launchedProjection,
       execution,
@@ -660,15 +712,16 @@ export async function runRuntime(
     );
     let projectionAfter = persistedOutcome.projection;
     diagnostics.push(...persistedOutcome.diagnostics);
-    projectionAfter = await finalizeAttachmentAuthority(
-      store,
-      projectionAfter,
-      launchAuthority.attachment.id,
-      launchAuthority.claim.id,
-      execution,
-      sessionIdentitySeen,
-      launchWriteOptions
-    );
+      projectionAfter = await finalizeAttachmentAuthority(
+        store,
+        projectionAfter,
+        launchAuthority.attachment.id,
+        launchAuthority.claim.id,
+        execution,
+        "launch",
+        verifiedNativeSessionId,
+        launchWriteOptions
+      );
 
     if (execution.telemetry) {
       const completedTelemetry = await recordNormalizedTelemetry(
@@ -708,48 +761,36 @@ export async function runRuntime(
         );
       }
     } else if (launchedProjection && envelope) {
-      const recoveredExecution = synthesizeRecoveredExecution(
-        await adapter.inspectRun(store, assignment.id)
+      const recoveredExecution = await recoverCompletedWrappedExecution(
+        store,
+        adapter,
+        launchedProjection,
+        assignment.id,
+        launchAuthority.attachment.id,
+        launchAuthority.claim.id,
+        verifiedNativeSessionId,
+        launchWriteOptions,
+        `Runtime event persistence was interrupted after the host run completed durably. ${
+          error instanceof Error ? error.message : String(error)
+        }`
       );
-      if (recoveredExecution) {
-        const recovered = await loadReconciledProjectionWithDiagnostics(store, adapter);
-          const projectionAfter = await finalizeAttachmentAuthority(
-          store,
-          recovered.projection,
-          launchAuthority.attachment.id,
-          launchAuthority.claim.id,
-          recoveredExecution,
-          sessionIdentitySeen,
-          {
-            snapshotFallback: recovered.snapshotFallback
-          }
-        );
+      if (recoveredExecution.execution) {
         diagnostics.push(
-          ...diagnosticsFromWarning(
-            `Runtime event persistence was interrupted after the host run completed durably. Recovered from durable host run metadata. ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-            "host-run-persist-failed"
-          ),
-          ...recovered.diagnostics
+          ...recoveredExecution.diagnostics
         );
         return {
           projectionBefore: launchedProjection,
-          projectionAfter,
+          projectionAfter: recoveredExecution.projection,
           assignment,
           envelope,
-          execution: recoveredExecution,
-          recoveredOutcome: false,
+          execution: recoveredExecution.execution,
+          recoveredOutcome: true,
           diagnostics
         };
       }
-      if (sessionIdentitySeen) {
-        launchedProjection = await updateAttachmentToDetachedResumable(
-          store,
-          launchedProjection,
-          launchAuthority.attachment.id,
-          launchWriteOptions
-        );
+      if (verifiedNativeSessionId) {
+        diagnostics.push(...recoveredExecution.diagnostics);
+        launchedProjection = recoveredExecution.projection;
       } else {
         launchedProjection = await releaseAttachmentClaim(
           store,
@@ -770,291 +811,6 @@ export async function runRuntime(
   }
 }
 
-function createLaunchAuthority(
-  adapter: HostAdapter,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
-): {
-  attachment: RuntimeAttachment;
-  claim: AssignmentClaim;
-} {
-  const timestamp = nowIso();
-  const attachmentId = randomUUID();
-  return {
-    attachment: {
-      id: attachmentId,
-      adapter: adapter.id,
-      host: adapter.host,
-      state: "provisional",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      provenance: {
-        kind: "launch",
-        source: "ctx.run"
-      }
-    },
-    claim: {
-      id: randomUUID(),
-      assignmentId,
-      attachmentId,
-      state: "active",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      provenance: {
-        kind: "launch",
-        source: "ctx.run"
-      }
-    }
-  };
-}
-
-async function appendAttachmentAuthority(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachment: RuntimeAttachment,
-  claim: AssignmentClaim,
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return (await persistProjectionEvents(store, projection, [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "attachment.created" as const,
-      payload: { attachment }
-    },
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "claim.created" as const,
-      payload: { claim }
-    }
-  ], options)).projection;
-}
-
-async function updateAttachmentState(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  patch: Partial<RuntimeAttachment>,
-  options?: ProjectionWriteOptions,
-  activation?: {
-    kind: "launch" | "resume";
-    attachmentId: string;
-    assignmentId: string;
-  }
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  const events: import("../core/events.js").RuntimeEvent[] = [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "attachment.updated",
-      payload: {
-        attachmentId,
-        patch
-      }
-    }
-  ];
-  if (activation) {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "runtime.activated",
-      payload: activation
-    });
-  }
-  return (await persistProjectionEvents(store, projection, events, options)).projection;
-}
-
-async function activateAttachmentSession(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  assignmentId: string,
-  kind: "launch" | "resume",
-  identity: HostSessionIdentity,
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  const existingAttachment = projection.attachments.get(attachmentId);
-  const adapterMetadata =
-    identity.metadata || existingAttachment?.adapterMetadata
-      ? {
-          ...(existingAttachment?.adapterMetadata ?? {}),
-          ...(identity.metadata ?? {})
-        }
-      : undefined;
-
-  return updateAttachmentState(
-    store,
-    projection,
-    attachmentId,
-    {
-      state: "attached",
-      updatedAt: timestamp,
-      attachedAt: timestamp,
-      nativeSessionId: identity.nativeSessionId,
-      ...(adapterMetadata ? { adapterMetadata } : {})
-    },
-    options,
-    {
-      kind,
-      attachmentId,
-      assignmentId
-    }
-  );
-}
-
-async function finalizeAttachmentAuthority(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  execution: SessionExecution,
-  sessionIdentitySeen: boolean,
-  options?: ProjectionWriteOptions,
-  detachedAt?: string
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  if (authorityFinalizationDispositionForOutcome(execution.outcome) === "release") {
-    return releaseAttachmentClaim(
-      store,
-      projection,
-      attachmentId,
-      claimId,
-      {
-        attachment:
-          execution.outcome.kind === "result"
-            ? `Assignment finished with ${execution.outcome.capture.status}.`
-            : "Assignment completed with a decision.",
-        claim: "Assignment finished."
-      },
-      options
-    );
-  }
-
-  if (sessionIdentitySeen) {
-    return updateAttachmentToDetachedResumable(store, projection, attachmentId, options, detachedAt);
-  }
-
-  return orphanAttachmentClaim(
-    store,
-    projection,
-    attachmentId,
-    claimId,
-    {
-      attachment: "Wrapped launch completed without native session identity finalization.",
-      claim: "Wrapped launch completed without native session identity finalization."
-    },
-    options
-  );
-}
-
-async function orphanAttachmentClaimAndRequeue(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachment: RuntimeAttachment,
-  claim: AssignmentClaim,
-  reason: string,
-  options?: ProjectionWriteOptions
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  diagnostics: CommandDiagnostic[];
-}> {
-  const timestamp = nowIso();
-  let effectiveProjection = await orphanAttachmentClaim(
-    store,
-    projection,
-    attachment.id,
-    claim.id,
-    {
-      attachment: reason,
-      claim: reason
-    },
-    options
-  );
-  const diagnostics: CommandDiagnostic[] = [];
-  const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
-    store,
-    adapter,
-    claim.assignmentId,
-    {
-      staleAt: timestamp,
-      staleReason: reason
-    }
-  );
-  if (cleanupError) {
-    diagnostics.push(
-      ...diagnosticsFromWarning(
-        `Host run cleanup artifacts could not be updated for assignment ${claim.assignmentId}. ${cleanupError.message}`,
-        "host-run-persist-failed"
-      )
-    );
-  }
-  const assignment = effectiveProjection.assignments.get(claim.assignmentId);
-  if (assignment) {
-    const retryStatus = {
-      ...effectiveProjection.status,
-      currentObjective: `Retry assignment ${claim.assignmentId}: ${assignment.objective}`,
-      lastDurableOutputAt: timestamp,
-      resumeReady: true
-    };
-    effectiveProjection = (await persistProjectionEvents(store, effectiveProjection, [
-      {
-        eventId: randomUUID(),
-        sessionId: effectiveProjection.sessionId,
-        timestamp,
-        type: "assignment.updated",
-        payload: {
-          assignmentId: claim.assignmentId,
-          patch: {
-            state: "queued",
-            updatedAt: timestamp
-          }
-        }
-      },
-      {
-        eventId: randomUUID(),
-        sessionId: effectiveProjection.sessionId,
-        timestamp,
-        type: "status.updated",
-        payload: { status: retryStatus }
-      }
-    ], options)).projection;
-  }
-  return {
-    projection: effectiveProjection,
-    diagnostics
-  };
-}
-
-async function cleanupResumeLeaseArtifacts(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  assignmentId: string,
-  stoppedAt: string,
-  reason: string
-): Promise<string | undefined> {
-  const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
-    store,
-    adapter,
-    assignmentId,
-    {
-      staleAt: stoppedAt,
-      staleReason: reason
-    }
-  );
-  if (!cleanupError) {
-    return undefined;
-  }
-  return `Failed to clear host run lease metadata after wrapped resume for assignment ${assignmentId}. ${cleanupError.message}`;
-}
-
 export async function inspectRuntimeRun(
   store: RuntimeStore,
   adapter: HostAdapter,
@@ -1064,56 +820,57 @@ export async function inspectRuntimeRun(
   if (!config) {
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
+  await loadReconciledProjectionWithDiagnostics(store, adapter);
   return adapter.inspectRun(store, assignmentId);
 }
 
-function synthesizeRecoveredExecution(
-  record: Awaited<ReturnType<HostAdapter["inspectRun"]>>
-): HostExecutionOutcome | undefined {
-  if (!record || !isRecoverableCompletedRunRecord(record) || !record.terminalOutcome) {
+export async function inspectRuntimeRunWithContext(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId?: string
+): Promise<
+  | {
+      hostRun: NonNullable<Awaited<ReturnType<typeof inspectRuntimeRun>>>;
+      runtimeAttachment?: {
+        id: string;
+        state: string;
+        nativeSessionId: string;
+        claimId: string;
+        claimState: string;
+      };
+    }
+  | undefined
+> {
+  const config = await store.loadConfig();
+  if (!config) {
+    throw new Error("Coortex is not initialized. Run `ctx init` first.");
+  }
+  const reconciled = await loadReconciledProjectionWithDiagnostics(store, adapter);
+  const hostRun = await adapter.inspectRun(store, assignmentId);
+  if (!hostRun) {
     return undefined;
   }
-  if (record.terminalOutcome.kind === "decision") {
-    return {
-      outcome: {
-        kind: "decision",
-        capture: {
-          assignmentId: record.assignmentId,
-          requesterId: record.terminalOutcome.decision.requesterId,
-          blockerSummary: record.terminalOutcome.decision.blockerSummary,
-          options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
-          recommendedOption: record.terminalOutcome.decision.recommendedOption,
-          state: record.terminalOutcome.decision.state,
-          createdAt: record.terminalOutcome.decision.createdAt,
-          ...(record.terminalOutcome.decision.decisionId
-            ? { decisionId: record.terminalOutcome.decision.decisionId }
-            : {})
-        }
-      },
-      run: record
-    };
-  }
+  const claim = [...reconciled.projection.claims.values()]
+    .filter((candidate) => candidate.assignmentId === hostRun.assignmentId)
+    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+    .at(-1);
+  const attachment = claim
+    ? reconciled.projection.attachments.get(claim.attachmentId)
+    : undefined;
   return {
-    outcome: {
-      kind: "result",
-      capture: {
-        assignmentId: record.assignmentId,
-        producerId: record.terminalOutcome.result.producerId,
-        status: record.terminalOutcome.result.status,
-        summary: record.terminalOutcome.result.summary,
-        changedFiles: [...record.terminalOutcome.result.changedFiles],
-        createdAt: record.terminalOutcome.result.createdAt,
-        ...(record.terminalOutcome.result.resultId
-          ? { resultId: record.terminalOutcome.result.resultId }
-          : {})
-      }
-    },
-    run: record
+    hostRun,
+    ...(attachment
+      ? {
+          runtimeAttachment: {
+            id: attachment.id,
+            state: attachment.state,
+            nativeSessionId: attachment.nativeSessionId ?? "",
+            claimId: claim?.id ?? "",
+            claimState: claim?.state ?? ""
+          }
+        }
+      : {})
   };
-}
-
-function isRecoverableCompletedRunRecord(record: { state: string; terminalOutcome?: unknown }): boolean {
-  return record.state === "completed" && Boolean(record.terminalOutcome);
 }
 
 function synthesizeRecoveredExecutionFromReconciliation(

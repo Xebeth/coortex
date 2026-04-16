@@ -60,6 +60,20 @@ export type AttachmentState =
   | "released"
   | "orphaned";
 
+export type RuntimeAuthorityProvenance =
+  | {
+      kind: "launch";
+      source: "ctx.run";
+    }
+  | {
+      kind: "resume";
+      source: "ctx.resume";
+    }
+  | {
+      kind: "recovery";
+      source: "recovery.reconcile";
+    };
+
 export interface RuntimeAttachment {
   id: string;
   adapter: string;
@@ -67,10 +81,7 @@ export interface RuntimeAttachment {
   state: AttachmentState;
   createdAt: string;
   updatedAt: string;
-  provenance: {
-    kind: "launch";
-    source: "ctx.run";
-  };
+  provenance: RuntimeAuthorityProvenance;
   nativeSessionId?: string;
   attachedAt?: string;
   detachedAt?: string;
@@ -108,10 +119,7 @@ export interface AssignmentClaim {
   state: AssignmentClaimState;
   createdAt: string;
   updatedAt: string;
-  provenance: {
-    kind: "launch";
-    source: "ctx.run";
-  };
+  provenance: RuntimeAuthorityProvenance;
   releasedAt?: string;
   releasedReason?: string;
   orphanedAt?: string;

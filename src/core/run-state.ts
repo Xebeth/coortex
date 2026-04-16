@@ -1,8 +1,14 @@
 import type { HostRunRecord } from "./types.js";
 
+export const COORTEX_RECLAIM_LEASE_KEY = "coortexReclaimLease";
+
 export function getNativeRunId(record: HostRunRecord | undefined): string | undefined {
   const nativeRunId = record?.adapterData?.nativeRunId;
   return typeof nativeRunId === "string" && nativeRunId.length > 0 ? nativeRunId : undefined;
+}
+
+export function isCoortexReclaimLease(record: HostRunRecord | undefined): boolean {
+  return record?.adapterData?.[COORTEX_RECLAIM_LEASE_KEY] === true;
 }
 
 export function selectAuthoritativeRunRecord(

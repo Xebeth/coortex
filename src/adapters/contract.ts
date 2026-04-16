@@ -12,10 +12,26 @@ export interface RuntimeArtifactStore {
   readonly adaptersDir: string;
   readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined>;
   readTextArtifact(relativePath: string, label: string): Promise<string | undefined>;
+  readVersionedTextArtifact(
+    relativePath: string,
+    label: string
+  ): Promise<VersionedTextArtifact>;
   claimTextArtifact(relativePath: string, content: string): Promise<string>;
+  writeTextArtifactCas(
+    relativePath: string,
+    expectedVersion: ArtifactVersion | null,
+    nextContent: string
+  ): Promise<{ ok: boolean; version: ArtifactVersion | null }>;
   writeJsonArtifact(relativePath: string, value: unknown): Promise<string>;
   writeTextArtifact(relativePath: string, content: string): Promise<string>;
   deleteArtifact(relativePath: string): Promise<void>;
+}
+
+export type ArtifactVersion = string;
+
+export interface VersionedTextArtifact {
+  content?: string;
+  version: ArtifactVersion | null;
 }
 
 export interface AdapterCapabilities {
@@ -117,9 +133,10 @@ export interface HostSessionLifecycle {
 
 interface HostSessionResumeResultBase {
   requestedSessionId: string;
-  nativeSessionId: string;
   observedSessionId?: string;
+  verifiedSessionId?: string;
   sessionVerified: boolean;
+  reclaimState: "unverified_failed" | "verified_then_failed" | "reclaimed";
   exitCode: number;
   stoppedAt: string;
   metadata?: Record<string, unknown>;
@@ -133,6 +150,8 @@ export type HostSessionResumeResult =
     })
   | (HostSessionResumeResultBase & {
       reclaimed: true;
+      reclaimState: "reclaimed";
+      verifiedSessionId: string;
       outcome: HostExecutionOutcome["outcome"];
       run: HostRunRecord;
     });

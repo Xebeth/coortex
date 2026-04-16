@@ -15,9 +15,16 @@ import type {
   RuntimeArtifactStore,
   TaskEnvelope
 } from "../../../adapters/contract.js";
-import { buildCompletedRunRecord, createRunningRunRecord } from "../../../adapters/host-run-records.js";
+import {
+  buildCompletedRunRecord,
+  createRunningRunRecord,
+  withRunNativeId
+} from "../../../adapters/host-run-records.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../../../adapters/host-run-store.js";
-import { executeHostRunSession } from "../../../adapters/host-run-session.js";
+import {
+  executeHostResumeSession,
+  executeHostRunSession
+} from "../../../adapters/host-run-session.js";
 import type {
   DecisionPacket,
   HostRunRecord,
@@ -25,7 +32,12 @@ import type {
   ResultPacket,
   RuntimeProjection
 } from "../../../core/types.js";
-import { getNativeRunId } from "../../../core/run-state.js";
+import {
+  COORTEX_RECLAIM_LEASE_KEY,
+  getNativeRunId,
+  isCoortexReclaimLease,
+  isRunLeaseExpired
+} from "../../../core/run-state.js";
 import { nowIso } from "../../../utils/time.js";
 import { buildTaskEnvelope } from "./envelope.js";
 import type { CodexPaths } from "./types.js";
@@ -43,6 +55,7 @@ import {
 } from "./prompt.js";
 import {
   parseExecJsonl,
+  materializeInspectableRunRecord,
 } from "./run-records.js";
 import {
   buildFailedOutcome,
@@ -289,11 +302,37 @@ export class CodexAdapter implements HostAdapter {
 
     const requestedSessionId = attachment.nativeSessionId;
     const assignmentId = readEnvelopeAssignmentId(envelope);
+    const leaseMs = readPositiveIntEnv("COORTEX_RUN_LEASE_MS", DEFAULT_RUN_LEASE_MS);
+    const heartbeatMs = readPositiveIntEnv("COORTEX_RUN_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS);
+    const runStore = this.runStore(store);
     const startedAt = nowIso();
+    let runningRecord = await runStore.claimOrAdopt(
+      createRunningRunRecord(assignmentId, startedAt, leaseMs, requestedSessionId),
+      (current) =>
+        current.state === "running" &&
+        !isRunLeaseExpired(current) &&
+        getNativeRunId(current) === requestedSessionId &&
+        !isCoortexReclaimLease(current),
+      (current) => {
+        const adoptedAt = nowIso();
+        return {
+          ...withRunNativeId(current, requestedSessionId),
+          heartbeatAt: adoptedAt,
+          leaseExpiresAt: new Date(Date.parse(adoptedAt) + leaseMs).toISOString(),
+          adapterData: {
+            ...(current.adapterData ?? {}),
+            nativeRunId: requestedSessionId,
+            [COORTEX_RECLAIM_LEASE_KEY]: true
+          }
+        };
+      }
+    );
+
     const paths = this.paths(store);
     const executionId = randomUUID();
     const outputPath = join(paths.runsDir, `${assignmentId}-${executionId}-resume-last-message.json`);
     let observedSessionId: string | undefined;
+    let verifiedSessionId: string | undefined;
     const executionInput = {
       cwd: projection.rootPath,
       sessionId: requestedSessionId,
@@ -301,11 +340,14 @@ export class CodexAdapter implements HostAdapter {
       outputPath,
       onEvent: async (event: Record<string, unknown>) => {
         const sessionId = readResumeSessionId(event);
-        if (!sessionId || observedSessionId === sessionId) {
+        if (!sessionId) {
           return;
         }
-        observedSessionId = sessionId;
-        if (sessionId === requestedSessionId) {
+        if (!observedSessionId) {
+          observedSessionId = sessionId;
+        }
+        if (sessionId === requestedSessionId && verifiedSessionId !== requestedSessionId) {
+          verifiedSessionId = sessionId;
           await lifecycle?.onSessionIdentity?.({
             nativeSessionId: sessionId,
             metadata: {
@@ -322,77 +364,52 @@ export class CodexAdapter implements HostAdapter {
           }
         : {})
     };
-    const execution = this.runner.runResume
-      ? await this.runner.runResume(executionInput)
-      : await (await this.runner.startResume!(executionInput)).result;
-
-    const sessionVerified = observedSessionId === requestedSessionId;
-    const stoppedAt = nowIso();
-    const completed = await deriveCodexExecutionCompletion(
+    return executeHostResumeSession<CodexExecResult>({
       assignmentId,
-      stoppedAt,
-      execution,
-      outputPath
-    );
-    const runRecord = buildCompletedRunRecord(
-      completed.outcome,
-      assignmentId,
-      startedAt,
-      stoppedAt,
-      requestedSessionId
-    );
-    const runWarning = sessionVerified
-      ? await this.runStore(store).persistWarning(runRecord)
-      : undefined;
-    const telemetry = {
-      eventType: "host.resume.completed",
+      startedAt: runningRecord.startedAt,
       taskId: projection.sessionId,
-      assignmentId,
-      metadata: {
-        requestedSessionId,
-        observedSessionId: observedSessionId ?? "",
-        sessionVerified,
-        exitCode: execution.exitCode,
-        reclaimed: sessionVerified,
-        outcomeKind: completed.outcome.outcome.kind,
-        resultStatus:
-          completed.outcome.outcome.kind === "result" ? completed.outcome.outcome.capture.status : ""
+      requestedSessionId,
+      runStore,
+      runRecord: runningRecord,
+      leaseMs,
+      heartbeatMs,
+      startRun: async () => {
+        if (this.runner.startResume) {
+          return this.runner.startResume(executionInput);
+        }
+        const resumeExecution = this.runner.runResume!(executionInput);
+        return {
+          result: resumeExecution,
+          terminate: async () => undefined,
+          waitForExit: async () => {
+            const execution = await resumeExecution;
+            return { code: execution.exitCode };
+          }
+        };
       },
-      ...(completed.usage ? { usage: completed.usage } : {})
-    } satisfies HostTelemetryCapture;
-
-    if (sessionVerified) {
-      return {
-        reclaimed: true,
-        requestedSessionId,
-        nativeSessionId: requestedSessionId,
-        ...(observedSessionId ? { observedSessionId } : {}),
-        sessionVerified,
-        exitCode: execution.exitCode,
-        stoppedAt,
-        outcome: completed.outcome.outcome,
-        run: runRecord,
-        telemetry,
-        ...(runWarning ? { warning: runWarning } : {})
-      };
-    }
-
-    const verificationWarning = summarizeResumeVerificationFailure(
-      requestedSessionId,
-      observedSessionId,
-      execution
-    );
-    return {
-      reclaimed: false,
-      requestedSessionId,
-      nativeSessionId: requestedSessionId,
-      ...(observedSessionId ? { observedSessionId } : {}),
-      sessionVerified,
-      exitCode: execution.exitCode,
-      stoppedAt,
-      telemetry,
-      warning: verificationWarning
-    };
+      deriveCompleted: async (execution) => {
+        const completed = await deriveCodexExecutionCompletion(
+          assignmentId,
+          nowIso(),
+          execution,
+          outputPath
+        );
+        return {
+          outcome: completed.outcome,
+          ...(completed.usage ? { usage: completed.usage } : {})
+        };
+      },
+      getObservedSessionId: () => observedSessionId,
+      getVerifiedSessionId: () => verifiedSessionId,
+      summarizeExecutionFailure: summarizeExecutionError,
+      summarizeVerificationFailure: summarizeResumeVerificationFailure,
+      setActiveRun: (run) => {
+        this.activeRun = run as RunningExec | undefined;
+      },
+      setActiveExecutionSettled: (settled) => {
+        this.activeExecutionSettled = settled;
+      }
+    });
   }
 
   async claimRunLease(
@@ -423,11 +440,15 @@ export class CodexAdapter implements HostAdapter {
     store: RuntimeArtifactStore,
     assignmentId?: string
   ): Promise<HostRunRecord | undefined> {
-    return this.runStore(store).inspect(assignmentId);
+    return materializeInspectableRunRecord(
+      await this.runStore(store).inspectArtifacts(assignmentId)
+    );
   }
 
   async inspectRuns(store: RuntimeArtifactStore): Promise<HostRunRecord[]> {
-    return this.runStore(store).inspectAll();
+    return (await this.runStore(store).inspectAllArtifacts())
+      .map((inspection) => materializeInspectableRunRecord(inspection))
+      .filter((record) => record !== undefined);
   }
 
   normalizeResult(capture: HostResultCapture): ResultPacket {

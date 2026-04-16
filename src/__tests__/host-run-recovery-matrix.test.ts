@@ -18,6 +18,7 @@ import type {
 } from "../adapters/contract.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../adapters/host-run-store.js";
 import { buildCompletedRunRecord } from "../adapters/host-run-records.js";
+import { materializeInspectableRunRecord } from "../hosts/codex/adapter/run-records.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import type { RuntimeEvent } from "../core/events.js";
@@ -761,7 +762,7 @@ test("host-run command matrix preserves duplicate-run protection", async (t) => 
         await waitFor(async () => (await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId))?.state === "running");
         await assert.rejects(
           runRuntime(ctx.store, ctx.adapter),
-          /already has an active host run lease/
+          /(already has an active host run lease|is already claimed by authoritative attachment)/
         );
 
         adapter.releaseRun();
@@ -1746,9 +1747,15 @@ test("host-run command matrix keeps prepareResumeRuntime read-only while reconci
   await adapter.claimRunLease(ctx.store, ctx.projection, ctx.assignmentId, record);
 
   const projectionBefore = await loadOperatorProjection(ctx.store);
+  const telemetryBefore = await ctx.store.loadTelemetry();
   const prepared = await prepareResumeRuntime(ctx.store, adapter);
   const projectionAfterPrepare = await loadOperatorProjection(ctx.store);
   const reconciled = await loadReconciledProjectionWithDiagnostics(ctx.store, adapter);
+  const telemetryAfter = await ctx.store.loadTelemetry();
+  const persistedEnvelope = await ctx.store.readJsonArtifact(
+    "runtime/last-resume-envelope.json",
+    "resume envelope"
+  );
 
   assert.equal(prepared.envelope.metadata.activeAssignmentId, ctx.assignmentId);
   assert.equal(prepared.projection.attachments.size, 0);
@@ -1759,6 +1766,8 @@ test("host-run command matrix keeps prepareResumeRuntime read-only while reconci
   assert.equal(projectionAfterPrepare.claims.size, 0);
   assert.equal(adapter.lastBuildProjection?.attachments.size, 0);
   assert.equal(adapter.lastBuildProjection?.claims?.size ?? 0, 0);
+  assert.equal(telemetryAfter.length, telemetryBefore.length);
+  assert.equal(persistedEnvelope, undefined);
   assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
   assert.equal(reconciled.projection.attachments.size, 0);
   assert.equal(reconciled.projection.claims.size, 0);
@@ -2323,7 +2332,15 @@ test("host-run recovery matrix promotes provisional authority for recovered comp
     recovered.projection.attachments.get(attachmentId)?.nativeSessionId,
     "matrix-thread-provisional-decision"
   );
+  assert.deepEqual(recovered.projection.attachments.get(attachmentId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.deepEqual(recovered.projection.claims.get(claimId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
   assert.equal(recovered.projection.status.activeAssignmentIds[0], ctx.assignmentId);
   assert.equal(
@@ -2355,7 +2372,15 @@ test("host-run recovery matrix promotes provisional authority for recovered part
     recovered.projection.attachments.get(attachmentId)?.nativeSessionId,
     "matrix-thread-provisional-partial"
   );
+  assert.deepEqual(recovered.projection.attachments.get(attachmentId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
+  assert.deepEqual(recovered.projection.claims.get(claimId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
   assert.equal(getRunnableAssignment(recovered.projection).id, ctx.assignmentId);
   assert.equal(
@@ -2933,12 +2958,16 @@ class MatrixAdapter implements HostAdapter {
 
   async inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined> {
     this.bindStore(store);
-    return this.runStore.inspect(assignmentId);
+    return materializeInspectableRunRecord(
+      await this.runStore.inspectArtifacts(assignmentId)
+    );
   }
 
   async inspectRuns(store: RuntimeArtifactStore): Promise<HostRunRecord[]> {
     this.bindStore(store);
-    return this.runStore.inspectAll();
+    return (await this.runStore.inspectAllArtifacts())
+      .map((inspection) => materializeInspectableRunRecord(inspection))
+      .filter((record) => record !== undefined);
   }
 
   normalizeResult(capture: HostResultCapture): ResultPacket {
@@ -3202,8 +3231,8 @@ class ReclaimFailureMatrixAdapter extends BriefingMatrixAdapter {
     this.resumeSessionCount += 1;
     return {
       reclaimed: false as const,
+      reclaimState: "unverified_failed" as const,
       requestedSessionId: attachment.nativeSessionId ?? "missing-native-session",
-      nativeSessionId: attachment.nativeSessionId ?? "missing-native-session",
       sessionVerified: false,
       exitCode: 1,
       stoppedAt: nowIso(),

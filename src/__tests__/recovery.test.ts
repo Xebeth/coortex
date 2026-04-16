@@ -307,3 +307,122 @@ test("recovery brief does not advertise wrapped resume without a stored native s
   assert.doesNotMatch(brief.nextRequiredAction, /Resume attachment/);
   assert.match(brief.nextRequiredAction, /Continue assignment/);
 });
+
+test("recovery brief rejects duplicate active claims for the same assignment", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-duplicate-claims-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const timestamp = nowIso();
+  const firstAttachmentId = randomUUID();
+  const secondAttachmentId = randomUUID();
+
+  await store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: firstAttachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId: "thread-duplicate-1",
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: secondAttachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId: "thread-duplicate-2",
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId,
+          attachmentId: firstAttachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId,
+          attachmentId: secondAttachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
+
+  const projection = await store.rebuildProjection();
+
+  assert.throws(() => buildRecoveryBrief(projection), /multiple active claims are present/);
+});

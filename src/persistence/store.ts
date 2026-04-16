@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { validateRuntimeConfig } from "../config/schema.js";
@@ -6,6 +6,7 @@ import type { RuntimeConfig } from "../config/types.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import type { TelemetryEvent } from "../telemetry/types.js";
+import type { VersionedTextArtifact } from "../adapters/contract.js";
 import {
   appendLine,
   appendText,
@@ -21,6 +22,7 @@ import {
 import { parseJson, toPrettyJson } from "../utils/json.js";
 import {
   applyRuntimeEvent,
+  createEmptyProjection,
   fromSnapshot,
   projectRuntimeState,
   toSnapshot
@@ -112,6 +114,20 @@ export class RuntimeStore {
 
   async writeSnapshot(snapshot: RuntimeSnapshot): Promise<void> {
     await writeJsonAtomic(this.snapshotPath, snapshot);
+  }
+
+  async mutateSnapshotProjection(
+    mutate: (projection: RuntimeProjection) => RuntimeProjection | Promise<RuntimeProjection>
+  ): Promise<RuntimeProjection> {
+    return withPathLock(this.snapshotPath, async () => {
+      const snapshot = await this.loadSnapshot();
+      const baseProjection = snapshot
+        ? fromSnapshot(snapshot)
+        : await this.createEmptyProjectionFromConfig();
+      const nextProjection = await mutate(fromSnapshot(toSnapshot(baseProjection)));
+      await this.writeSnapshot(toSnapshot(nextProjection));
+      return nextProjection;
+    });
   }
 
   async loadSnapshot(): Promise<RuntimeSnapshot | undefined> {
@@ -314,10 +330,35 @@ export class RuntimeStore {
     return readTextFile(join(this.rootDir, relativePath));
   }
 
+  async readVersionedTextArtifact(
+    relativePath: string,
+    _label: string
+  ): Promise<VersionedTextArtifact> {
+    const fullPath = join(this.rootDir, relativePath);
+    return withPathLock(fullPath, async () => readVersionedTextFile(fullPath));
+  }
+
   async claimTextArtifact(relativePath: string, content: string): Promise<string> {
     const fullPath = join(this.rootDir, relativePath);
     await writeTextExclusive(fullPath, content);
     return fullPath;
+  }
+
+  async writeTextArtifactCas(
+    relativePath: string,
+    expectedVersion: string | null,
+    nextContent: string
+  ): Promise<{ ok: boolean; version: string | null }> {
+    const fullPath = join(this.rootDir, relativePath);
+    return withPathLock(fullPath, async () => {
+      const current = await readVersionedTextFile(fullPath);
+      if (current.version !== expectedVersion) {
+        return { ok: false, version: current.version };
+      }
+      await writeTextAtomic(fullPath, nextContent);
+      const written = await readVersionedTextFile(fullPath);
+      return { ok: true, version: written.version };
+    });
   }
 
   async writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {
@@ -352,9 +393,35 @@ export class RuntimeStore {
   async deleteArtifact(relativePath: string): Promise<void> {
     await rm(join(this.rootDir, relativePath), { force: true });
   }
+
+  private async createEmptyProjectionFromConfig(): Promise<RuntimeProjection> {
+    const config = await this.loadConfig();
+    if (!config) {
+      throw new Error(`Coortex runtime is not initialized at ${this.rootDir}`);
+    }
+    return createEmptyProjection(config.sessionId, config.rootPath, config.adapter);
+  }
 }
 
 export { toPrettyJson };
+
+async function readVersionedTextFile(path: string): Promise<VersionedTextArtifact> {
+  const content = await readTextFile(path);
+  if (content === undefined) {
+    return { version: null };
+  }
+  const metadata = await stat(path);
+  return {
+    content,
+    version: [
+      metadata.dev,
+      metadata.ino,
+      metadata.size,
+      metadata.mtimeMs,
+      metadata.ctimeMs
+    ].join(":")
+  };
+}
 
 function replayEventsAfterSnapshot(
   snapshot: RuntimeSnapshot,

@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { HostRunStore, type HostRunArtifactPaths } from "../adapters/host-run-store.js";
+import {
+  HostRunStore,
+  MalformedHostRunLeaseArtifactError,
+  type HostRunArtifactPaths
+} from "../adapters/host-run-store.js";
 import type { RuntimeArtifactStore } from "../adapters/contract.js";
 import type { HostRunRecord } from "../core/types.js";
 
@@ -9,18 +13,27 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
   readonly rootDir = "/memory";
   readonly runtimeDir = "/memory/runtime";
   readonly adaptersDir = "/memory/adapters";
-  private readonly artifacts = new Map<string, string>();
+  private readonly artifacts = new Map<string, { content: string; version: string }>();
+  private versionCounter = 0;
 
   async readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined> {
-    const content = this.artifacts.get(relativePath);
-    if (content === undefined) {
+    const artifact = this.artifacts.get(relativePath);
+    if (artifact === undefined) {
       return undefined;
     }
-    return JSON.parse(content) as T;
+    return JSON.parse(artifact.content) as T;
   }
 
   async readTextArtifact(relativePath: string, _label: string): Promise<string | undefined> {
-    return this.artifacts.get(relativePath);
+    return this.artifacts.get(relativePath)?.content;
+  }
+
+  async readVersionedTextArtifact(relativePath: string): Promise<{
+    content?: string;
+    version: string | null;
+  }> {
+    const artifact = this.artifacts.get(relativePath);
+    return artifact ? { content: artifact.content, version: artifact.version } : { version: null };
   }
 
   async claimTextArtifact(relativePath: string, content: string): Promise<string> {
@@ -29,17 +42,35 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
       error.code = "EEXIST";
       throw error;
     }
-    this.artifacts.set(relativePath, content);
+    this.artifacts.set(relativePath, { content, version: this.nextVersion() });
     return `${this.rootDir}/${relativePath}`;
   }
 
+  async writeTextArtifactCas(
+    relativePath: string,
+    expectedVersion: string | null,
+    nextContent: string
+  ): Promise<{ ok: boolean; version: string | null }> {
+    const current = this.artifacts.get(relativePath);
+    const currentVersion = current?.version ?? null;
+    if (currentVersion !== expectedVersion) {
+      return { ok: false, version: currentVersion };
+    }
+    const version = this.nextVersion();
+    this.artifacts.set(relativePath, { content: nextContent, version });
+    return { ok: true, version };
+  }
+
   async writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {
-    this.artifacts.set(relativePath, JSON.stringify(value));
+    this.artifacts.set(relativePath, {
+      content: JSON.stringify(value),
+      version: this.nextVersion()
+    });
     return `${this.rootDir}/${relativePath}`;
   }
 
   async writeTextArtifact(relativePath: string, content: string): Promise<string> {
-    this.artifacts.set(relativePath, content);
+    this.artifacts.set(relativePath, { content, version: this.nextVersion() });
     return `${this.rootDir}/${relativePath}`;
   }
 
@@ -51,6 +82,11 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
 
   async deleteArtifact(relativePath: string): Promise<void> {
     this.artifacts.delete(relativePath);
+  }
+
+  private nextVersion(): string {
+    this.versionCounter += 1;
+    return `v${this.versionCounter}`;
   }
 }
 
@@ -98,6 +134,210 @@ test("host run store uses adapter-provided artifact roles instead of codex paths
   assert.equal(await runStore.inspect("assignment-1"), undefined);
 });
 
+test("host run store atomically adopts a reusable live lease exactly once", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-adopt",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-adopt-1"
+    }
+  };
+
+  await runStore.claim(runningRecord);
+
+  let releaseAdoptionWrite!: () => void;
+  const adoptionWriteReleased = new Promise<void>((resolve) => {
+    releaseAdoptionWrite = resolve;
+  });
+  let adoptionWriteSeen!: () => void;
+  const adoptionWriteSeenPromise = new Promise<void>((resolve) => {
+    adoptionWriteSeen = resolve;
+  });
+  const originalWriteTextArtifactCas = store.writeTextArtifactCas.bind(store);
+  store.writeTextArtifactCas = async (relativePath, expectedVersion, nextContent) => {
+    if (
+      relativePath === artifacts.runLeasePath("assignment-adopt") &&
+      nextContent.includes("\"coortexReclaimLease\": true")
+    ) {
+      adoptionWriteSeen();
+      await adoptionWriteReleased;
+    }
+    return originalWriteTextArtifactCas(relativePath, expectedVersion, nextContent);
+  };
+
+  const adoptRecord = (current: HostRunRecord): HostRunRecord => ({
+    ...current,
+    heartbeatAt: "2026-04-11T10:00:05.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:35.000Z",
+    adapterData: {
+      ...(current.adapterData ?? {}),
+      nativeRunId: "thread-adopt-1",
+      coortexReclaimLease: true
+    }
+  });
+
+  try {
+    const firstAdoption = runStore.claimOrAdopt(
+      runningRecord,
+      (current) =>
+        current.adapterData?.nativeRunId === "thread-adopt-1" &&
+        current.adapterData?.coortexReclaimLease !== true,
+      adoptRecord
+    );
+    await adoptionWriteSeenPromise;
+    const secondAdoption = runStore.claimOrAdopt(
+      runningRecord,
+      (current) =>
+        current.adapterData?.nativeRunId === "thread-adopt-1" &&
+        current.adapterData?.coortexReclaimLease !== true,
+      adoptRecord
+    );
+
+    releaseAdoptionWrite();
+    const adopted = await firstAdoption;
+    await assert.rejects(secondAdoption, /already has an active host run lease/);
+
+    const inspected = await runStore.inspect("assignment-adopt");
+    assert.equal(adopted.adapterData?.coortexReclaimLease, true);
+    assert.equal(inspected?.adapterData?.coortexReclaimLease, true);
+  } finally {
+    store.writeTextArtifactCas = originalWriteTextArtifactCas;
+  }
+});
+
+test("host run store rolls back adopt metadata when persistence fails", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const assignmentId = "assignment-adopt-rollback";
+  const runningRecord: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-adopt-rollback-1"
+    }
+  };
+
+  await runStore.claim(runningRecord);
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  let failed = false;
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (!failed && relativePath === artifacts.runRecordPath(assignmentId)) {
+      failed = true;
+      throw new Error("simulated adopt metadata failure");
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  const adoptRecord = (current: HostRunRecord): HostRunRecord => ({
+    ...current,
+    heartbeatAt: "2026-04-11T10:00:05.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:35.000Z",
+    adapterData: {
+      ...(current.adapterData ?? {}),
+      nativeRunId: "thread-adopt-rollback-1",
+      coortexReclaimLease: true
+    }
+  });
+
+  try {
+    await assert.rejects(
+      runStore.claimOrAdopt(
+        runningRecord,
+        (current) =>
+          current.adapterData?.nativeRunId === "thread-adopt-rollback-1" &&
+          current.adapterData?.coortexReclaimLease !== true,
+        adoptRecord
+      ),
+      /simulated adopt metadata failure/
+    );
+
+    const inspected = await runStore.inspect(assignmentId);
+    const lease = await store.readJsonArtifact<HostRunRecord>(artifacts.runLeasePath(assignmentId), "lease");
+    const runRecord = await store.readJsonArtifact<HostRunRecord>(artifacts.runRecordPath(assignmentId), "record");
+    const lastRun = await store.readJsonArtifact<HostRunRecord>(artifacts.lastRunPath(), "last-run");
+
+    assert.equal(inspected?.adapterData?.coortexReclaimLease, undefined);
+    assert.equal(lease?.adapterData?.coortexReclaimLease, undefined);
+    assert.equal(runRecord?.adapterData?.coortexReclaimLease, undefined);
+    assert.equal(lastRun?.adapterData?.coortexReclaimLease, undefined);
+  } finally {
+    store.writeJsonArtifact = originalWriteJsonArtifact;
+  }
+});
+
+test("host run store blocks adopt on malformed lease artifacts without fabricating a running blocker", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const assignmentId = "assignment-adopt-malformed";
+  const requestedRecord: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-adopt-malformed-1"
+    }
+  };
+
+  await store.writeTextArtifact(artifacts.runLeasePath(assignmentId), "{ definitely-not-json");
+
+  await assert.rejects(
+    runStore.claimOrAdopt(
+      requestedRecord,
+      () => true,
+      (current) => current
+    ),
+    (error: unknown) =>
+      error instanceof MalformedHostRunLeaseArtifactError &&
+      error.assignmentId === assignmentId &&
+      error.relativePath === artifacts.runLeasePath(assignmentId)
+  );
+
+  assert.equal(
+    await store.readTextArtifact(artifacts.runLeasePath(assignmentId), "custom run lease"),
+    "{ definitely-not-json"
+  );
+  assert.equal(
+    await store.readJsonArtifact(artifacts.runRecordPath(assignmentId), "custom run record"),
+    undefined
+  );
+  assert.equal(
+    await store.readJsonArtifact(artifacts.lastRunPath(), "custom run record"),
+    undefined
+  );
+
+  const inspected = await runStore.inspect(assignmentId);
+  const inspection = await runStore.inspectArtifacts(assignmentId);
+  assert.equal(inspected, undefined);
+  assert.equal(inspection?.assignmentId, assignmentId);
+  assert.equal(inspection?.lease.state, "malformed");
+});
+
 test("host run store inspection matrix matches recovery invariants", async (t) => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -141,7 +381,8 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
     inspectLastRun?: boolean;
     lastRunRecord?: HostRunRecord;
     lastRunLeaseRecord?: HostRunRecord;
-    expected: Partial<HostRunRecord> & Pick<HostRunRecord, "assignmentId" | "state">;
+    expected: (Partial<HostRunRecord> & Pick<HostRunRecord, "assignmentId" | "state">) | null;
+    expectedLeaseState?: "missing" | "valid" | "malformed";
   }
 
   const cases: InspectionMatrixCase[] = [
@@ -282,37 +523,25 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
       expected: runningRecord("assignment-fresh-over-stale-completed")
     },
     {
-      name: "malformed lease without a durable run record becomes stale running state",
+      name: "malformed lease without a durable run record stays a malformed artifact fact",
       assignmentId: "assignment-malformed-only",
       leaseContent: "{",
-      expected: {
-        assignmentId: "assignment-malformed-only",
-        state: "running",
-        staleReasonCode: "malformed_lease_artifact",
-        staleReason: "malformed lease file"
-      }
+      expected: null,
+      expectedLeaseState: "malformed"
     },
     {
-      name: "parsed empty-object lease without a durable run record becomes stale running state",
+      name: "parsed empty-object lease without a durable run record stays a malformed artifact fact",
       assignmentId: "assignment-empty-object-lease",
       leaseContent: "{}",
-      expected: {
-        assignmentId: "assignment-empty-object-lease",
-        state: "running",
-        staleReasonCode: "malformed_lease_artifact",
-        staleReason: "malformed lease file"
-      }
+      expected: null,
+      expectedLeaseState: "malformed"
     },
     {
-      name: "parsed null lease without a durable run record becomes stale running state",
+      name: "parsed null lease without a durable run record stays a malformed artifact fact",
       assignmentId: "assignment-null-lease",
       leaseContent: "null",
-      expected: {
-        assignmentId: "assignment-null-lease",
-        state: "running",
-        staleReasonCode: "malformed_lease_artifact",
-        staleReason: "malformed lease file"
-      }
+      expected: null,
+      expectedLeaseState: "malformed"
     },
     {
       name: "completed run record wins over malformed lease metadata",
@@ -404,9 +633,19 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
       const inspected = testCase.inspectLastRun
         ? await runStore.inspect()
         : await runStore.inspect(testCase.assignmentId);
+      const inspection = testCase.inspectLastRun
+        ? await runStore.inspectArtifacts()
+        : await runStore.inspectArtifacts(testCase.assignmentId);
 
-      for (const [key, value] of Object.entries(testCase.expected)) {
-        assert.deepEqual(inspected?.[key as keyof HostRunRecord], value, `${testCase.name}: ${key}`);
+      if (testCase.expected) {
+        for (const [key, value] of Object.entries(testCase.expected)) {
+          assert.deepEqual(inspected?.[key as keyof HostRunRecord], value, `${testCase.name}: ${key}`);
+        }
+      } else {
+        assert.equal(inspected, undefined, `${testCase.name}: inspection`);
+      }
+      if ("expectedLeaseState" in testCase) {
+        assert.equal(inspection?.lease.state, testCase.expectedLeaseState, `${testCase.name}: lease.state`);
       }
 
       await store.deleteArtifact(artifacts.runRecordPath(testCase.assignmentId));

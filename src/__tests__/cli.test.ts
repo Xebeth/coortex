@@ -19,6 +19,17 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+async function readFileIfExists(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (!!error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 async function runCliCommand(
   cliPath: string,
   command: string,
@@ -728,6 +739,7 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     cwd: projectRoot,
     env
   });
+  assert.match(inspect.stdout, /"hostRun": \{/);
   assert.match(inspect.stdout, /"nativeRunId": "thread-cli-1"/);
   assert.match(inspect.stdout, /"outcomeKind": "result"/);
 
@@ -1298,26 +1310,20 @@ test("ctx status and resume surface hidden snapshot-fallback active lease blocke
   );
   await corruptSnapshotBoundary(runtimeDir);
 
-  const initialEnvelope = await readFile(
-    join(runtimeDir, "runtime", "last-resume-envelope.json"),
-    "utf8"
-  );
+  const initialEnvelope = await readFileIfExists(join(runtimeDir, "runtime", "last-resume-envelope.json"));
   const status = await runCliCommand(cliPath, "status", {
     cwd: projectRoot
   });
   const resume = await runCliCommand(cliPath, "resume", {
     cwd: projectRoot
   });
-  const finalEnvelope = await readFile(
-    join(runtimeDir, "runtime", "last-resume-envelope.json"),
-    "utf8"
-  );
+  const finalEnvelope = await readFileIfExists(join(runtimeDir, "runtime", "last-resume-envelope.json"));
 
   assert.equal(status.exitCode, 0);
   assert.match(status.stderr, /WARNING active-run-present .*active host run lease/);
   assert.match(status.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
   assert.match(status.stdout, /Active assignments: 1/);
-  assert.match(status.stdout, /Authoritative host leases: 1/);
+  assert.match(status.stdout, /Live host run leases: 1/);
   assert.match(
     status.stdout,
     new RegExp(`- ${hiddenAssignmentId} active host run lease outside the current projection`)
@@ -1328,7 +1334,8 @@ test("ctx status and resume surface hidden snapshot-fallback active lease blocke
     resume.stderr,
     new RegExp(`Assignment ${hiddenAssignmentId} already has an active host run lease\\.`)
   );
-  assert.equal(finalEnvelope, initialEnvelope);
+  assert.equal(initialEnvelope, undefined);
+  assert.equal(finalEnvelope, undefined);
 });
 
 test("ctx status reports in-projection active leases without synthesizing attachments", async () => {
@@ -1474,10 +1481,7 @@ test("ctx status reports in-projection active leases without synthesizing attach
     "utf8"
   );
 
-  const initialEnvelope = await readFile(
-    join(runtimeDir, "runtime", "last-resume-envelope.json"),
-    "utf8"
-  );
+  const initialEnvelope = await readFileIfExists(join(runtimeDir, "runtime", "last-resume-envelope.json"));
   const status = await runCliCommand(cliPath, "status", {
     cwd: projectRoot
   });
@@ -1489,25 +1493,20 @@ test("ctx status reports in-projection active leases without synthesizing attach
     cwd: projectRoot,
     env: resumeEnv
   });
-  const finalEnvelope = await readFile(
-    join(runtimeDir, "runtime", "last-resume-envelope.json"),
-    "utf8"
-  );
+  const finalEnvelope = await readFileIfExists(join(runtimeDir, "runtime", "last-resume-envelope.json"));
   const repairedSnapshot = JSON.parse(
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
   ) as {
     attachments: Array<{ id: string; state: string; nativeSessionId?: string }>;
     claims: Array<{ assignmentId: string; state: string }>;
   };
-  const repairedEnvelope = JSON.parse(finalEnvelope) as {
-    metadata?: { activeAssignmentId?: string };
-  };
 
   assert.equal(status.exitCode, 0);
   assert.match(status.stderr, /WARNING active-run-present .*active host run lease/);
   assert.match(status.stdout, /Active assignments: 1/);
-  assert.match(status.stdout, /Authoritative host leases: 1/);
+  assert.match(status.stdout, /Live host run leases: 1/);
   assert.match(status.stdout, /Provisional attachments: 0/);
+  assert.equal(initialEnvelope, undefined);
   assert.match(status.stdout, /Authoritative attachments: 0/);
   assert.match(status.stdout, /Resumable attachments: 0/);
   assert.match(
@@ -1522,7 +1521,7 @@ test("ctx status reports in-projection active leases without synthesizing attach
     resume.stderr,
     new RegExp(`Assignment ${authoritativeAssignmentId} already has an active host run lease\\.`)
   );
-  assert.equal(repairedEnvelope.metadata?.activeAssignmentId, authoritativeAssignmentId);
+  assert.equal(finalEnvelope, undefined);
   assert.equal(repairedSnapshot.attachments.length, 0);
   assert.equal(repairedSnapshot.claims.length, 0);
 });
@@ -3056,6 +3055,7 @@ liveCodexSmoke("ctx run completes a live Codex smoke path", async () => {
     cwd: projectRoot,
     env: liveCodexEnv
   });
+  assert.match(inspect.stdout, /"hostRun": \{/);
   assert.match(inspect.stdout, /"state": "completed"/);
 });
 
@@ -3084,6 +3084,7 @@ liveCodexRestricted("ctx run reports truthful persisted state without bypass mod
   const inspect = await execFileAsync(process.execPath, [cliPath, "inspect"], {
     cwd: projectRoot
   });
+  assert.match(inspect.stdout, /"hostRun": \{/);
 
   const snapshot = JSON.parse(
     await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")

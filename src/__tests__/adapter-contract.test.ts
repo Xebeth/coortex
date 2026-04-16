@@ -330,7 +330,7 @@ test("codex adapter resumes a stored native session id through the wrapped resum
   assert.equal(capturedSessionId, "thread-resume-1");
   assert.match(capturedPrompt, /Coordinate work/);
   assert.equal(resumeResult.reclaimed, true);
-  assert.equal(resumeResult.nativeSessionId, "thread-resume-1");
+  assert.equal(resumeResult.verifiedSessionId, "thread-resume-1");
   assert.equal(resumeResult.requestedSessionId, "thread-resume-1");
   assert.equal(resumeResult.observedSessionId, "thread-resume-1");
   assert.equal(resumeResult.sessionVerified, true);
@@ -431,6 +431,7 @@ test("codex adapter captures decision outcomes through the wrapped resume runner
   });
 
   assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.verifiedSessionId, "thread-resume-decision");
   assert.equal(resumeResult.outcome.kind, "decision");
   assert.equal(
     resumeResult.outcome.capture.blockerSummary,
@@ -531,6 +532,7 @@ test("codex adapter falls back to streamed wrapped-resume agent output when the 
   });
 
   assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.verifiedSessionId, "thread-resume-stream-fallback");
   assert.equal(resumeResult.outcome.kind, "result");
   assert.equal(
     resumeResult.outcome.capture.summary,
@@ -617,6 +619,7 @@ test("codex adapter rejects wrapped resume when the event stream does not verify
   assert.equal(resumeResult.reclaimed, false);
   assert.equal(resumeResult.requestedSessionId, "thread-resume-expected");
   assert.equal(resumeResult.observedSessionId, "thread-foreign-resume");
+  assert.equal(resumeResult.verifiedSessionId, undefined);
   assert.equal(resumeResult.sessionVerified, false);
   assert.match(resumeResult.warning ?? "", /instead of requested session/);
   assert.equal(resumeResult.telemetry?.metadata.reclaimed, false);
@@ -1162,7 +1165,7 @@ test("codex adapter recovers final run-record writes after a transient write fai
   assert.equal(getNativeRunId(inspected), "thread-write-recover-1");
 });
 
-test("codex adapter keeps a successful outcome when thread-start metadata persistence fails", async () => {
+test("codex adapter keeps a successful outcome but withholds native identity when thread-start metadata persistence fails", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-thread-warning-"));
   const store = RuntimeStore.forProject(projectRoot);
   const sessionId = randomUUID();
@@ -1252,7 +1255,8 @@ test("codex adapter keeps a successful outcome when thread-start metadata persis
   assert.equal(execution.outcome.capture.status, "completed");
   assert.match(execution.warning ?? "", /thread-start handling/i);
   assert.equal(inspected?.state, "completed");
-  assert.equal(getNativeRunId(inspected), "thread-warning-1");
+  assert.equal(getNativeRunId(execution.run), undefined);
+  assert.equal(getNativeRunId(inspected), undefined);
 });
 
 test("codex adapter treats malformed lease JSON as stale inspection state", async () => {

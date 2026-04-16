@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { basename, dirname } from "node:path";
 
 import type { RuntimeArtifactStore } from "./contract.js";
@@ -17,6 +16,50 @@ export interface HostRunArtifactPaths {
   lastRunPath(): string;
 }
 
+export class ActiveHostRunLeaseError extends Error {
+  constructor(readonly assignmentId: string) {
+    super(`Assignment ${assignmentId} already has an active host run lease.`);
+  }
+}
+
+export class MalformedHostRunLeaseArtifactError extends ActiveHostRunLeaseError {
+  constructor(
+    readonly assignmentId: string,
+    readonly relativePath: string
+  ) {
+    super(assignmentId);
+    this.message = `Assignment ${assignmentId} has a malformed host run lease artifact at ${relativePath}.`;
+  }
+}
+
+export function isActiveHostRunLeaseError(error: unknown): error is ActiveHostRunLeaseError {
+  return error instanceof ActiveHostRunLeaseError;
+}
+
+export type HostRunLeaseInspection =
+  | {
+      state: "missing";
+    }
+  | {
+      state: "valid";
+      record: HostRunRecord;
+    }
+  | {
+      state: "malformed";
+      raw: string;
+    };
+
+export interface HostRunArtifactInspection {
+  assignmentId: string;
+  runRecord?: HostRunRecord;
+  lease: HostRunLeaseInspection;
+}
+
+type LeaseArtifactRead =
+  | (HostRunLeaseInspection & {
+      version: string | null;
+    });
+
 export class HostRunStore {
   private writeQueue: Promise<void> = Promise.resolve();
 
@@ -27,45 +70,73 @@ export class HostRunStore {
   ) {}
 
   async inspect(assignmentId?: string): Promise<HostRunRecord | undefined> {
+    const inspection = await this.inspectArtifacts(assignmentId);
+    if (!inspection) {
+      return undefined;
+    }
+    return normalizeInspectedRun(
+      selectAuthoritativeRunRecord(
+        inspection.runRecord,
+        inspection.lease.state === "valid" ? inspection.lease.record : undefined
+      )
+    );
+  }
+
+  async inspectArtifacts(assignmentId?: string): Promise<HostRunArtifactInspection | undefined> {
     if (assignmentId) {
-      const runRecord = await this.store.readJsonArtifact<HostRunRecord>(
-        this.artifacts.runRecordPath(assignmentId),
-        `${this.adapterId} run record`
-      );
-      const leaseRecord = await this.readLeaseRecord(assignmentId);
-      return normalizeInspectedRun(selectAuthoritativeRunRecord(runRecord, leaseRecord));
+      return this.inspectArtifactsForAssignment(assignmentId);
     }
     const lastRun = await this.readLastRunPointer();
     if (!lastRun?.assignmentId) {
       return undefined;
     }
-    return this.inspect(lastRun.assignmentId);
+    return this.inspectArtifactsForAssignment(lastRun.assignmentId);
   }
 
   async claim(record: HostRunRecord): Promise<void> {
-    const leasePath = this.artifacts.runLeasePath(record.assignmentId);
-    try {
-      await this.store.claimTextArtifact(leasePath, `${toPrettyJson(record)}\n`);
-    } catch (error) {
-      if (isAlreadyExists(error)) {
-        throw new Error(`Assignment ${record.assignmentId} already has an active host run lease.`);
-      }
-      throw error;
-    }
+    await this.claimUnlocked(record);
+  }
 
-    try {
-      await this.store.writeJsonArtifact(this.artifacts.runRecordPath(record.assignmentId), record);
-      await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), record);
-    } catch (error) {
-      const cleanupError = await this.cleanupClaimFailure(record.assignmentId);
-      if (cleanupError) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `Host run claim metadata persistence failed and rollback cleanup also failed for assignment ${record.assignmentId}. ${message} ${cleanupError.message}`
-        );
+  async claimOrAdopt(
+    record: HostRunRecord,
+    canAdopt: (current: HostRunRecord) => boolean,
+    buildAdoptedRecord: (current: HostRunRecord) => HostRunRecord
+  ): Promise<HostRunRecord> {
+    const leasePath = this.artifacts.runLeasePath(record.assignmentId);
+    const currentLease = await this.readLeaseArtifact(record.assignmentId);
+    if (currentLease.state === "missing") {
+      const claimedLease = await this.store.writeTextArtifactCas(
+        leasePath,
+        currentLease.version,
+        `${toPrettyJson(record)}\n`
+      );
+      if (!claimedLease.ok) {
+        throw new ActiveHostRunLeaseError(record.assignmentId);
       }
-      throw error;
+      await this.persistClaimMetadata(record);
+      return record;
     }
+    if (currentLease.state === "malformed") {
+      throw new MalformedHostRunLeaseArtifactError(record.assignmentId, leasePath);
+    }
+    if (!canAdopt(currentLease.record)) {
+      throw new ActiveHostRunLeaseError(record.assignmentId);
+    }
+    const adoptedRecord = buildAdoptedRecord(currentLease.record);
+    const adoptedLeaseText = `${toPrettyJson(adoptedRecord)}\n`;
+    const swapped = await this.store.writeTextArtifactCas(
+      leasePath,
+      currentLease.version,
+      adoptedLeaseText
+    );
+    if (!swapped.ok) {
+      throw new ActiveHostRunLeaseError(record.assignmentId);
+    }
+    await this.persistAdoptMetadata(adoptedRecord, {
+      previousLeaseVersion: swapped.version,
+      previousLeaseRecord: currentLease.record
+    });
+    return adoptedRecord;
   }
 
   async release(assignmentId: string): Promise<void> {
@@ -124,13 +195,27 @@ export class HostRunStore {
 
   async inspectAll(): Promise<HostRunRecord[]> {
     const records: HostRunRecord[] = [];
-    for (const assignmentId of await this.listInspectableAssignmentIds()) {
-      const record = await this.inspect(assignmentId);
-      if (record?.assignmentId === assignmentId) {
+    for (const inspection of await this.inspectAllArtifacts()) {
+      const record = normalizeInspectedRun(
+        selectAuthoritativeRunRecord(
+          inspection.runRecord,
+          inspection.lease.state === "valid" ? inspection.lease.record : undefined
+        )
+      );
+      if (record?.assignmentId === inspection.assignmentId) {
         records.push(record);
       }
     }
     return records;
+  }
+
+  async inspectAllArtifacts(): Promise<HostRunArtifactInspection[]> {
+    const inspections = await Promise.all(
+      (await this.listInspectableAssignmentIds()).map((assignmentId) =>
+        this.inspectArtifactsForAssignment(assignmentId)
+      )
+    );
+    return inspections.filter((inspection) => inspection !== undefined);
   }
 
   private async cleanupClaimFailure(assignmentId: string): Promise<Error | undefined> {
@@ -175,33 +260,54 @@ export class HostRunStore {
     }
   }
 
-  private async readLeaseRecord(assignmentId: string): Promise<HostRunRecord | undefined> {
+  private async readLeaseArtifact(assignmentId: string): Promise<LeaseArtifactRead> {
     const relativePath = this.artifacts.runLeasePath(assignmentId);
-    try {
-      const leaseRecord = await this.store.readJsonArtifact<HostRunRecord>(
-        relativePath,
-        `${this.adapterId} run lease`
-      );
-      if (leaseRecord === undefined) {
-        return undefined;
-      }
-      return isValidLeaseRecord(leaseRecord, assignmentId)
-        ? leaseRecord
-        : createMalformedLeaseRecord(assignmentId, JSON.stringify(leaseRecord));
-    } catch {
-      const content = await this.store.readTextArtifact(relativePath, `${this.adapterId} run lease`);
-      if (content === undefined) {
-        return undefined;
-      }
-      try {
-        const leaseRecord = parseJson<HostRunRecord>(content, `${this.adapterId} run lease`);
-        return isValidLeaseRecord(leaseRecord, assignmentId)
-          ? leaseRecord
-          : createMalformedLeaseRecord(assignmentId, content);
-      } catch {
-        return createMalformedLeaseRecord(assignmentId, content);
-      }
+    const lease = await this.store.readVersionedTextArtifact(
+      relativePath,
+      `${this.adapterId} run lease`
+    );
+    if (lease.content === undefined) {
+      return { state: "missing", version: lease.version };
     }
+    try {
+      const leaseRecord = parseJson<HostRunRecord>(lease.content, `${this.adapterId} run lease`);
+      if (isValidLeaseRecord(leaseRecord, assignmentId)) {
+        return {
+          state: "valid",
+          version: lease.version,
+          record: leaseRecord
+        };
+      }
+      return {
+        state: "malformed",
+        version: lease.version,
+        raw: lease.content
+      };
+    } catch {
+      return {
+        state: "malformed",
+        version: lease.version,
+        raw: lease.content
+      };
+    }
+  }
+
+  private async inspectArtifactsForAssignment(
+    assignmentId: string
+  ): Promise<HostRunArtifactInspection | undefined> {
+    const runRecord = await this.store.readJsonArtifact<HostRunRecord>(
+      this.artifacts.runRecordPath(assignmentId),
+      `${this.adapterId} run record`
+    );
+    const lease = stripLeaseVersion(await this.readLeaseArtifact(assignmentId));
+    if (!runRecord && lease.state === "missing") {
+      return undefined;
+    }
+    return {
+      assignmentId,
+      ...(runRecord ? { runRecord } : {}),
+      lease
+    };
   }
 
   private async listInspectableAssignmentIds(): Promise<string[]> {
@@ -259,6 +365,94 @@ export class HostRunStore {
       }
     }
   }
+
+  private async claimUnlocked(record: HostRunRecord): Promise<void> {
+    const leasePath = this.artifacts.runLeasePath(record.assignmentId);
+    try {
+      await this.store.claimTextArtifact(leasePath, `${toPrettyJson(record)}\n`);
+    } catch (error) {
+      if (isAlreadyExists(error)) {
+        throw new ActiveHostRunLeaseError(record.assignmentId);
+      }
+      throw error;
+    }
+
+    await this.persistClaimMetadata(record);
+  }
+
+  private async persistClaimMetadata(record: HostRunRecord): Promise<void> {
+    try {
+      await this.store.writeJsonArtifact(this.artifacts.runRecordPath(record.assignmentId), record);
+      await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), record);
+    } catch (error) {
+      const cleanupError = await this.cleanupClaimFailure(record.assignmentId);
+      if (cleanupError) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Host run claim metadata persistence failed and rollback cleanup also failed for assignment ${record.assignmentId}. ${message} ${cleanupError.message}`
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async persistAdoptMetadata(
+    adoptedRecord: HostRunRecord,
+    rollback: {
+      previousLeaseVersion: string | null;
+      previousLeaseRecord: HostRunRecord;
+    }
+  ): Promise<void> {
+    const runRecordPath = this.artifacts.runRecordPath(adoptedRecord.assignmentId);
+    const previousRunRecord = await this.store.readJsonArtifact<HostRunRecord>(
+      runRecordPath,
+      `${this.adapterId} run record`
+    );
+    const previousLastRun = await this.readLastRunPointer();
+    try {
+      await this.store.writeJsonArtifact(runRecordPath, adoptedRecord);
+      await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), adoptedRecord);
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      const rollbackLease = await this.store.writeTextArtifactCas(
+        this.artifacts.runLeasePath(adoptedRecord.assignmentId),
+        rollback.previousLeaseVersion,
+        `${toPrettyJson(rollback.previousLeaseRecord)}\n`
+      );
+      if (!rollbackLease.ok) {
+        rollbackErrors.push("lease rollback failed after adopt metadata persistence error.");
+      }
+      try {
+        if (previousRunRecord) {
+          await this.store.writeJsonArtifact(runRecordPath, previousRunRecord);
+        } else {
+          await this.store.deleteArtifact(runRecordPath);
+        }
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          `run record rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+        );
+      }
+      try {
+        if (previousLastRun) {
+          await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), previousLastRun);
+        } else {
+          await this.store.deleteArtifact(this.artifacts.lastRunPath());
+        }
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          `last-run rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+        );
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      if (rollbackErrors.length > 0) {
+        throw new Error(
+          `Host run adopt metadata persistence failed and rollback also failed for assignment ${adoptedRecord.assignmentId}. ${message} ${rollbackErrors.join(" ")}`
+        );
+      }
+      throw error;
+    }
+  }
 }
 
 function isValidLeaseRecord(record: unknown, assignmentId: string): record is HostRunRecord {
@@ -273,25 +467,6 @@ function isValidLeaseRecord(record: unknown, assignmentId: string): record is Ho
     leaseRecord.startedAt.length > 0
   );
 }
-
-function createMalformedLeaseRecord(assignmentId: string, leaseIdentity: string): HostRunRecord {
-  return {
-    assignmentId,
-    state: "running",
-    startedAt: malformedLeaseStartedAt(leaseIdentity),
-    staleReasonCode: "malformed_lease_artifact",
-    staleReason: "malformed lease file"
-  };
-}
-
-function malformedLeaseStartedAt(leaseIdentity: string): string {
-  const hash = createHash("sha256").update(leaseIdentity).digest("hex");
-  const offsetMs = Number.parseInt(hash.slice(0, 12), 16) % MALFORMED_LEASE_IDENTITY_WINDOW_MS;
-  return new Date(MALFORMED_LEASE_IDENTITY_BASE_MS + offsetMs).toISOString();
-}
-
-const MALFORMED_LEASE_IDENTITY_BASE_MS = Date.UTC(1970, 0, 1);
-const MALFORMED_LEASE_IDENTITY_WINDOW_MS = 20 * 365 * 24 * 60 * 60 * 1000;
 
 function normalizeInspectedRun(record: HostRunRecord | undefined): HostRunRecord | undefined {
   if (!record || record.state !== "running") {
@@ -309,6 +484,17 @@ function normalizeInspectedRun(record: HostRunRecord | undefined): HostRunRecord
     staleReasonCode: record.staleReasonCode ?? describeStaleRunReasonCode(record),
     staleReason: record.staleReason ?? describeStaleRunReason(record)
   };
+}
+
+function stripLeaseVersion(lease: LeaseArtifactRead): HostRunLeaseInspection {
+  switch (lease.state) {
+    case "missing":
+      return { state: "missing" };
+    case "valid":
+      return { state: "valid", record: lease.record };
+    case "malformed":
+      return { state: "malformed", raw: lease.raw };
+  }
 }
 
 function isAlreadyExists(error: unknown): boolean {
