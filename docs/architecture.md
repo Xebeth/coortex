@@ -87,7 +87,7 @@ Responsibilities:
 
 - load durable state
 - reconcile current view
-- handle stale claims/leases and legacy lease-only normalization
+- handle stale claims/leases
 - generate a compact recovery brief
 - prefer same-session reclaim before orphan/requeue when the host supports it
 - treat snapshot-only state as non-event-backed truth and avoid

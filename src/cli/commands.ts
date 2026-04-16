@@ -79,7 +79,6 @@ export interface RunRuntimeResult {
 }
 
 type SessionExecution = Pick<HostExecutionOutcome, "outcome" | "run">;
-const PENDING_ATTACHMENT_HINT = "coortexPendingAttachment";
 
 function listUnmatchedActiveLeases(
   activeLeases: string[],
@@ -87,16 +86,6 @@ function listUnmatchedActiveLeases(
 ): string[] {
   const claimedAssignmentIds = new Set(bindings.map(({ claim }) => claim.assignmentId));
   return activeLeases.filter((assignmentId) => !claimedAssignmentIds.has(assignmentId));
-}
-
-function markPendingRuntimeAttachment(record: import("../core/types.js").HostRunRecord) {
-  return {
-    ...record,
-    adapterData: {
-      ...(record.adapterData ?? {}),
-      [PENDING_ATTACHMENT_HINT]: true
-    }
-  };
 }
 
 export async function initRuntime(
@@ -590,21 +579,6 @@ export async function runRuntime(
   try {
     claimedRun = await adapter.claimRunLease(store, projectionBefore, assignment.id);
   } catch (error) {
-    throw error;
-  }
-  try {
-    claimedRun = markPendingRuntimeAttachment(claimedRun);
-    await adapter.reconcileStaleRun(store, claimedRun);
-  } catch (error) {
-    try {
-      await adapter.releaseRunLease(store, assignment.id);
-    } catch (releaseError) {
-      throw new Error(
-        `Wrapped launch failed after claiming the host run lease and pending metadata cleanup also failed. ${
-          error instanceof Error ? error.message : String(error)
-        } ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`
-      );
-    }
     throw error;
   }
   const launchAuthority = createLaunchAuthority(adapter, projectionBefore, assignment.id);

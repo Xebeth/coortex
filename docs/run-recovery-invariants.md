@@ -119,13 +119,8 @@ effective host-run state follows these rules:
 
 - Lease acquisition must happen before Coortex mutates runtime state for
   a new run.
-- A freshly claimed wrapped-launch lease may carry non-authoritative
-  run-attempt metadata that runtime authority is still pending. Legacy
-  live-lease normalization must not synthesize resumable attachment
-  truth from that current launch window.
-- Host-run-local control hints used for reconciliation, including the
-  wrapped-launch pending-authority hint, must not be copied into
-  runtime-owned attachment metadata.
+- Lease-only host state may block duplicate launch or resume selection,
+  but it does not become runtime-owned attachment or claim truth.
 - When one runtime mutation creates or updates attachment-and-claim
   authority together, those runtime events must be durably appended as
   one batch. A persistence failure must not strand only half of the
@@ -239,8 +234,8 @@ runtime truth on their own.
 - `prepareResumeRuntime()`
   Must stay read-only over authoritative runtime truth. It may emit
   telemetry and rewrite derived envelope artifacts, but it must not
-  normalize legacy leases, synthesize attachments or claims, reconcile
-  stale or completed runs, or otherwise mutate runtime-owned authority.
+  synthesize attachments or claims, reconcile stale or completed runs,
+  or otherwise mutate runtime-owned authority.
 
 - `loadReconciledProjectionWithDiagnostics()`
   Is a stateful repair surface. `ctx status`, `ctx run`, and
@@ -379,7 +374,7 @@ The test suite should explicitly cover:
 - invalid lease expiry
 - malformed lease with no run record
 - malformed lease with completed run record
-- lease-only stale state
+- stale lease artifact with no durable run record
 - stale reconciliation clears the lease artifact
 - stale-run reconciliation is idempotent across `status`, `resume`, and
   `run`

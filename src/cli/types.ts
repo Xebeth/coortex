@@ -8,7 +8,6 @@ export interface CommandDiagnostic {
     | "active-run-present"
     | "stale-run-reconciled"
     | "completed-run-reconciled"
-    | "legacy-lease-normalized"
     | "provisional-attachment-promoted"
     | "provisional-attachment-cleared";
   message: string;

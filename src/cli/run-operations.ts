@@ -37,8 +37,6 @@ const RESUMABLE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
   "attached",
   "detached_resumable"
 ]);
-const PENDING_ATTACHMENT_HINT = "coortexPendingAttachment";
-const INTERNAL_ATTACHMENT_METADATA_KEYS = new Set([PENDING_ATTACHMENT_HINT]);
 
 export async function loadReconciledProjectionWithDiagnostics(
   store: RuntimeStore,
@@ -145,131 +143,14 @@ export function getActiveClaimForAssignment(
   return listActiveClaimBindings(projection).find(({ claim }) => claim.assignmentId === assignmentId);
 }
 
-function hasAttachmentHistoryForAssignment(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
-): boolean {
-  return [...projection.claims.values()].some((claim) => claim.assignmentId === assignmentId);
-}
-
 function sanitizeAttachmentAdapterMetadata(
   adapterData?: Record<string, unknown>
 ): Record<string, unknown> | undefined {
   if (!adapterData) {
     return undefined;
   }
-  const filteredEntries = Object.entries(adapterData).filter(
-    ([key]) => !INTERNAL_ATTACHMENT_METADATA_KEYS.has(key)
-  );
-  return filteredEntries.length > 0 ? Object.fromEntries(filteredEntries) : undefined;
-}
-
-async function reconcileLegacyLeaseOnlyAuthority(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  record: HostRunRecord,
-  diagnostics: CommandDiagnostic[],
-  options?: {
-    snapshotFallback?: boolean;
-  }
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  changed: boolean;
-}> {
-  if (
-    !projection.assignments.has(record.assignmentId) ||
-    hasAttachmentHistoryForAssignment(projection, record.assignmentId) ||
-    record.state !== "running" ||
-    record.adapterData?.[PENDING_ATTACHMENT_HINT] === true ||
-    isRunLeaseExpired(record)
-  ) {
-    return {
-      projection,
-      changed: false
-    };
-  }
-
-  const timestamp = nowIso();
-  const attachmentId = `legacy-attachment-${record.assignmentId}`;
-  const claimId = `legacy-claim-${record.assignmentId}`;
-  const nativeSessionId =
-    typeof record.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
-      ? record.adapterData.nativeRunId
-      : undefined;
-  const adapterMetadata = sanitizeAttachmentAdapterMetadata(record.adapterData);
-  const attachment: RuntimeAttachment = {
-    id: attachmentId,
-    adapter: projection.adapter,
-    host: projection.status.activeHost,
-    state: "detached_resumable",
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    provenance: {
-      kind: "legacy_normalization",
-      source: "legacy_live_lease"
-    },
-    detachedAt: timestamp,
-    ...(nativeSessionId ? { nativeSessionId } : {}),
-    ...(adapterMetadata ? { adapterMetadata } : {})
-  };
-  const claim: AssignmentClaim = {
-    id: claimId,
-    assignmentId: record.assignmentId,
-    attachmentId,
-    state: "active",
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    provenance: {
-      kind: "legacy_normalization",
-      source: "legacy_live_lease"
-    }
-  };
-  const events: RuntimeEvent[] = [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "attachment.created",
-      payload: { attachment }
-    },
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "claim.created",
-      payload: { claim }
-    }
-  ];
-
-  const nextProjection = fromSnapshot(toSnapshot(projection));
-  const canAppendEvents = !options?.snapshotFallback && (await store.hasEvents());
-  for (const event of events) {
-    applyRuntimeEvent(nextProjection, event);
-  }
-  if (canAppendEvents) {
-    await store.appendEvents(events);
-    const syncResult = await store.syncSnapshotFromEventsWithRecovery();
-    diagnostics.push(...diagnosticsFromWarning(syncResult.warning, "event-log-repaired"));
-    diagnostics.push({
-      level: "warning",
-      code: "legacy-lease-normalized",
-      message: `Normalized legacy live lease for assignment ${record.assignmentId} into attachment ${attachmentId}.`
-    });
-    return {
-      projection: syncResult.projection,
-      changed: true
-    };
-  }
-  await store.writeSnapshot(toSnapshot(nextProjection));
-  diagnostics.push({
-    level: "warning",
-    code: "legacy-lease-normalized",
-    message: `Normalized legacy live lease for assignment ${record.assignmentId} into attachment ${attachmentId}.`
-  });
-  return {
-    projection: nextProjection,
-    changed: true
-  };
+  const entries = Object.entries(adapterData);
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
 export async function persistProjectionEvents(
@@ -856,7 +737,6 @@ export async function reconcileActiveRuns(
   let staleStatusTransitions: Map<string, string[]> | undefined;
   let handledCompletedRun = false;
   const runtimeKnownAssignmentIds = [...projection.assignments.keys()];
-  const legacyNormalizationEligibleAssignments = new Set(runtimeKnownAssignmentIds);
   const enumeratedRecords = await adapter.inspectRuns(store);
   const enumeratedRecordByAssignmentId = new Map(
     enumeratedRecords.map((record) => [record.assignmentId, record] as const)
@@ -907,23 +787,6 @@ export async function reconcileActiveRuns(
         effectiveProjection = replayableHydration.projection;
         changed = true;
       }
-    }
-
-    const legacyNormalization = legacyNormalizationEligibleAssignments.has(record.assignmentId)
-      ? await reconcileLegacyLeaseOnlyAuthority(
-          store,
-          effectiveProjection,
-          record,
-          diagnostics,
-          { snapshotFallback }
-        )
-      : {
-          projection: effectiveProjection,
-          changed: false
-        };
-    if (legacyNormalization.changed) {
-      effectiveProjection = legacyNormalization.projection;
-      changed = true;
     }
 
     const durableRuntimeCompletedRecord = isDegradedRunRecord(record)

@@ -164,12 +164,6 @@ For Milestone 2 reclaim semantics:
 - durable runtime event batches use the same serialized append-only
   persistence boundary as event-log repair, so malformed-log recovery
   cannot overwrite concurrent authority or recovery writes
-- legacy live-lease normalization excludes the current wrapped-launch
-  lease-first window when host-run metadata still says runtime
-  authority is pending
-- host-run-local control hints used only for reconciliation must be
-  stripped before host metadata is copied into runtime attachment
-  metadata
 - reclaim/provisional cleanup may not advertise queued retry truth while
   a host lease blocker is still live
 
@@ -283,8 +277,8 @@ may refresh telemetry or the generated resume envelope, but it must not
 repair or normalize authoritative runtime truth.
 
 When recovery has to operate from snapshot truth because the event log is
-missing or unusable, recovery-side attachment normalization or reclaim
-may update `snapshot.json` directly rather than fabricating a truncated
+missing or unusable, recovery-side attachment repair or reclaim may
+update `snapshot.json` directly rather than fabricating a truncated
 replacement event log.
 
 When a replayable log no longer starts at `runtime.initialized` or no

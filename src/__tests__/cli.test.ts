@@ -1331,7 +1331,7 @@ test("ctx status and resume surface hidden snapshot-fallback active lease blocke
   assert.equal(finalEnvelope, initialEnvelope);
 });
 
-test("ctx status normalizes in-projection legacy leases and ctx resume reclaims the synthesized attachment", async () => {
+test("ctx status reports in-projection active leases without synthesizing attachments", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-in-projection-active-lease-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
   const resumeFixturePath = join(projectRoot, "codex-resume-fixture.json");
@@ -1505,42 +1505,26 @@ test("ctx status normalizes in-projection legacy leases and ctx resume reclaims 
 
   assert.equal(status.exitCode, 0);
   assert.match(status.stderr, /WARNING active-run-present .*active host run lease/);
-  assert.match(status.stderr, /WARNING legacy-lease-normalized/);
   assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Authoritative host leases: 1/);
   assert.match(status.stdout, /Provisional attachments: 0/);
-  assert.match(status.stdout, /Authoritative attachments: 1/);
-  assert.match(status.stdout, /Resumable attachments: 1/);
+  assert.match(status.stdout, /Authoritative attachments: 0/);
+  assert.match(status.stdout, /Resumable attachments: 0/);
   assert.match(
     status.stdout,
     new RegExp(
       `- ${authoritativeAssignmentId} active host run lease within the current projection but outside the current active assignment set`
     )
   );
+  assert.doesNotMatch(status.stdout, /- attachment .* detached_resumable/);
+  assert.equal(resume.exitCode, 1);
   assert.match(
-    status.stdout,
-    /- attachment .* detached_resumable assignment .* native-session thread-cli-in-projection-active-lease/
+    resume.stderr,
+    new RegExp(`Assignment ${authoritativeAssignmentId} already has an active host run lease\\.`)
   );
-  assert.equal(resume.exitCode, 0);
-  assert.match(resume.stdout, /Reclaimed attachment/);
-  assert.match(resume.stdout, /Host session: thread-cli-in-projection-active-lease/);
-  assert.doesNotMatch(resume.stdout, /Recovery brief generated/);
   assert.equal(repairedEnvelope.metadata?.activeAssignmentId, authoritativeAssignmentId);
-  assert.equal(repairedSnapshot.attachments.length, 1);
-  assert.equal(repairedSnapshot.attachments[0]?.state, "detached_resumable");
-  assert.equal(
-    repairedSnapshot.attachments[0]?.nativeSessionId,
-    "thread-cli-in-projection-active-lease"
-  );
-  assert.deepEqual(repairedSnapshot.claims.map((claim) => ({
-    assignmentId: claim.assignmentId,
-    state: claim.state
-  })), [
-    {
-      assignmentId: authoritativeAssignmentId,
-      state: "active"
-    }
-  ]);
+  assert.equal(repairedSnapshot.attachments.length, 0);
+  assert.equal(repairedSnapshot.claims.length, 0);
 });
 
 test("ctx status recovers a completed host run and clears a leftover lease", async () => {

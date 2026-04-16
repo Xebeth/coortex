@@ -65,30 +65,6 @@ test("host-run recovery matrix matches the supported command semantics", async (
       }
     },
     {
-      name: "legacy live lease without attachment normalizes into a resumable runtime attachment",
-      seed: async (ctx: MatrixContext) => {
-        const record = runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z");
-        await ctx.adapter.claimRunLease(ctx.store, ctx.projection, ctx.assignmentId, record);
-      },
-      assertResult: async (ctx: MatrixContext, result: Awaited<ReturnType<typeof reconcileActiveRuns>>) => {
-        assert.deepEqual(result.activeLeases, [ctx.assignmentId]);
-        assert.ok(
-          result.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized")
-        );
-        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
-        const attachments = [...result.projection.attachments.values()];
-        const claims = [...result.projection.claims.values()];
-        assert.equal(attachments.length, 1);
-        assert.equal(attachments[0]?.state, "detached_resumable");
-        assert.equal(attachments[0]?.nativeSessionId, `native-${ctx.assignmentId}`);
-        assert.equal(claims.length, 1);
-        assert.equal(claims[0]?.assignmentId, ctx.assignmentId);
-        assert.equal(claims[0]?.state, "active");
-        const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
-        assert.equal(inspected?.state, "running");
-      }
-    },
-    {
       name: "valid active lease overrides expired running metadata during reconciliation",
       seed: async (ctx: MatrixContext) => {
         await ctx.store.writeJsonArtifact(
@@ -292,7 +268,7 @@ test("host-run recovery matrix matches the supported command semantics", async (
       }
     },
     {
-      name: "lease-only stale state is reconciled into a queued retry",
+      name: "stale lease artifact without a run record is reconciled into a queued retry",
       seed: async (ctx: MatrixContext) => {
         const leaseOnly = runningRecord(ctx.assignmentId, "2000-01-01T00:00:00.000Z");
         await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, leaseOnly);
@@ -806,68 +782,10 @@ test("host-run command matrix preserves duplicate-run protection", async (t) => 
   }
 });
 
-test("host-run recovery matrix preserves concurrent legacy normalization batches", async () => {
-  const ctx = await createMatrixContext();
-  const secondAssignmentId = await appendActiveAssignment(ctx);
-  await ctx.adapter.claimRunLease(
-    ctx.store,
-    ctx.projection,
-    ctx.assignmentId,
-    runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z")
-  );
-  await ctx.adapter.claimRunLease(
-    ctx.store,
-    ctx.projection,
-    secondAssignmentId,
-    runningRecord(secondAssignmentId, "2999-04-11T10:00:30.000Z")
-  );
-
-  const firstProjection = projectionForSingleAssignment(ctx.projection, ctx.assignmentId);
-  const secondProjection = projectionForSingleAssignment(ctx.projection, secondAssignmentId);
-  const originalAppendEvents = ctx.store.appendEvents.bind(ctx.store);
-  let waitingBatches = 0;
-  let releaseConcurrentAppend!: () => void;
-  const concurrentAppend = new Promise<void>((resolve) => {
-    releaseConcurrentAppend = resolve;
-  });
-  (ctx.store as RuntimeStore & {
-    appendEvents: RuntimeStore["appendEvents"];
-  }).appendEvents = async (events) => {
-    if (events[0]?.type === "attachment.created" && events[1]?.type === "claim.created") {
-      waitingBatches += 1;
-      if (waitingBatches === 2) {
-        releaseConcurrentAppend();
-      }
-      await concurrentAppend;
-    }
-    return originalAppendEvents(events);
-  };
-
-  const [firstResult, secondResult] = await Promise.all([
-    reconcileActiveRuns(ctx.store, ctx.adapter, firstProjection),
-    reconcileActiveRuns(ctx.store, ctx.adapter, secondProjection)
-  ]);
-  (ctx.store as RuntimeStore & {
-    appendEvents: RuntimeStore["appendEvents"];
-  }).appendEvents = originalAppendEvents;
-
-  const synced = await ctx.store.syncSnapshotFromEventsWithRecovery();
-  const attachmentAssignments = new Set(
-    [...synced.projection.claims.values()].map((claim) => claim.assignmentId)
-  );
-
-  assert.equal(waitingBatches, 2);
-  assert.ok(firstResult.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized"));
-  assert.ok(secondResult.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized"));
-  assert.equal(synced.projection.attachments.size, 2);
-  assert.equal(synced.projection.claims.size, 2);
-  assert.deepEqual(attachmentAssignments, new Set([ctx.assignmentId, secondAssignmentId]));
-});
-
 test("host-run command matrix reconciles operator-visible runtime truth", async (t) => {
   const cases = [
     {
-      name: "status path reconciles stale lease-only state before reporting work",
+      name: "status path reconciles a stale lease artifact before reporting work",
       run: async () => {
         const adapter = new BriefingMatrixAdapter();
         const ctx = await createMatrixContext(adapter);
@@ -1821,7 +1739,7 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
   }
 });
 
-test("host-run command matrix keeps prepareResumeRuntime read-only while reconciled entrypoints repair the same legacy lease", async () => {
+test("host-run command matrix keeps prepareResumeRuntime read-only while reconciled entrypoints keep active leases host-owned", async () => {
   const adapter = new BriefingMatrixAdapter();
   const ctx = await createMatrixContext(adapter);
   const record = runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z");
@@ -1841,9 +1759,10 @@ test("host-run command matrix keeps prepareResumeRuntime read-only while reconci
   assert.equal(projectionAfterPrepare.claims.size, 0);
   assert.equal(adapter.lastBuildProjection?.attachments.size, 0);
   assert.equal(adapter.lastBuildProjection?.claims?.size ?? 0, 0);
-  assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized"));
-  assert.equal([...reconciled.projection.attachments.values()][0]?.state, "detached_resumable");
-  assert.equal([...reconciled.projection.claims.values()][0]?.state, "active");
+  assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
+  assert.equal(reconciled.projection.attachments.size, 0);
+  assert.equal(reconciled.projection.claims.size, 0);
+  assert.deepEqual(reconciled.activeLeases, [ctx.assignmentId]);
 });
 
 test("host-run command matrix keeps stale-run reconciliation idempotent", async () => {

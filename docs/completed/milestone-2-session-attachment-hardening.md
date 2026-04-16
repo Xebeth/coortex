@@ -14,8 +14,6 @@ The current repository includes:
 - runtime-owned attachment, claim, and provenance records
 - attachment-aware duplicate-issuance and foreign-claim protection
 - wrapped same-session reclaim with verified native session identity
-- legacy lease normalization before attachment-aware resume or rerun
-  selection
 - snapshot-fallback attachment recovery that preserves multi-step
   authority updates
 - aligned wrapped launch and wrapped reclaim lifecycle semantics for
@@ -41,8 +39,6 @@ This slice now includes:
   only after durable native identity capture
 - wrapped `ctx resume` reclaim semantics that verify same-session
   identity before preserving claim authority
-- legacy lease-only normalization ahead of resume selection,
-  duplicate-run blocking, and rerun selection
 - snapshot-fallback write-base rules that preserve earlier
   attachment/claim/status mutations across later writes in the same
   command
@@ -118,23 +114,13 @@ Runtime event batches and malformed-log repair both pass through the
 same serialized append-only store boundary, so concurrent recovery or
 authority writes cannot be lost to stale whole-file replacement.
 
-The lease-first wrapped-launch window may mark host-run metadata as
-pending runtime authority. That hint is non-authoritative and exists
-only so legacy live-lease normalization does not synthesize resumable
-authority for a current launch that has not finished persisting runtime
-truth yet.
-
-That hint remains host-run-local metadata. Recovery may consult it, but
-promotion into runtime attachment truth must strip it from
-attachment-owned metadata.
-
 ### `prepareResumeRuntime()`
 
 `prepareResumeRuntime()` is read-only over authoritative runtime truth.
 
 It may refresh telemetry and regenerate the derived resume envelope, but
-it must not normalize legacy leases, synthesize attachments or claims,
-or reconcile stale or completed runs.
+it must not synthesize attachments or claims, or reconcile stale or
+completed runs.
 
 ### `ctx resume`
 
@@ -157,20 +143,6 @@ requeues the assignment instead of silently transferring authority.
 When the runtime sees an attached or detached-but-resumable attachment
 for unfinished work, recovery prefers wrapped same-session reclaim
 before orphaning or requeueing the assignment.
-
-### Legacy lease-only normalization
-
-Before attachment-aware resume selection, duplicate-run blocking, or
-rerun selection, the runtime now normalizes legacy lease-only states:
-
-1. a live legacy lease with no attachment produces exactly one
-   detached-but-resumable attachment plus active claim
-2. a completed run record with a leftover lease reconciles truthful
-   terminal runtime outcome and clears the stale blocker without
-   synthesizing a live attachment
-3. stale, expired, malformed, or lease-less running state is treated as
-   orphaned legacy state and reconciled back to queued retry without
-   synthesizing new authoritative attachment truth
 
 ### Snapshot fallback remains truthful
 
@@ -214,7 +186,6 @@ The automated suite now includes explicit coverage for:
 - foreign-claim rejection
 - duplicate issuance prevention
 - same-session reclaim success and reclaim failure fallback
-- all three legacy normalization cases
 - invalid multiple resumable attachments
 - launch without native identity finalization
 - snapshot-only reclaim failure preserving orphaned attachment truth

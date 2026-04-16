@@ -68,8 +68,8 @@ export interface RuntimeAttachment {
   createdAt: string;
   updatedAt: string;
   provenance: {
-    kind: "launch" | "legacy_normalization";
-    source: "ctx.run" | "legacy_live_lease";
+    kind: "launch";
+    source: "ctx.run";
   };
   nativeSessionId?: string;
   attachedAt?: string;
@@ -109,8 +109,8 @@ export interface AssignmentClaim {
   createdAt: string;
   updatedAt: string;
   provenance: {
-    kind: "launch" | "legacy_normalization";
-    source: "ctx.run" | "legacy_live_lease";
+    kind: "launch";
+    source: "ctx.run";
   };
   releasedAt?: string;
   releasedReason?: string;

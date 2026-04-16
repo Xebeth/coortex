@@ -124,7 +124,6 @@ The adapter/runtime path now includes:
 - wrapped Codex same-session `resume` by stored native session id
 - run inspection through persisted host metadata
 - heartbeat and lease-backed host-run tracking
-- legacy lease-only normalization into runtime-owned attachment truth
 - stale-run reconciliation into queued retry state
 - active-lease protection against duplicate reruns
 - result normalization

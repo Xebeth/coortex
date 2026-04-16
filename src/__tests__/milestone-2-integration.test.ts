@@ -90,29 +90,13 @@ test("milestone-2 integration: trimming keeps the real run envelope bounded and 
   assert.equal(startedTelemetry?.metadata.trimmedFields, 1);
 });
 
-test("milestone-2 integration: resume reclaims snapshot-backed interrupted state after legacy live-lease normalization", serial, async () => {
-  let resumedSessionId = "";
+test("milestone-2 integration: live host leases without runtime attachment truth stay blocked", serial, async () => {
   const setup = await createSmokeSetupWithRunner({
     runExec: async () => {
-      throw new Error("runExec should not be used in interrupted recovery smoke test");
+      throw new Error("runExec should not be used in active-lease blocker coverage");
     },
-    runResume: async (input) => {
-      resumedSessionId = input.sessionId;
-      await writeStructuredOutput(input.outputPath, {
-        outcomeType: "result",
-        resultStatus: "partial",
-        resultSummary: "Resume captured additional interrupted progress.",
-        changedFiles: ["src/cli/commands.ts"],
-        blockerSummary: "",
-        decisionOptions: [],
-        recommendedOption: ""
-      });
-      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ type: "turn.completed", usage: { input_tokens: 4, output_tokens: 2 } }),
-        stderr: ""
-      };
+    runResume: async () => {
+      throw new Error("runResume should not be used in active-lease blocker coverage");
     }
   });
 
@@ -135,56 +119,30 @@ test("milestone-2 integration: resume reclaims snapshot-backed interrupted state
 
   const statusProjection = await loadOperatorProjection(setup.store);
   const reconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
-  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  await assert.rejects(
+    resumeRuntime(setup.store, setup.adapter),
+    /already has an active host run lease/
+  );
   const projectionAfterResume = await loadOperatorProjection(setup.store);
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
-  const attachments = [...projectionAfterResume.attachments.values()];
-  const claims = [...projectionAfterResume.claims.values()];
-  const telemetry = await setup.store.loadTelemetry();
-  const resumeStartedTelemetry = findLastTelemetry(telemetry, "host.resume.started");
-  const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
 
   assert.equal(statusProjection.status.activeAssignmentIds[0], setup.assignmentId);
   assert.deepEqual(reconciled.activeLeases, [setup.assignmentId]);
-  assert.ok(
-    reconciled.diagnostics.some((diagnostic) => diagnostic.code === "legacy-lease-normalized")
-  );
-  assert.equal(resumed.mode, "reclaimed");
-  assert.equal(resumedSessionId, "smoke-thread-interrupted");
-  assert.equal(resumed.attachment.nativeSessionId, "smoke-thread-interrupted");
-  assert.equal(resumed.attachment.state, "detached_resumable");
-  assert.equal(resumed.claim.assignmentId, setup.assignmentId);
-  assert.equal(resumed.claim.state, "active");
+  assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
   assert.equal(reconciled.projection.results.size, 1);
   assert.equal(
     [...reconciled.projection.results.values()][0]?.summary,
     "Interrupted smoke work is partially complete."
   );
-  assert.equal(projectionAfterResume.results.size, 2);
-  assert.equal(
-    [...projectionAfterResume.results.values()].at(-1)?.summary,
-    "Resume captured additional interrupted progress."
-  );
-  assert.equal(attachments.length, 1);
-  assert.equal(attachments[0]?.state, "detached_resumable");
-  assert.equal(attachments[0]?.nativeSessionId, "smoke-thread-interrupted");
-  assert.equal(claims.length, 1);
-  assert.equal(claims[0]?.state, "active");
+  assert.equal(projectionAfterResume.results.size, 1);
+  assert.equal(projectionAfterResume.attachments.size, 0);
+  assert.equal(projectionAfterResume.claims.size, 0);
   assert.equal(projectionAfterResume.assignments.get(setup.assignmentId)?.state, "in_progress");
   assert.equal(inspected?.assignmentId, setup.assignmentId);
-  assert.equal(inspected?.state, "completed");
-  assert.equal(inspected?.resultStatus, "partial");
-  assert.equal(inspected?.summary, "Resume captured additional interrupted progress.");
-  assert.equal(resumeStartedTelemetry?.assignmentId, setup.assignmentId);
-  assert.equal(resumeStartedTelemetry?.metadata.attachmentId, attachments[0]?.id);
-  assert.equal(resumeCompletedTelemetry?.assignmentId, setup.assignmentId);
-  assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, true);
-  assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, true);
-  assert.equal(resumeCompletedTelemetry?.metadata.outcomeKind, "result");
-  assert.equal(resumeCompletedTelemetry?.metadata.resultStatus, "partial");
+  assert.equal(inspected?.state, "running");
 });
 
-test("milestone-2 integration: prepareResumeRuntime stays read-only against live lease normalization candidates", async () => {
+test("milestone-2 integration: prepareResumeRuntime stays read-only against live lease blockers", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runExec should not be used in prepare-only smoke test");
   });
@@ -497,10 +455,7 @@ test("milestone-2 integration: provisional cleanup failure does not surface queu
     state: "running",
     startedAt: nowIso(),
     heartbeatAt: nowIso(),
-    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-    adapterData: {
-      coortexPendingAttachment: true
-    }
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
   };
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
@@ -616,8 +571,7 @@ test("milestone-2 integration: provisional live-lease authority is promoted befo
     heartbeatAt: nowIso(),
     leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
     adapterData: {
-      nativeRunId: "smoke-thread-provisional-promoted",
-      coortexPendingAttachment: true
+      nativeRunId: "smoke-thread-provisional-promoted"
     }
   };
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
@@ -635,7 +589,6 @@ test("milestone-2 integration: provisional live-lease authority is promoted befo
   );
   assert.equal(attachment?.state, "detached_resumable");
   assert.equal(attachment?.nativeSessionId, "smoke-thread-provisional-promoted");
-  assert.equal(attachment?.adapterMetadata?.coortexPendingAttachment, undefined);
 });
 
 test("milestone-2 integration: wrapped resume persists a terminal completed result and releases attachment authority", serial, async () => {
@@ -1873,60 +1826,6 @@ test("milestone-2 integration: launch authority batch persistence failures roll 
   );
 });
 
-test("milestone-2 integration: legacy lease normalization batch failures do not synthesize partial authority", async () => {
-  const setup = await createSmokeSetup(async () => {
-    throw new Error("runner should not be used in legacy normalization fault injection");
-  });
-  const runningRecord: HostRunRecord = {
-    assignmentId: setup.assignmentId,
-    state: "running",
-    startedAt: nowIso(),
-    heartbeatAt: nowIso(),
-    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-    adapterData: {
-      nativeRunId: "smoke-thread-legacy-batch-failure"
-    }
-  };
-  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
-  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
-  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
-
-  const originalAppendEvents = setup.store.appendEvents.bind(setup.store);
-  let failedNormalizationBatch = false;
-  (setup.store as RuntimeStore & {
-    appendEvents: RuntimeStore["appendEvents"];
-  }).appendEvents = async (events) => {
-    if (
-      !failedNormalizationBatch &&
-      events.length === 2 &&
-      events[0]?.type === "attachment.created" &&
-      events[1]?.type === "claim.created"
-    ) {
-      failedNormalizationBatch = true;
-      throw new Error("simulated legacy normalization batch failure");
-    }
-    return originalAppendEvents(events);
-  };
-
-  await assert.rejects(
-    loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter),
-    /simulated legacy normalization batch failure/
-  );
-  const projection = await loadOperatorProjection(setup.store);
-  const snapshot = await setup.store.loadSnapshot();
-  const events = await setup.store.loadEvents();
-  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
-
-  assert.equal(projection.attachments.size, 0);
-  assert.equal(projection.claims.size, 0);
-  assert.equal(snapshot?.attachments?.length ?? 0, 0);
-  assert.equal(snapshot?.claims?.length ?? 0, 0);
-  assert.equal(events.some((event) => event.type === "attachment.created"), false);
-  assert.equal(events.some((event) => event.type === "claim.created"), false);
-  assert.equal(inspected?.state, "running");
-  assert.equal(getNativeRunId(inspected), "smoke-thread-legacy-batch-failure");
-});
-
 test("milestone-2 integration: equivalent executions produce stable persisted shapes", async () => {
   const [first, second] = await Promise.all([
     createSmokeSetup(stableRunner("repeatable thread", "Repeatable smoke result.")),
@@ -2183,13 +2082,13 @@ test("milestone-2 integration: resume reconciles a running host record without a
   assert.match(inspected?.staleReason ?? "", /without a lease expiry/i);
 });
 
-test("milestone-2 integration: stale lease-only runs are reconciled and cleared for rerun", async () => {
+test("milestone-2 integration: stale host lease artifacts are reconciled and cleared for rerun", async () => {
   const setup = await createSmokeSetup(async (input) => {
-    await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-lease-only" });
+    await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-stale-lease" });
     await writeStructuredOutput(input.outputPath, {
       outcomeType: "result",
       resultStatus: "completed",
-      resultSummary: "Lease-only recovery allowed the replacement run to finish.",
+      resultSummary: "Stale host-lease recovery allowed the replacement run to finish.",
       changedFiles: [],
       blockerSummary: "",
       decisionOptions: [],
@@ -2205,7 +2104,7 @@ test("milestone-2 integration: stale lease-only runs are reconciled and cleared 
   const expiredLeaseOnlyRecord: HostRunRecord = {
     assignmentId: setup.assignmentId,
     state: "running",
-    adapterData: { nativeRunId: "smoke-thread-lease-only-stale" },
+    adapterData: { nativeRunId: "smoke-thread-stale-lease-artifact" },
     startedAt: new Date(Date.now() - 60_000).toISOString(),
     heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
     leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
