@@ -2,6 +2,24 @@
 
 These instructions apply to the entire repository.
 
+## Standing rules
+- Treat every bug, regression, or review finding as a possible defect family, not just an isolated symptom.
+- Before implementing a fix or calling a finding closed, identify the higher-level root cause and check for sibling manifestations across the affected surfaces.
+- Do not accept a fix or review conclusion that matches the current tests but violates the actual contract or invariants.
+
+## Fix workflow rules
+- Use each finding as a discovery prompt: do not patch only the reported line-local issue without checking whether the same cause appears elsewhere.
+- Before marking a defect family closed, check the fix, its implications, and its likely siblings across the affected surfaces.
+- Update tests and docs in the same slice when invariants, recovery semantics, or operator-visible behavior change.
+- Before extracting a helper or adding new logic, check whether the abstraction already exists and place the code in the owning module, not just the nearest one.
+- When fixing review findings, remove or absorb stale paths and conflicting ownership models instead of adding special-case local plumbing beside them.
+
+## Review output rules
+- For each finding, report the immediate cause, the higher-level root cause, and whether it belongs to a broader defect family.
+- For each finding, report immediate implications, broader implications, and any sibling bugs found.
+- If no sibling bugs are found, say so explicitly and state the search scope.
+- Group related manifestations under one root cause when they come from the same boundary or lifecycle failure.
+
 ## Commit messages
 - Every commit subject line must use the form `<type>: <subject>`.
 - Keep the subject line at 50 characters or fewer.
