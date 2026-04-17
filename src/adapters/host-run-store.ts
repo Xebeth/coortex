@@ -1,16 +1,11 @@
 import type { RuntimeArtifactStore } from "./contract.js";
+import { materializeInspectableRunRecord } from "./host-run-inspection.js";
 import {
   HostRunLeaseRepository,
   type HostRunArtifactInspection,
   type HostRunArtifactPaths
 } from "./host-run-lease-repository.js";
 import type { HostRunRecord } from "../core/types.js";
-import {
-  describeStaleRunReason,
-  describeStaleRunReasonCode,
-  isRunLeaseExpired,
-  selectAuthoritativeRunRecord
-} from "../core/run-state.js";
 
 export type { HostRunArtifactInspection, HostRunArtifactPaths, HostRunLeaseInspection } from "./host-run-lease-repository.js";
 
@@ -47,16 +42,7 @@ export class HostRunStore {
   }
 
   async inspect(assignmentId?: string): Promise<HostRunRecord | undefined> {
-    const inspection = await this.inspectArtifacts(assignmentId);
-    if (!inspection) {
-      return undefined;
-    }
-    return normalizeInspectedRun(
-      selectAuthoritativeRunRecord(
-        inspection.runRecord,
-        inspection.lease.state === "valid" ? inspection.lease.record : undefined
-      )
-    );
+    return materializeInspectableRunRecord(await this.inspectArtifacts(assignmentId));
   }
 
   async inspectArtifacts(assignmentId?: string): Promise<HostRunArtifactInspection | undefined> {
@@ -159,12 +145,7 @@ export class HostRunStore {
   async inspectAll(): Promise<HostRunRecord[]> {
     const records: HostRunRecord[] = [];
     for (const inspection of await this.inspectAllArtifacts()) {
-      const record = normalizeInspectedRun(
-        selectAuthoritativeRunRecord(
-          inspection.runRecord,
-          inspection.lease.state === "valid" ? inspection.lease.record : undefined
-        )
-      );
+      const record = materializeInspectableRunRecord(inspection);
       if (record?.assignmentId === inspection.assignmentId) {
         records.push(record);
       }
@@ -323,22 +304,4 @@ function shouldDeleteRunningLastRunPointer(
     pointer.record.assignmentId === assignmentId &&
     pointer.record.state === "running"
   );
-}
-
-function normalizeInspectedRun(record: HostRunRecord | undefined): HostRunRecord | undefined {
-  if (!record || record.state !== "running") {
-    return record;
-  }
-  if (record.staleReasonCode === "malformed_lease_artifact") {
-    return record;
-  }
-  if (!isRunLeaseExpired(record)) {
-    return record;
-  }
-  return {
-    ...record,
-    state: "completed",
-    staleReasonCode: record.staleReasonCode ?? describeStaleRunReasonCode(record),
-    staleReason: record.staleReason ?? describeStaleRunReason(record)
-  };
 }

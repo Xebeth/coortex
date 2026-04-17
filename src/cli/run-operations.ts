@@ -2,18 +2,16 @@ import { randomUUID } from "node:crypto";
 
 import type {
   HostAdapter,
-  HostExecutionOutcome,
-  HostSessionResumeResult
+  HostExecutionOutcome
 } from "../adapters/contract.js";
 import type { RuntimeEvent } from "../core/events.js";
-import { isWrappedResumeCapableAttachment } from "../core/types.js";
-import type {
-  AssignmentClaim,
-  HostRunRecord,
-  RuntimeAttachment
-} from "../core/types.js";
+import type { HostRunRecord } from "../core/types.js";
 import { selectRunnableProjection } from "../recovery/host-runs.js";
-import { RunReconciliationService } from "./run-reconciliation.js";
+import {
+  listAuthoritativeAttachmentClaims,
+  listResumableAttachmentClaims
+} from "./attachment-claim-queries.js";
+import { loadReconciledProjectionWithDiagnostics } from "./run-reconciliation.js";
 import { nowIso } from "../utils/time.js";
 import { RuntimeStore } from "../persistence/store.js";
 
@@ -27,78 +25,12 @@ import {
   type ProjectionWriteOptions
 } from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
-import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
-
-interface AttachmentClaimBinding {
-  attachment: RuntimeAttachment;
-  claim: AssignmentClaim;
-}
+import { diagnosticsFromWarning, loadOperatorProjection } from "./runtime-state.js";
 
 export interface WrappedExecutionRecoveryResult {
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
   execution?: HostExecutionOutcome;
   diagnostics: CommandDiagnostic[];
-}
-
-const AUTHORITATIVE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
-  "attached",
-  "detached_resumable"
-]);
-
-const RESUMABLE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
-  "attached",
-  "detached_resumable"
-]);
-
-function assertUniqueActiveClaims(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
-): void {
-  const activeClaimsByAssignment = new Map<string, string[]>();
-  for (const claim of projection.claims.values()) {
-    if (claim.state !== "active") {
-      continue;
-    }
-    activeClaimsByAssignment.set(claim.assignmentId, [
-      ...(activeClaimsByAssignment.get(claim.assignmentId) ?? []),
-      claim.id
-    ]);
-  }
-  const duplicates = [...activeClaimsByAssignment.entries()].filter(([, ids]) => ids.length > 1);
-  if (duplicates.length === 0) {
-    return;
-  }
-  throw new Error(
-    `Invalid runtime state: multiple active claims are present (${duplicates
-      .map(([assignmentId, ids]) => `${assignmentId}: ${ids.join(", ")}`)
-      .join("; ")}).`
-  );
-}
-
-export async function loadReconciledProjectionWithDiagnostics(
-  store: RuntimeStore,
-  adapter: HostAdapter
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  diagnostics: CommandDiagnostic[];
-  activeLeases: string[];
-  hiddenActiveLeases: string[];
-  snapshotFallback: boolean;
-}> {
-  const loaded = await loadOperatorProjectionWithDiagnostics(store);
-  const reconciled = await reconcileActiveRuns(store, adapter, loaded.projection, {
-    snapshotFallback: loaded.snapshotFallback
-  });
-  const hiddenActiveLeases = listHiddenActiveLeaseAssignments(
-    reconciled.projection,
-    reconciled.activeLeases
-  );
-  return {
-    projection: reconciled.projection,
-    diagnostics: [...loaded.diagnostics, ...reconciled.diagnostics],
-    activeLeases: reconciled.activeLeases,
-    hiddenActiveLeases,
-    snapshotFallback: loaded.snapshotFallback
-  };
 }
 
 export async function markAssignmentInProgress(
@@ -135,48 +67,6 @@ export async function markAssignmentInProgress(
   return store.mutateSnapshotProjection((latestProjection) =>
     applyRuntimeEventsToProjection(latestProjection, [event])
   );
-}
-
-export function listActiveClaimBindings(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
-): AttachmentClaimBinding[] {
-  assertUniqueActiveClaims(projection);
-  return [...projection.claims.values()]
-    .filter((claim) => claim.state === "active")
-    .flatMap((claim) => {
-      const attachment = projection.attachments.get(claim.attachmentId);
-      return attachment ? [{ attachment, claim }] : [];
-    });
-}
-
-export function listAuthoritativeAttachmentClaims(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
-): AttachmentClaimBinding[] {
-  return listActiveClaimBindings(projection).filter(({ attachment }) =>
-    AUTHORITATIVE_ATTACHMENT_STATES.has(attachment.state)
-  );
-}
-
-export function listResumableAttachmentClaims(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
-): AttachmentClaimBinding[] {
-  return listActiveClaimBindings(projection).filter(({ attachment }) =>
-    RESUMABLE_ATTACHMENT_STATES.has(attachment.state) &&
-    isWrappedResumeCapableAttachment(attachment)
-  );
-}
-
-function listProvisionalAttachmentClaims(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>
-): AttachmentClaimBinding[] {
-  return listActiveClaimBindings(projection).filter(({ attachment }) => attachment.state === "provisional");
-}
-
-export function getActiveClaimForAssignment(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
-): AttachmentClaimBinding | undefined {
-  return listActiveClaimBindings(projection).find(({ claim }) => claim.assignmentId === assignmentId);
 }
 
 export async function persistWrappedExecutionOutcome(
@@ -346,31 +236,6 @@ export async function recoverCompletedWrappedExecution(
     projection,
     diagnostics: diagnosticsFromWarning(warningPrefix, "host-run-persist-failed")
   };
-}
-
-export async function reconcileActiveRuns(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  options?: {
-    snapshotFallback?: boolean;
-  }
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  diagnostics: CommandDiagnostic[];
-  activeLeases: string[];
-}> {
-  return new RunReconciliationService(store, adapter, {
-    getActiveClaimForAssignment,
-    listProvisionalAttachmentClaims
-  }).reconcileActiveRuns(projection, options);
-}
-
-function listHiddenActiveLeaseAssignments(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  activeLeases: string[]
-): string[] {
-  return activeLeases.filter((assignmentId) => !projection.assignments.has(assignmentId));
 }
 
 export function buildOutcomeEvents(

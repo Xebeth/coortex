@@ -16,16 +16,17 @@ import type {
   RuntimeArtifactStore,
   TaskEnvelope
 } from "../adapters/contract.js";
+import { materializeInspectableRunRecord } from "../adapters/host-run-inspection.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../adapters/host-run-store.js";
 import { buildCompletedRunRecord } from "../adapters/host-run-records.js";
-import { materializeInspectableRunRecord } from "../hosts/codex/adapter/run-records.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord, RecoveryBrief, ResultPacket, RuntimeProjection } from "../core/types.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "../cli/runtime-state.js";
-import { getRunnableAssignment, reconcileActiveRuns } from "../cli/run-operations.js";
+import { getRunnableAssignment } from "../cli/run-operations.js";
+import { reconcileActiveRuns } from "../cli/run-reconciliation.js";
 import { fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import {
   loadReconciledProjectionWithDiagnostics,
@@ -2959,14 +2960,17 @@ class MatrixAdapter implements HostAdapter {
   async inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined> {
     this.bindStore(store);
     return materializeInspectableRunRecord(
-      await this.runStore.inspectArtifacts(assignmentId)
+      await this.runStore.inspectArtifacts(assignmentId),
+      { includeMalformedLeaseRecord: true }
     );
   }
 
   async inspectRuns(store: RuntimeArtifactStore): Promise<HostRunRecord[]> {
     this.bindStore(store);
     return (await this.runStore.inspectAllArtifacts())
-      .map((inspection) => materializeInspectableRunRecord(inspection))
+      .map((inspection) =>
+        materializeInspectableRunRecord(inspection, { includeMalformedLeaseRecord: true })
+      )
       .filter((record) => record !== undefined);
   }
 

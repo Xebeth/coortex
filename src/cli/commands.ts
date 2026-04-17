@@ -25,22 +25,26 @@ import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
 import {
+  listAuthoritativeAttachmentClaims,
+  listResumableAttachmentClaims
+} from "./attachment-claim-queries.js";
+import {
   cleanupWrappedResumeLeaseArtifacts,
   getRunnableAssignment,
-  listAuthoritativeAttachmentClaims,
-  loadReconciledProjectionWithDiagnostics,
-  listResumableAttachmentClaims,
   markAssignmentInProgress,
   persistWrappedExecutionOutcome,
   projectionForRunnableAssignment,
-  reconcileActiveRuns,
   recoverCompletedWrappedExecution,
 } from "./run-operations.js";
 import type { ProjectionWriteOptions } from "./projection-write.js";
+import {
+  loadReconciledProjectionWithDiagnostics,
+  reconcileActiveRuns
+} from "./run-reconciliation.js";
 
 export type { CommandDiagnostic } from "./types.js";
 export { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
-export { loadReconciledProjectionWithDiagnostics } from "./run-operations.js";
+export { loadReconciledProjectionWithDiagnostics } from "./run-reconciliation.js";
 
 export interface InitRuntimeResult {
   sessionId: string;

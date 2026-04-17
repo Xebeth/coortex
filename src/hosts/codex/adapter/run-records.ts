@@ -1,13 +1,6 @@
-import { createHash } from "node:crypto";
-
 import type { HostRunArtifactInspection } from "../../../adapters/host-run-store.js";
+import { materializeInspectableRunRecord as materializeInspectableHostRunRecord } from "../../../adapters/host-run-inspection.js";
 import type { HostRunRecord } from "../../../core/types.js";
-import {
-  describeStaleRunReason,
-  describeStaleRunReasonCode,
-  isRunLeaseExpired,
-  selectAuthoritativeRunRecord
-} from "../../../core/run-state.js";
 import { nowIso } from "../../../utils/time.js";
 import { parseJson } from "../../../utils/json.js";
 import type { RuntimeArtifactStore } from "../../../adapters/contract.js";
@@ -171,57 +164,9 @@ export async function readLeaseRecord(
 export function materializeInspectableRunRecord(
   inspection: HostRunArtifactInspection | undefined
 ): HostRunRecord | undefined {
-  if (!inspection) {
-    return undefined;
-  }
-  const authoritative = selectAuthoritativeRunRecord(
-    inspection.runRecord,
-    inspection.lease.state === "valid" ? inspection.lease.record : undefined
-  );
-  if (authoritative) {
-    return normalizeInspectedRun(authoritative);
-  }
-  if (inspection.lease.state === "malformed") {
-    return createMalformedLeaseRecord(inspection.assignmentId, inspection.lease.raw);
-  }
-  return undefined;
-}
-
-function createMalformedLeaseRecord(assignmentId: string, leaseIdentity: string): HostRunRecord {
-  return {
-    assignmentId,
-    state: "running",
-    startedAt: malformedLeaseStartedAt(leaseIdentity),
-    staleReasonCode: "malformed_lease_artifact",
-    staleReason: "malformed lease file"
-  };
-}
-
-function malformedLeaseStartedAt(leaseIdentity: string): string {
-  const hash = createHash("sha256").update(leaseIdentity).digest("hex");
-  const offsetMs = Number.parseInt(hash.slice(0, 12), 16) % MALFORMED_LEASE_IDENTITY_WINDOW_MS;
-  return new Date(MALFORMED_LEASE_IDENTITY_BASE_MS + offsetMs).toISOString();
-}
-
-const MALFORMED_LEASE_IDENTITY_BASE_MS = Date.UTC(1970, 0, 1);
-const MALFORMED_LEASE_IDENTITY_WINDOW_MS = 20 * 365 * 24 * 60 * 60 * 1000;
-
-function normalizeInspectedRun(record: HostRunRecord | undefined): HostRunRecord | undefined {
-  if (!record || record.state !== "running") {
-    return record;
-  }
-  if (record.staleReasonCode === "malformed_lease_artifact") {
-    return record;
-  }
-  if (!isRunLeaseExpired(record)) {
-    return record;
-  }
-  return {
-    ...record,
-    state: "completed",
-    staleReasonCode: record.staleReasonCode ?? describeStaleRunReasonCode(record),
-    staleReason: record.staleReason ?? describeStaleRunReason(record)
-  };
+  return materializeInspectableHostRunRecord(inspection, {
+    includeMalformedLeaseRecord: true
+  });
 }
 
 async function readLeaseContentOrUndefined(path: string): Promise<string | undefined> {

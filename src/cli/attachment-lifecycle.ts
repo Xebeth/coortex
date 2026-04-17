@@ -17,15 +17,11 @@ import type {
 import { RuntimeStore } from "../persistence/store.js";
 import { nowIso } from "../utils/time.js";
 
+import { getActiveClaimForAssignment } from "./attachment-claim-queries.js";
 import { cleanupHostRunArtifactsWithLeaseVerification } from "./host-run-cleanup.js";
 import { persistProjectionEvents, type ProjectionWriteOptions } from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning } from "./runtime-state.js";
-
-interface AttachmentClaimBinding {
-  attachment: RuntimeAttachment;
-  claim: AssignmentClaim;
-}
 
 function buildAuthorityProvenance(
   kind: RuntimeAuthorityProvenance["kind"]
@@ -38,20 +34,6 @@ function buildAuthorityProvenance(
     case "recovery":
       return { kind, source: "recovery.reconcile" };
   }
-}
-
-function getActiveClaimForAssignment(
-  projection: RuntimeProjection,
-  assignmentId: string
-): AttachmentClaimBinding | undefined {
-  const claim = [...projection.claims.values()].find(
-    (candidate) => candidate.assignmentId === assignmentId && candidate.state === "active"
-  );
-  if (!claim) {
-    return undefined;
-  }
-  const attachment = projection.attachments.get(claim.attachmentId);
-  return attachment ? { attachment, claim } : undefined;
 }
 
 function sanitizeAttachmentAdapterMetadata(

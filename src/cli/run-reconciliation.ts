@@ -4,10 +4,8 @@ import type { HostAdapter } from "../adapters/contract.js";
 import { isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type {
-  AssignmentClaim,
   DecisionPacket,
   HostRunRecord,
-  RuntimeAttachment,
   RuntimeProjection
 } from "../core/types.js";
 import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
@@ -18,14 +16,15 @@ import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
 import {
+  getActiveClaimForAssignment,
+  listProvisionalAttachmentClaims
+} from "./attachment-claim-queries.js";
+import {
   cleanupHostRunArtifactsWithLeaseVerification,
   reconcileStaleRunWithLeaseVerification
 } from "./host-run-cleanup.js";
-
-interface AttachmentClaimBinding {
-  attachment: RuntimeAttachment;
-  claim: AssignmentClaim;
-}
+import type { CommandDiagnostic } from "./types.js";
+import { loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 
 type ProjectionWriteOptions = {
   snapshotFallback?: boolean;
@@ -55,19 +54,10 @@ export interface RunReconciliationOptions {
   snapshotFallback?: boolean;
 }
 
-export interface RunReconciliationClaimQueries {
-  getActiveClaimForAssignment(
-    projection: RuntimeProjection,
-    assignmentId: string
-  ): AttachmentClaimBinding | undefined;
-  listProvisionalAttachmentClaims(projection: RuntimeProjection): AttachmentClaimBinding[];
-}
-
 interface RunReconciliationContext {
   store: RuntimeStore;
   adapter: HostAdapter;
   projectionRecovery: ProjectionRecoveryService;
-  claimQueries: RunReconciliationClaimQueries;
 }
 
 interface CompletedRunReconciliationResult {
@@ -88,8 +78,7 @@ export class RunReconciliationService {
 
   constructor(
     private readonly store: RuntimeStore,
-    private readonly adapter: HostAdapter,
-    private readonly claimQueries: RunReconciliationClaimQueries
+    private readonly adapter: HostAdapter
   ) {
     this.projectionRecovery = new ProjectionRecoveryService(store);
   }
@@ -98,12 +87,11 @@ export class RunReconciliationService {
     projection: RuntimeProjection,
     options?: RunReconciliationOptions
   ): Promise<RunReconciliationResult> {
-    return reconcileActiveRuns(
+    return reconcileActiveRunsInContext(
       {
         store: this.store,
         adapter: this.adapter,
-        projectionRecovery: this.projectionRecovery,
-        claimQueries: this.claimQueries
+        projectionRecovery: this.projectionRecovery
       },
       projection,
       options
@@ -111,7 +99,50 @@ export class RunReconciliationService {
   }
 }
 
-async function reconcileActiveRuns(
+function listHiddenActiveLeaseAssignments(
+  projection: RuntimeProjection,
+  activeLeases: string[]
+): string[] {
+  return activeLeases.filter((assignmentId) => !projection.assignments.has(assignmentId));
+}
+
+export async function reconcileActiveRuns(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: RuntimeProjection,
+  options?: RunReconciliationOptions
+): Promise<RunReconciliationResult> {
+  return new RunReconciliationService(store, adapter).reconcileActiveRuns(projection, options);
+}
+
+export async function loadReconciledProjectionWithDiagnostics(
+  store: RuntimeStore,
+  adapter: HostAdapter
+): Promise<{
+  projection: RuntimeProjection;
+  diagnostics: CommandDiagnostic[];
+  activeLeases: string[];
+  hiddenActiveLeases: string[];
+  snapshotFallback: boolean;
+}> {
+  const loaded = await loadOperatorProjectionWithDiagnostics(store);
+  const reconciled = await reconcileActiveRuns(store, adapter, loaded.projection, {
+    snapshotFallback: loaded.snapshotFallback
+  });
+  const hiddenActiveLeases = listHiddenActiveLeaseAssignments(
+    reconciled.projection,
+    reconciled.activeLeases
+  );
+  return {
+    projection: reconciled.projection,
+    diagnostics: [...loaded.diagnostics, ...reconciled.diagnostics],
+    activeLeases: reconciled.activeLeases,
+    hiddenActiveLeases,
+    snapshotFallback: loaded.snapshotFallback
+  };
+}
+
+async function reconcileActiveRunsInContext(
   context: RunReconciliationContext,
   projection: RuntimeProjection,
   options?: RunReconciliationOptions
@@ -255,7 +286,6 @@ async function reconcileActiveRuns(
             : effectiveProjection.status;
         if (
           isStaleRunAlreadyReconciled(
-            context.claimQueries,
             effectiveProjection,
             assignmentId,
             staleRecoveryState,
@@ -419,7 +449,6 @@ async function reconcileActiveRuns(
         : effectiveProjection.status;
     if (
       isStaleRunAlreadyReconciled(
-        context.claimQueries,
         effectiveProjection,
         assignmentId,
         staleRecoveryState,
@@ -612,7 +641,7 @@ async function reconcileProvisionalAttachmentClaims(
   let effectiveProjection = projection;
   let changed = false;
 
-  for (const { attachment, claim } of context.claimQueries.listProvisionalAttachmentClaims(effectiveProjection)) {
+  for (const { attachment, claim } of listProvisionalAttachmentClaims(effectiveProjection)) {
     const assignment = effectiveProjection.assignments.get(claim.assignmentId);
     const record =
       recordByAssignmentId.get(claim.assignmentId)
@@ -880,7 +909,6 @@ function selectCompletedRunCleanupRecord(
 }
 
 function isStaleRunAlreadyReconciled(
-  claimQueries: RunReconciliationClaimQueries,
   projection: RuntimeProjection,
   assignmentId: string,
   recoveryState: StaleRunRecoveryState,
@@ -890,7 +918,7 @@ function isStaleRunAlreadyReconciled(
   const assignment = projection.assignments.get(assignmentId);
   return (
     assignment?.state === "queued" &&
-    !claimQueries.getActiveClaimForAssignment(projection, assignmentId) &&
+    !getActiveClaimForAssignment(projection, assignmentId) &&
     (
       (snapshotFallback && hasEquivalentRuntimeStatus(projection.status, expectedStatus)) ||
       (

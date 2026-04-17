@@ -20,6 +20,7 @@ import {
   createRunningRunRecord,
   withRunNativeId
 } from "../../../adapters/host-run-records.js";
+import { materializeInspectableRunRecord } from "../../../adapters/host-run-inspection.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../../../adapters/host-run-store.js";
 import {
   executeHostResumeSession,
@@ -58,7 +59,6 @@ import {
 } from "./prompt.js";
 import {
   parseExecJsonl,
-  materializeInspectableRunRecord,
 } from "./run-records.js";
 import {
   buildFailedOutcome,
@@ -449,13 +449,16 @@ export class CodexAdapter implements HostAdapter {
     assignmentId?: string
   ): Promise<HostRunRecord | undefined> {
     return materializeInspectableRunRecord(
-      await this.runStore(store).inspectArtifacts(assignmentId)
+      await this.runStore(store).inspectArtifacts(assignmentId),
+      { includeMalformedLeaseRecord: true }
     );
   }
 
   async inspectRuns(store: RuntimeArtifactStore): Promise<HostRunRecord[]> {
     return (await this.runStore(store).inspectAllArtifacts())
-      .map((inspection) => materializeInspectableRunRecord(inspection))
+      .map((inspection) =>
+        materializeInspectableRunRecord(inspection, { includeMalformedLeaseRecord: true })
+      )
       .filter((record) => record !== undefined);
   }
 
