@@ -760,14 +760,32 @@ test("host-run command matrix preserves duplicate-run protection", async (t) => 
         const ctx = await createMatrixContext(adapter);
 
         const firstRun = runRuntime(ctx.store, ctx.adapter);
-        await waitFor(async () => (await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId))?.state === "running");
-        await assert.rejects(
-          runRuntime(ctx.store, ctx.adapter),
-          /(already has an active host run lease|is already claimed by authoritative attachment)/
-        );
-
-        adapter.releaseRun();
-        const result = await firstRun;
+        let blockedRunFailure: unknown;
+        let firstRunFailure: unknown;
+        let result: Awaited<ReturnType<typeof runRuntime>> | undefined;
+        try {
+          await waitFor(async () => (await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId))?.state === "running");
+          await assert.rejects(
+            runRuntime(ctx.store, ctx.adapter),
+            /(already has an active host run lease|is already claimed by authoritative attachment)/
+          );
+        } catch (error) {
+          blockedRunFailure = error;
+        } finally {
+          adapter.releaseRun();
+          try {
+            result = await firstRun;
+          } catch (error) {
+            firstRunFailure = error;
+          }
+        }
+        if (blockedRunFailure) {
+          throw blockedRunFailure;
+        }
+        if (firstRunFailure) {
+          throw firstRunFailure;
+        }
+        assert.ok(result);
 
         assert.equal(adapter.invocationCount, 1);
         assert.equal(result.execution.outcome.kind, "result");

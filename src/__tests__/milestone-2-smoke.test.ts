@@ -29,6 +29,9 @@ interface SmokeSetup {
   assignmentId: string;
 }
 
+const concurrentRunBlockedError =
+  /(already has an active host run lease|is already claimed by authoritative attachment)/;
+
 async function countQueuedAssignmentUpdatedEvents(
   store: RuntimeStore,
   assignmentId: string
@@ -444,13 +447,29 @@ test("milestone-2 smoke: concurrent run attempts do not launch duplicate host ex
   });
 
   const firstRun = runRuntime(setup.store, setup.adapter);
-  await waitFor(async () => (await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId))?.state === "running");
-  await assert.rejects(
-    runRuntime(setup.store, setup.adapter),
-    /already has an active host run lease/
-  );
-  releaseRun();
-  await firstRun;
+  let firstRunFailure: unknown;
+  let blockedRunFailure: unknown;
+  try {
+    await waitFor(
+      async () => (await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId))?.state === "running"
+    );
+    await assert.rejects(runRuntime(setup.store, setup.adapter), concurrentRunBlockedError);
+  } catch (error) {
+    blockedRunFailure = error;
+  } finally {
+    releaseRun();
+    try {
+      await firstRun;
+    } catch (error) {
+      firstRunFailure = error;
+    }
+  }
+  if (blockedRunFailure) {
+    throw blockedRunFailure;
+  }
+  if (firstRunFailure) {
+    throw firstRunFailure;
+  }
   const snapshot = await setup.store.loadSnapshot();
 
   assert.equal(invocationCount, 1);
