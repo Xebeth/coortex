@@ -171,9 +171,11 @@ For the current hardening slice:
 - wrapped launch and wrapped reclaim use the same default sandbox /
   approval mode selection at the Codex CLI boundary; reclaim must not
   introduce a second unmodeled execution policy difference
-- if Codex does not materialize the `-o` last-message file, Coortex
-  falls back to the streamed `agent_message` JSONL item and validates
-  the same structured outcome there instead
+- the `-o` last-message file is the authoritative structured-output
+  boundary; if Codex does not materialize that file, Coortex may fall
+  back to the streamed `agent_message` JSONL item, but only when that
+  text is itself the same raw JSON object with no surrounding prose or
+  code fences
 
 The native Codex session id remains metadata on the runtime-owned
 attachment, not a replacement for that attachment record.

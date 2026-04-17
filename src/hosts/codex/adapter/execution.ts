@@ -130,7 +130,11 @@ async function loadValidatedStructuredOutcome(
     const raw = await readFile(path, "utf8");
     return parseValidatedStructuredOutcome(raw);
   } catch (fileError) {
-    if (typeof transcriptLastMessage === "string" && transcriptLastMessage.trim().length > 0) {
+    if (
+      isMissingStructuredOutputArtifact(fileError) &&
+      typeof transcriptLastMessage === "string" &&
+      transcriptLastMessage.trim().length > 0
+    ) {
       return parseValidatedStructuredOutcome(transcriptLastMessage);
     }
     throw fileError;
@@ -143,72 +147,26 @@ function parseValidatedStructuredOutcome(raw: string): CodexStructuredOutcome {
 
 function parseStructuredOutcomeJson(raw: string): unknown {
   const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    throw new Error("Codex structured output must be a JSON object with no surrounding prose.");
+  }
   try {
     return JSON.parse(trimmed);
-  } catch {
-    const unfenced = unwrapCodeFence(trimmed);
-    if (unfenced !== trimmed) {
-      try {
-        return JSON.parse(unfenced);
-      } catch {
-        // fall through to object extraction
-      }
-    }
-    const extracted = extractFirstJsonObject(unfenced);
-    if (!extracted) {
-      throw new Error("Codex structured output did not contain a valid JSON object.");
-    }
-    return JSON.parse(extracted);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Codex structured output must be a standalone JSON object with no surrounding prose or code fences. ${detail}`
+    );
   }
 }
 
-function unwrapCodeFence(raw: string): string {
-  const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-  return fenced ? fenced[1]!.trim() : raw;
-}
-
-function extractFirstJsonObject(raw: string): string | undefined {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  let start = -1;
-
-  for (let index = 0; index < raw.length; index += 1) {
-    const char = raw[index]!;
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === "\"") {
-      inString = !inString;
-      continue;
-    }
-    if (inString) {
-      continue;
-    }
-    if (char === "{") {
-      if (depth === 0) {
-        start = index;
-      }
-      depth += 1;
-      continue;
-    }
-    if (char === "}") {
-      if (depth === 0) {
-        continue;
-      }
-      depth -= 1;
-      if (depth === 0 && start >= 0) {
-        return raw.slice(start, index + 1);
-      }
-    }
-  }
-
-  return undefined;
+function isMissingStructuredOutputArtifact(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ENOENT"
+  );
 }
 
 function summarizeCodexFailure(

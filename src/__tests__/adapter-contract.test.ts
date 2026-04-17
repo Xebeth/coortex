@@ -494,19 +494,15 @@ test("codex adapter falls back to streamed wrapped-resume agent output when the 
             item: {
               id: "item-resume-fallback",
               type: "agent_message",
-              text: [
-                "```json",
-                JSON.stringify({
-                  outcomeType: "result",
-                  resultStatus: "partial",
-                  resultSummary: "Recovered wrapped resume output from the JSONL stream.",
-                  changedFiles: ["src/hosts/codex/adapter/execution.ts"],
-                  blockerSummary: "",
-                  decisionOptions: [],
-                  recommendedOption: ""
-                }),
-                "```"
-              ].join("\n")
+              text: JSON.stringify({
+                outcomeType: "result",
+                resultStatus: "partial",
+                resultSummary: "Recovered wrapped resume output from the JSONL stream.",
+                changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+                blockerSummary: "",
+                decisionOptions: [],
+                recommendedOption: ""
+              })
             }
           }),
           JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
@@ -541,6 +537,95 @@ test("codex adapter falls back to streamed wrapped-resume agent output when the 
   );
   assert.equal(resumeResult.run.assignmentId, bootstrap.initialAssignmentId);
   assert.equal(resumeResult.telemetry?.usage?.totalTokens, 9);
+});
+
+test("codex adapter rejects fenced wrapped-resume transcript fallback when the last-message file is unavailable", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-stream-fenced-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const adapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in resume transcript strictness coverage");
+    },
+    async runResume(input) {
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: [
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item-resume-fenced",
+              type: "agent_message",
+              text: [
+                "```json",
+                JSON.stringify({
+                  outcomeType: "result",
+                  resultStatus: "partial",
+                  resultSummary: "This fenced transcript should be rejected.",
+                  changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+                  blockerSummary: "",
+                  decisionOptions: [],
+                  recommendedOption: ""
+                }),
+                "```"
+              ].join("\n")
+            }
+          }),
+          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+  });
+
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-stream-fenced",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.verifiedSessionId, "thread-resume-stream-fenced");
+  assert.equal(resumeResult.outcome.kind, "result");
+  assert.equal(resumeResult.outcome.capture.status, "failed");
+  assert.match(resumeResult.outcome.capture.summary, /standalone JSON object/i);
 });
 
 test("codex adapter rejects wrapped resume when the event stream does not verify the requested session", async () => {
@@ -777,6 +862,95 @@ test("codex adapter converts malformed structured output into a failed result", 
   assert.match(execution.outcome.capture.summary, /invalid structured output/i);
   assert.equal(execution.run.state, "completed");
   assert.equal(getNativeRunId(execution.run), "thread-bad-output");
+});
+
+test("codex adapter does not salvage an invalid last-message artifact from transcript output", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-artifact-boundary-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec(input) {
+      await input.onEvent?.({ type: "thread.started", thread_id: "thread-artifact-boundary" });
+      await mkdir(dirname(input.outputPath), { recursive: true });
+      await writeFile(
+        input.outputPath,
+        [
+          "```json",
+          JSON.stringify({
+            outcomeType: "result",
+            resultStatus: "completed",
+            resultSummary: "This fenced artifact should be rejected.",
+            changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+            blockerSummary: "",
+            decisionOptions: [],
+            recommendedOption: ""
+          }),
+          "```"
+        ].join("\n"),
+        "utf8"
+      );
+      return {
+        exitCode: 0,
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-artifact-boundary" }),
+          JSON.stringify({
+            type: "item.completed",
+            item: {
+              id: "item-artifact-boundary",
+              type: "agent_message",
+              text: JSON.stringify({
+                outcomeType: "result",
+                resultStatus: "completed",
+                resultSummary: "Transcript output must not override the invalid artifact.",
+                changedFiles: ["src/hosts/codex/adapter/index.ts"],
+                blockerSummary: "",
+                decisionOptions: [],
+                recommendedOption: ""
+              })
+            }
+          }),
+          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 9, output_tokens: 4 } })
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  await adapter.initialize(store, projection);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const execution = await adapter.executeAssignment(store, projection, envelope);
+
+  assert.equal(execution.outcome.kind, "result");
+  assert.equal(execution.outcome.capture.status, "failed");
+  assert.match(execution.outcome.capture.summary, /standalone JSON object/i);
+  assert.equal(getNativeRunId(execution.run), "thread-artifact-boundary");
 });
 
 test("codex adapter persists the thread handle before a run fails", async () => {

@@ -194,9 +194,11 @@ authority records `launch`, live wrapped reclaim records `resume`, and
 recovery-promoted resumable authority records `recovery`.
 
 Successful wrapped reclaim now records result or decision outcomes
-through the same runtime-owned durable path as `ctx run`, using the
-captured last-message artifact or the streamed agent message when the
-artifact is absent.
+through the same runtime-owned durable path as `ctx run`. The Codex
+adapter treats the `-o` last-message artifact as the authoritative
+structured-output boundary. It falls back to the streamed
+`agent_message` text only when that artifact is missing, and the
+fallback must still be a raw JSON object with no prose or code fences.
 
 Failed wrapped reclaim now keeps three distinct states at the
 adapter/runtime seam: `reclaimed`, `verified_then_failed`, and
