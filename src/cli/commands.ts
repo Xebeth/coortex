@@ -17,6 +17,12 @@ import type {
   RuntimeAttachment
 } from "../core/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
+import {
+  listAuthoritativeAttachmentClaims,
+  listResumableAttachmentClaims,
+  selectSingleAuthoritativeAttachmentClaim,
+  selectSingleResumableAttachmentClaim
+} from "../projections/attachment-claim-queries.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
@@ -24,10 +30,6 @@ import { nowIso } from "../utils/time.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
-import {
-  listAuthoritativeAttachmentClaims,
-  listResumableAttachmentClaims
-} from "./attachment-claim-queries.js";
 import {
   cleanupWrappedResumeLeaseArtifacts,
   getRunnableAssignment,
@@ -65,6 +67,7 @@ export type ResumeRuntimeResult =
   | (PrepareResumeRuntimeResult & { mode: "prepared" })
   | (PrepareResumeRuntimeResult & {
       mode: "reclaimed";
+      execution: SessionExecution;
       attachment: RuntimeAttachment;
       claim: AssignmentClaim;
     });
@@ -288,7 +291,8 @@ export async function resumeRuntime(
   if (unmatchedActiveLeases.length > 0) {
     throw new Error(`Assignment ${unmatchedActiveLeases[0]!} already has an active host run lease.`);
   }
-  if (resumableClaims.length === 0) {
+  const resumableTarget = selectSingleResumableAttachmentClaim(reconciled.projection);
+  if (!resumableTarget) {
     const prepared = await prepareResumeFromProjection(store, adapter, reconciled.projection, []);
     const persistDiagnostics = await persistResumeEnvelopeAndTelemetry(
       store,
@@ -303,14 +307,7 @@ export async function resumeRuntime(
       diagnostics: [...diagnostics, ...persistDiagnostics]
     };
   }
-  if (resumableClaims.length > 1) {
-    throw new Error(
-      `Invalid runtime state: multiple resumable attachments are present (${resumableClaims
-        .map(({ attachment }) => attachment.id)
-        .join(", ")}).`
-    );
-  }
-  const target = resumableClaims[0]!;
+  const target = resumableTarget;
   const assignment = reconciled.projection.assignments.get(target.claim.assignmentId);
   if (!assignment) {
     throw new Error(
@@ -455,6 +452,7 @@ export async function resumeRuntime(
         envelope: resumeEnvelope,
         envelopePath,
         diagnostics,
+        execution: recoveredResume.execution,
         attachment: recoveredAttachment,
         claim: recoveredClaim
       };
@@ -555,6 +553,10 @@ export async function resumeRuntime(
     envelope: resumeEnvelope,
     envelopePath,
     diagnostics,
+    execution: {
+      outcome: reclaimedResume.outcome,
+      run: reclaimedResume.run
+    },
     attachment: resumedAttachment,
     claim: resumedClaim
   };
@@ -611,16 +613,8 @@ export async function runRuntime(
       diagnostics
     };
   }
-  const authoritativeClaims = listAuthoritativeAttachmentClaims(projectionBefore);
-  if (authoritativeClaims.length > 1) {
-    throw new Error(
-      `Invalid runtime state: multiple authoritative attachments are present (${authoritativeClaims
-        .map(({ attachment }) => attachment.id)
-        .join(", ")}).`
-    );
-  }
-  if (authoritativeClaims.length === 1) {
-    const blocking = authoritativeClaims[0]!;
+  const blocking = selectSingleAuthoritativeAttachmentClaim(projectionBefore);
+  if (blocking) {
     throw new Error(
       `Assignment ${blocking.claim.assignmentId} is already claimed by authoritative attachment ${blocking.attachment.id}.`
     );
@@ -818,7 +812,6 @@ export async function inspectRuntimeRun(
   if (!config) {
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
-  await loadReconciledProjectionWithDiagnostics(store, adapter);
   return adapter.inspectRun(store, assignmentId);
 }
 
@@ -843,18 +836,16 @@ export async function inspectRuntimeRunWithContext(
   if (!config) {
     throw new Error("Coortex is not initialized. Run `ctx init` first.");
   }
-  const reconciled = await loadReconciledProjectionWithDiagnostics(store, adapter);
+  const projection = await loadOperatorProjection(store);
   const hostRun = await adapter.inspectRun(store, assignmentId);
   if (!hostRun) {
     return undefined;
   }
-  const claim = [...reconciled.projection.claims.values()]
+  const claim = [...projection.claims.values()]
     .filter((candidate) => candidate.assignmentId === hostRun.assignmentId)
     .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
     .at(-1);
-  const attachment = claim
-    ? reconciled.projection.attachments.get(claim.attachmentId)
-    : undefined;
+  const attachment = claim ? projection.attachments.get(claim.attachmentId) : undefined;
   return {
     hostRun,
     ...(attachment

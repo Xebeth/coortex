@@ -426,3 +426,160 @@ test("recovery brief rejects duplicate active claims for the same assignment", a
 
   assert.throws(() => buildRecoveryBrief(projection), /multiple active claims are present/);
 });
+
+test("recovery brief rejects ambiguous resumable attachments across active assignments", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-ambiguous-resume-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+
+  const primaryAssignmentId = bootstrap.initialAssignmentId;
+  const secondAssignmentId = randomUUID();
+  const timestamp = nowIso();
+  const firstAttachmentId = randomUUID();
+  const secondAttachmentId = randomUUID();
+
+  await store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "assignment.created",
+      payload: {
+        assignment: {
+          id: secondAssignmentId,
+          parentTaskId: "task-follow-up",
+          workflow: "milestone-2",
+          ownerType: "host",
+          ownerId: "codex",
+          objective: "Resume the follow-up assignment.",
+          writeScope: ["README.md"],
+          requiredOutputs: ["result"],
+          state: "queued",
+          createdAt: timestamp,
+          updatedAt: timestamp
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...(await store.rebuildProjection()).status,
+          activeAssignmentIds: [primaryAssignmentId, secondAssignmentId],
+          lastDurableOutputAt: timestamp
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: firstAttachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId: "thread-ambiguous-1",
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: secondAttachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId: "thread-ambiguous-2",
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId: primaryAssignmentId,
+          attachmentId: firstAttachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId: secondAssignmentId,
+          attachmentId: secondAttachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
+
+  const projection = await store.rebuildProjection();
+
+  assert.throws(
+    () => buildRecoveryBrief(projection),
+    /multiple resumable attachments are present/
+  );
+});

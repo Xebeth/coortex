@@ -105,6 +105,14 @@ export class HostRunStore {
     }
   }
 
+  async clearLease(assignmentId: string): Promise<void> {
+    await this.repository.deleteLease(assignmentId);
+    const lastRun = await this.repository.readLastRunPointer();
+    if (shouldDeleteRunningLastRunPointer(lastRun, assignmentId)) {
+      await this.repository.deleteLastRunPointer();
+    }
+  }
+
   async hasLease(assignmentId: string): Promise<boolean> {
     return this.repository.hasLease(assignmentId);
   }

@@ -207,6 +207,17 @@ async function resumeCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     if (resumed.attachment.nativeSessionId) {
       console.log(`Host session: ${resumed.attachment.nativeSessionId}`);
     }
+    if (resumed.execution.outcome.kind === "decision") {
+      console.log(`Decision: ${resumed.execution.outcome.capture.blockerSummary}`);
+      console.log(`Recommended option: ${resumed.execution.outcome.capture.recommendedOption}`);
+    } else {
+      console.log(
+        `Result (${resumed.execution.outcome.capture.status}): ${resumed.execution.outcome.capture.summary}`
+      );
+      if (resumed.execution.outcome.capture.status === "failed") {
+        process.exitCode = 1;
+      }
+    }
     printDiagnostics(resumed.diagnostics);
     return;
   }

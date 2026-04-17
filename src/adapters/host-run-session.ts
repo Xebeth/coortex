@@ -60,7 +60,9 @@ export interface ExecuteHostResumeSessionInput<TExecution extends { exitCode: nu
   runRecord: HostRunRecord;
   leaseMs: number;
   heartbeatMs: number;
-  startRun: () => Promise<HostRunHandle<TExecution>>;
+  startRun: (handlers: {
+    onSessionIdentity: (identity: HostSessionIdentity) => Promise<void>;
+  }) => Promise<HostRunHandle<TExecution>>;
   deriveCompleted: (execution: TExecution) => Promise<{
     outcome: Pick<HostExecutionOutcome, "outcome">;
     usage?: HostTelemetryCapture["usage"];
@@ -73,6 +75,7 @@ export interface ExecuteHostResumeSessionInput<TExecution extends { exitCode: nu
     observedSessionId: string | undefined,
     execution: TExecution
   ) => string | undefined;
+  onSessionIdentity?: (identity: HostSessionIdentity) => Promise<void>;
 }
 
 export async function executeHostRunSession<TExecution extends { exitCode: number }>(
@@ -91,11 +94,13 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     startRun: () =>
       input.startRun({
         onNativeRunId: async (nativeRunId) => {
-          const persisted = await coordinator.persistNativeRunId(nativeRunId);
-          if (!persisted) {
-            return;
-          }
-          await input.onSessionIdentity?.({ nativeSessionId: nativeRunId });
+          coordinator.queueStartupTask(async () => {
+            const persisted = await coordinator.persistNativeRunId(nativeRunId);
+            if (!persisted) {
+              return;
+            }
+            await input.onSessionIdentity?.({ nativeSessionId: nativeRunId });
+          }, "session identity handling");
         }
       }),
     onRuntimeFailure: async (error) =>
@@ -149,7 +154,14 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
   });
 
   return coordinator.execute({
-    startRun: input.startRun,
+    startRun: () =>
+      input.startRun({
+        onSessionIdentity: async (identity) => {
+          coordinator.queueStartupTask(async () => {
+            await input.onSessionIdentity?.(identity);
+          }, "session identity handling");
+        }
+      }),
     onRuntimeFailure: async (error) =>
       buildFailedResumeResult(input, coordinator, nowIso(), -1, input.summarizeExecutionFailure(error)),
     onExecutionCompleted: async (execution) => {
@@ -225,8 +237,14 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
         ...(warning ? { warning } : {})
       };
     },
-    onPostExitFailure: async (error) =>
-      buildFailedResumeResult(input, coordinator, nowIso(), -1, input.summarizeExecutionFailure(error))
+    onPostExitFailure: async (error, execution) =>
+      buildFailedResumeResult(
+        input,
+        coordinator,
+        nowIso(),
+        execution.exitCode,
+        input.summarizeExecutionFailure(error)
+      )
   });
 }
 

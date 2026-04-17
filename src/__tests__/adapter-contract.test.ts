@@ -116,6 +116,7 @@ test("codex adapter executes a bounded run and persists minimal reconnect metada
       return createMockRunningExec(this, input);
     },
     async runExec(input) {
+      await input.onEvent?.({ type: "thread.started", thread_id: "thread-123" });
       await mkdir(dirname(input.outputPath), { recursive: true });
       await writeFile(
         input.outputPath,
@@ -814,9 +815,12 @@ test("codex adapter persists the thread handle before a run fails", async () => 
     },
     async runExec(input) {
       await input.onEvent?.({ type: "thread.started", thread_id: "thread-interrupt-1" });
-      const record = await adapter.inspectRun(store, assignmentId);
-      observedRunningRecord =
-        record?.state === "running" && getNativeRunId(record) === "thread-interrupt-1";
+      await waitFor(async () => {
+        const record = await adapter.inspectRun(store, assignmentId);
+        observedRunningRecord =
+          record?.state === "running" && getNativeRunId(record) === "thread-interrupt-1";
+        return observedRunningRecord;
+      });
       throw new Error("simulated interruption");
     }
   };
@@ -1023,6 +1027,103 @@ test("codex adapter terminates a spawned resume if the initial lease refresh fai
   assert.equal(resumeResult.reclaimed, false);
   assert.equal(resumeResult.reclaimState, "unverified_failed");
   assert.match(resumeResult.warning ?? "", /simulated resume refresh failure/i);
+  assert.deepEqual(terminateSignals, ["graceful"]);
+  assert.equal(waitForExitCalls, 1);
+});
+
+test("codex adapter terminates a spawned resume when session identity handling fails before the handle returns", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-startup-failure-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  let terminateSignals: Array<"graceful" | "force" | undefined> = [];
+  let waitForExitCalls = 0;
+  let rejectResult!: (error: Error) => void;
+  const result = new Promise<{ exitCode: number; stdout: string; stderr: string }>((_, reject) => {
+    rejectResult = reject;
+  });
+  void result.catch(() => undefined);
+
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in wrapped resume startup failure coverage");
+    },
+    async startResume(input) {
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        result,
+        terminate: async (signal) => {
+          terminateSignals.push(signal);
+          queueMicrotask(() => {
+            rejectResult(new Error("terminated after resume startup callback failure"));
+          });
+        },
+        waitForExit: async () => {
+          waitForExitCalls += 1;
+          return { code: 1 };
+        }
+      };
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  await adapter.initialize(store, projection);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession!(
+    store,
+    projection,
+    envelope,
+    {
+      id: randomUUID(),
+      adapter: "codex",
+      host: "codex",
+      state: "detached_resumable",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      detachedAt: nowIso(),
+      nativeSessionId: "thread-resume-startup-failure",
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    },
+    {
+      onSessionIdentity: async () => {
+        throw new Error("simulated resume session identity failure");
+      }
+    }
+  );
+
+  assert.equal(resumeResult.reclaimed, false);
+  assert.equal(resumeResult.reclaimState, "verified_then_failed");
+  assert.equal(resumeResult.sessionVerified, true);
+  assert.match(resumeResult.warning ?? "", /startup handling failed during session identity handling/i);
+  assert.match(resumeResult.warning ?? "", /simulated resume session identity failure/i);
   assert.deepEqual(terminateSignals, ["graceful"]);
   assert.equal(waitForExitCalls, 1);
 });
@@ -1249,7 +1350,7 @@ test("codex adapter recovers final run-record writes after a transient write fai
       );
       return {
         exitCode: 0,
-        stdout: "",
+        stdout: JSON.stringify({ type: "thread.started", thread_id: "thread-warning-1" }),
         stderr: ""
       };
     }

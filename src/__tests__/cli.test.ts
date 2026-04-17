@@ -959,6 +959,61 @@ test("ctx inspect ignores a parseable but invalid convenience last-run pointer",
   assert.equal(inspect.stderr.trim(), "");
 });
 
+test("ctx inspect stays read-only when host metadata is stale", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-inspect-stale-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshotPath = join(runtimeDir, "runtime", "snapshot.json");
+  const snapshotBefore = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+    assignments: Array<{ id: string; state: string }>;
+  };
+  const assignmentId = snapshotBefore.assignments[0]!.id;
+  const staleAt = new Date(Date.now() - 60_000).toISOString();
+  const staleRecord = {
+    assignmentId,
+    state: "running",
+    adapterData: {
+      nativeRunId: "thread-cli-inspect-stale"
+    },
+    startedAt: staleAt,
+    heartbeatAt: staleAt,
+    leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+  };
+  const leasePath = join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`);
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(leasePath, JSON.stringify(staleRecord, null, 2), "utf8");
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+  const snapshotAfter = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+    assignments: Array<{ id: string; state: string }>;
+  };
+
+  assert.equal(inspect.exitCode, 0);
+  assert.match(inspect.stdout, /"hostRun": \{/);
+  assert.match(inspect.stdout, /"state": "completed"/);
+  assert.match(inspect.stdout, /"staleReasonCode": "expired_lease"/);
+  assert.equal(inspect.stderr.trim(), "");
+  assert.equal(snapshotAfter.assignments[0]?.state, snapshotBefore.assignments[0]?.state);
+  assert.notEqual(await readFileIfExists(leasePath), undefined);
+});
+
 test("ctx status reconciles stale host run leases before reporting active work", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-stale-status-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -2861,6 +2916,82 @@ test("ctx run exits non-zero when it persists a failed result", async () => {
   assert.equal(runRecord.resultStatus, "failed");
   assert.equal(runRecord.terminalOutcome?.kind, "result");
   assert.equal(runRecord.terminalOutcome?.result?.status, "failed");
+});
+
+test("ctx resume surfaces reclaimed failed results with a non-zero exit", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-failed-resume-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const execFixturePath = join(projectRoot, "codex-exec-partial-fixture.json");
+  const resumeFixturePath = join(projectRoot, "codex-resume-failed-fixture.json");
+
+  await writeFile(
+    execFixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [{ type: "thread.started", thread_id: "thread-cli-reclaim-1" }],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "partial",
+          resultSummary: "Initial CLI run created resumable state.",
+          changedFiles: ["src/cli/ctx.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await writeFile(
+    resumeFixturePath,
+    JSON.stringify(
+      {
+        exitCode: 7,
+        stdoutLines: [{ type: "thread.resumed", thread_id: "thread-cli-reclaim-1" }],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "failed",
+          resultSummary: "Wrapped resume failed after reclaim.",
+          changedFiles: ["src/cli/ctx.ts", "src/cli/commands.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const run = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      COORTEX_CODEX_EXEC_FIXTURE: execFixturePath
+    }
+  });
+  const resume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      COORTEX_CODEX_RESUME_FIXTURE: resumeFixturePath
+    }
+  });
+
+  assert.equal(run.exitCode, 0);
+  assert.equal(resume.exitCode, 1);
+  assert.match(resume.stdout, /Reclaimed attachment /);
+  assert.match(resume.stdout, /Host session: thread-cli-reclaim-1/);
+  assert.match(resume.stdout, /Result \(failed\): Codex run failed with exit code 7\./);
+  assert.doesNotMatch(resume.stdout, /Recovery brief generated/);
 });
 
 test("ctx init reports codex config conflicts by path without echoing file contents", async () => {

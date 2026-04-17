@@ -1,8 +1,11 @@
 import {
-  isWrappedResumeCapableAttachment,
   type RecoveryBrief,
   type RuntimeProjection
 } from "../core/types.js";
+import {
+  assertUniqueActiveClaims,
+  selectSingleResumableAttachmentClaim
+} from "../projections/attachment-claim-queries.js";
 
 export interface RecoveryBriefOptions {
   allowAttachmentResumeAction?: boolean;
@@ -52,46 +55,21 @@ export function buildRecoveryBrief(
   };
 }
 
-function assertUniqueActiveClaims(projection: RuntimeProjection): void {
-  const activeClaimsByAssignment = new Map<string, string[]>();
-  for (const claim of projection.claims.values()) {
-    if (claim.state !== "active") {
-      continue;
-    }
-    activeClaimsByAssignment.set(claim.assignmentId, [
-      ...(activeClaimsByAssignment.get(claim.assignmentId) ?? []),
-      claim.id
-    ]);
-  }
-  const duplicates = [...activeClaimsByAssignment.entries()].filter(([, ids]) => ids.length > 1);
-  if (duplicates.length === 0) {
-    return;
-  }
-  throw new Error(
-    `Invalid runtime state: multiple active claims are present (${duplicates
-      .map(([assignmentId, ids]) => `${assignmentId}: ${ids.join(", ")}`)
-      .join("; ")}).`
-  );
-}
-
 function determineNextAction(
   projection: RuntimeProjection,
   activeAssignments: RecoveryBrief["activeAssignments"],
   unresolvedDecisions: RecoveryBrief["unresolvedDecisions"],
   options: RecoveryBriefOptions
 ): string {
-  const allowAttachmentResumeAction = options.allowAttachmentResumeAction ?? true;
-  const resumableClaim = [...projection.claims.values()].find((claim) => {
-    if (claim.state !== "active") {
-      return false;
-    }
-    const attachment = projection.attachments.get(claim.attachmentId);
-    return !!attachment && isWrappedResumeCapableAttachment(attachment);
-  });
-  if (allowAttachmentResumeAction && resumableClaim) {
-    const attachment = projection.attachments.get(resumableClaim.attachmentId);
-    return `Resume attachment ${resumableClaim.attachmentId} for assignment ${resumableClaim.assignmentId}${
-      attachment?.nativeSessionId ? ` (${attachment.nativeSessionId})` : ""
+  const resumableBinding =
+    options.allowAttachmentResumeAction ?? true
+      ? selectSingleResumableAttachmentClaim(projection)
+      : undefined;
+  if (resumableBinding) {
+    return `Resume attachment ${resumableBinding.attachment.id} for assignment ${resumableBinding.claim.assignmentId}${
+      resumableBinding.attachment.nativeSessionId
+        ? ` (${resumableBinding.attachment.nativeSessionId})`
+        : ""
     }.`;
   }
   if (unresolvedDecisions.length > 0) {

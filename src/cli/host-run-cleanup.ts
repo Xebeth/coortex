@@ -31,7 +31,7 @@ export async function cleanupHostRunArtifactsWithLeaseVerification(
           ...(options?.staleReason ? { staleReason: options.staleReason } : {})
         });
       } else if (await adapter.hasRunLease(store, assignmentId)) {
-        await adapter.releaseRunLease(store, assignmentId);
+        await adapter.clearRunLease(store, assignmentId);
       }
     }
   } catch (error) {

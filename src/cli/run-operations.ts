@@ -6,11 +6,11 @@ import type {
 } from "../adapters/contract.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { HostRunRecord } from "../core/types.js";
-import { selectRunnableProjection } from "../recovery/host-runs.js";
 import {
   listAuthoritativeAttachmentClaims,
   listResumableAttachmentClaims
-} from "./attachment-claim-queries.js";
+} from "../projections/attachment-claim-queries.js";
+import { selectRunnableProjection } from "../recovery/host-runs.js";
 import { loadReconciledProjectionWithDiagnostics } from "./run-reconciliation.js";
 import { nowIso } from "../utils/time.js";
 import { RuntimeStore } from "../persistence/store.js";
@@ -382,11 +382,29 @@ function nextDecisionCurrentObjective(
   assignmentId: string,
   blockerSummary: string
 ): string {
-  const hasOpenDecision = [...projection.decisions.values()].some(
-    (decision) => decision.assignmentId === assignmentId && decision.state === "open"
-  );
-  if (hasOpenDecision) {
+  const latestDecision = [...projection.decisions.values()]
+    .filter((decision) => decision.assignmentId === assignmentId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1);
+  if (!latestDecision) {
+    return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
+  }
+  if (latestDecision.state === "resolved") {
+    return projection.status.currentObjective;
+  }
+  if (!statusObjectiveTracksAssignment(projection, assignmentId)) {
     return projection.status.currentObjective;
   }
   return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
+}
+
+function statusObjectiveTracksAssignment(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string
+): boolean {
+  const assignmentObjective = projection.assignments.get(assignmentId)?.objective;
+  if (assignmentObjective && projection.status.currentObjective === assignmentObjective) {
+    return true;
+  }
+  return projection.status.currentObjective.startsWith(`Retry assignment ${assignmentId}:`);
 }

@@ -1775,6 +1775,24 @@ test("host-run command matrix keeps prepareResumeRuntime read-only while reconci
   assert.deepEqual(reconciled.activeLeases, [ctx.assignmentId]);
 });
 
+test("host-run command matrix rejects ambiguous resumable attachments during read-only resume preparation", async () => {
+  const adapter = new ReclaimFailureMatrixAdapter();
+  const ctx = await createMatrixContext(adapter);
+  const secondAssignmentId = await appendActiveAssignment(ctx);
+
+  await appendDetachedResumableAttachmentClaim(ctx, ctx.assignmentId);
+  await appendDetachedResumableAttachmentClaim(ctx, secondAssignmentId);
+
+  await assert.rejects(
+    prepareResumeRuntime(ctx.store, adapter),
+    /multiple resumable attachments are present/
+  );
+
+  const loaded = await loadOperatorProjection(ctx.store);
+  assert.equal(loaded.attachments.size, 2);
+  assert.equal(loaded.claims.size, 2);
+});
+
 test("host-run command matrix keeps stale-run reconciliation idempotent", async () => {
   const adapter = new BriefingMatrixAdapter();
   const ctx = await createMatrixContext(adapter);
@@ -2209,6 +2227,43 @@ test("host-run recovery matrix repairs completed decisions after an assignment-u
   assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
 });
 
+test("host-run recovery matrix replays completed-decision status when only the objective text drifted", async () => {
+  const ctx = await createMatrixContext();
+  await ctx.adapter.runStore.write(
+    completedDecisionRecord(ctx.assignmentId, "Need operator confirmation before proceeding.")
+  );
+
+  const firstRecovery = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+  const staleObjective = firstRecovery.projection.assignments.get(ctx.assignmentId)?.objective;
+  assert.notEqual(staleObjective, undefined);
+  const driftedAt = nowIso();
+  await ctx.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: firstRecovery.projection.sessionId,
+    timestamp: driftedAt,
+    type: "status.updated",
+    payload: {
+      status: {
+        ...firstRecovery.projection.status,
+        currentObjective: staleObjective!,
+        lastDurableOutputAt: driftedAt
+      }
+    }
+  });
+  await ctx.store.syncSnapshotFromEvents();
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+  assert.equal(
+    recovered.projection.status.currentObjective,
+    "Need operator confirmation before proceeding."
+  );
+  assert.equal(recovered.projection.decisions.size, 1);
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+});
+
 test("host-run recovery matrix retries completed-run cleanup after the outcome is already durable", async () => {
   const ctx = await createMatrixContext();
   const completedRecord = completedResultRecord(
@@ -2309,6 +2364,123 @@ test("host-run recovery matrix detaches attached authority for recovered partial
     await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
     undefined
   );
+});
+
+test("host-run recovery matrix does not treat an earlier completion as proof for a later stale attempt", async () => {
+  const ctx = await createMatrixContext();
+  const assignment = ctx.projection.assignments.get(ctx.assignmentId);
+  assert.ok(assignment, "expected bootstrap assignment");
+  const completedAt = "2026-04-11T10:01:00.000Z";
+  const retryStartedAt = "2026-04-11T10:05:00.000Z";
+
+  await ctx.store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: completedAt,
+      type: "result.submitted",
+      payload: {
+        result: {
+          resultId: randomUUID(),
+          assignmentId: ctx.assignmentId,
+          producerId: "matrix-host",
+          status: "completed",
+          summary: "Earlier completion stays historical only.",
+          changedFiles: [],
+          createdAt: completedAt
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: completedAt,
+      type: "assignment.updated",
+      payload: {
+        assignmentId: ctx.assignmentId,
+        patch: {
+          state: "completed",
+          updatedAt: completedAt
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: completedAt,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...ctx.projection.status,
+          activeAssignmentIds: [],
+          currentObjective: "Await the next assignment.",
+          lastDurableOutputAt: completedAt,
+          resumeReady: false
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: retryStartedAt,
+      type: "assignment.updated",
+      payload: {
+        assignmentId: ctx.assignmentId,
+        patch: {
+          state: "in_progress",
+          updatedAt: retryStartedAt
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp: retryStartedAt,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...ctx.projection.status,
+          activeAssignmentIds: [ctx.assignmentId],
+          currentObjective: `Retry assignment ${ctx.assignmentId}: ${assignment.objective}`,
+          lastDurableOutputAt: retryStartedAt,
+          resumeReady: true
+        }
+      }
+    }
+  ]);
+  await ctx.store.syncSnapshotFromEvents();
+
+  const staleRecord: HostRunRecord = {
+    assignmentId: ctx.assignmentId,
+    state: "running",
+    startedAt: retryStartedAt,
+    heartbeatAt: retryStartedAt,
+    leaseExpiresAt: "2000-01-01T00:00:00.000Z",
+    adapterData: {
+      nativeRunId: `native-${ctx.assignmentId}-retry`
+    }
+  };
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, staleRecord);
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, staleRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", staleRecord);
+
+  const recovered = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+  const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+
+  assert.equal(recovered.projection.results.size, 1);
+  assert.equal(
+    [...recovered.projection.results.values()].at(-1)?.summary,
+    "Earlier completion stays historical only."
+  );
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+  assert.match(
+    recovered.projection.status.currentObjective,
+    new RegExp(`^Retry assignment ${ctx.assignmentId}:`)
+  );
+  assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.staleReasonCode, "expired_lease");
 });
 
 test("host-run recovery matrix promotes provisional authority for recovered completed decisions", async () => {
@@ -2945,6 +3117,11 @@ class MatrixAdapter implements HostAdapter {
   async hasRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<boolean> {
     this.bindStore(store);
     return this.runStore.hasLease(assignmentId);
+  }
+
+  async clearRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
+    this.bindStore(store);
+    await this.runStore.clearLease(assignmentId);
   }
 
   async releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {

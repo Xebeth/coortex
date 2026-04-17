@@ -348,6 +348,113 @@ test("runtime store serializes concurrent snapshot projection mutations", async 
   ]);
 });
 
+test("runtime store snapshot recovery sync holds the snapshot lock against concurrent mutations", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-sync-lock-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await store.syncSnapshotFromEvents();
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const recoveredEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: randomUUID(),
+        assignmentId,
+        producerId: "worker-1",
+        status: "partial",
+        summary: "Recovered event survives snapshot sync.",
+        changedFiles: ["src/persistence/store.ts"],
+        createdAt: nowIso()
+      }
+    }
+  };
+  const concurrentMutationEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: randomUUID(),
+        assignmentId,
+        producerId: "worker-2",
+        status: "partial",
+        summary: "Concurrent snapshot mutation also survives.",
+        changedFiles: ["src/persistence/store.ts"],
+        createdAt: nowIso()
+      }
+    }
+  };
+  await store.appendEvent(recoveredEvent);
+
+  const originalWriteSnapshot = store.writeSnapshot.bind(store);
+  let releaseSyncWrite!: () => void;
+  const syncWriteReleased = new Promise<void>((resolve) => {
+    releaseSyncWrite = resolve;
+  });
+  let signalSyncWriteEntered!: () => void;
+  const syncWriteEntered = new Promise<void>((resolve) => {
+    signalSyncWriteEntered = resolve;
+  });
+  let blockedFirstSyncWrite = false;
+  (store as RuntimeStore & {
+    writeSnapshot: RuntimeStore["writeSnapshot"];
+  }).writeSnapshot = async (snapshot) => {
+    if (!blockedFirstSyncWrite) {
+      blockedFirstSyncWrite = true;
+      signalSyncWriteEntered();
+      await syncWriteReleased;
+    }
+    await originalWriteSnapshot(snapshot);
+  };
+
+  const syncPromise = store.syncSnapshotFromEventsWithRecovery();
+  await syncWriteEntered;
+  const mutationPromise = store.mutateSnapshotProjection((projection) => {
+    const nextProjection = fromSnapshot(toSnapshot(projection));
+    applyRuntimeEvent(nextProjection, concurrentMutationEvent);
+    return nextProjection;
+  });
+  releaseSyncWrite();
+
+  try {
+    await Promise.all([syncPromise, mutationPromise]);
+  } finally {
+    (store as RuntimeStore & {
+      writeSnapshot: RuntimeStore["writeSnapshot"];
+    }).writeSnapshot = originalWriteSnapshot;
+  }
+
+  const snapshot = await store.loadSnapshot();
+  const summaries = snapshot?.results.map((result) => result.summary).sort();
+
+  assert.deepEqual(summaries, [
+    "Concurrent snapshot mutation also survives.",
+    "Recovered event survives snapshot sync."
+  ]);
+});
+
 test("withPathLock times out instead of reaping a live holder", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-live-lock-"));
   const lockPath = join(projectRoot, "runtime", "events.ndjson");

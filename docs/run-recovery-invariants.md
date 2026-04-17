@@ -95,8 +95,9 @@ filesystem layout.
 
 ## Run-state precedence
 
-For `inspect`, `status`, `resume`, and `run` reconciliation, the current
-effective host-run state follows these rules:
+For `inspect` materialization and for `status`, `resume`, and `run`
+reconciliation, the current effective host-run state follows these
+rules:
 
 1. A completed run record with durable `terminalOutcome` data wins over
    active-lease metadata for the same assignment, including malformed or
@@ -244,6 +245,13 @@ runtime truth on their own.
   Is a stateful repair surface. `ctx status`, `ctx run`, and
   `ctx resume` may use it when they promise reconciled runtime truth,
   but read-only preparation paths must not.
+
+- `ctx inspect`
+  Must stay read-only over runtime-owned authority. It may pair
+  adapter-owned host-run metadata with matching runtime attachment
+  context from operator projection, but it must not reconcile stale or
+  completed runs, synthesize new attachment truth, or silently rewrite
+  runtime state.
 
 - `ctx status`
   Must show the same reconciled state that `ctx resume` and `ctx run`

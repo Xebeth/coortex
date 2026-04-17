@@ -183,6 +183,57 @@ test("host run store uses adapter-provided artifact roles instead of codex paths
   assert.equal(await runStore.inspect("assignment-1"), undefined);
 });
 
+test("host run store clears leftover leases without deleting the durable run record", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const completedRecord: HostRunRecord = {
+    assignmentId: "assignment-clear-lease",
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Completed run survives leftover lease cleanup.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "custom-host",
+        status: "completed",
+        summary: "Completed run survives leftover lease cleanup.",
+        changedFiles: [],
+        createdAt: "2026-04-11T10:01:00.000Z"
+      }
+    }
+  };
+  const leftoverLease: HostRunRecord = {
+    assignmentId: completedRecord.assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:02:00.000Z",
+    heartbeatAt: "2026-04-11T10:02:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:02:30.000Z"
+  };
+
+  await runStore.write(completedRecord);
+  await store.writeJsonArtifact(artifacts.runLeasePath(completedRecord.assignmentId), leftoverLease);
+
+  await runStore.clearLease(completedRecord.assignmentId);
+
+  assert.deepEqual(await runStore.inspect(completedRecord.assignmentId), completedRecord);
+  assert.equal(
+    await store.readTextArtifact(artifacts.runLeasePath(completedRecord.assignmentId), "lease"),
+    undefined
+  );
+  assert.deepEqual(
+    await store.readJsonArtifact<HostRunRecord>(artifacts.lastRunPath(), "last-run"),
+    completedRecord
+  );
+});
+
 test("host run store atomically adopts a reusable live lease exactly once", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {

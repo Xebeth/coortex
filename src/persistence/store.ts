@@ -163,6 +163,10 @@ export class RuntimeStore implements ProjectionRecoveryStore {
     return withPathLock(this.eventsPath, action);
   }
 
+  async withSnapshotLock<T>(action: () => Promise<T>): Promise<T> {
+    return withPathLock(this.snapshotPath, action);
+  }
+
   async readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined> {
     return readJsonFile<T>(join(this.rootDir, relativePath), label);
   }

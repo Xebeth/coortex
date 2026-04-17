@@ -36,6 +36,7 @@ export interface ProjectionRecoveryStore {
   loadEventLines(): Promise<string[]>;
   rewriteEventLog(events: RuntimeEvent[]): Promise<void>;
   withEventsLock<T>(action: () => Promise<T>): Promise<T>;
+  withSnapshotLock<T>(action: () => Promise<T>): Promise<T>;
 }
 
 export class ProjectionRecoveryService {
@@ -189,7 +190,9 @@ export class ProjectionRecoveryService {
     return this.store.withEventsLock(async () => {
       const repairWarning = await this.repairEventLogLocked();
       const recovered = await this.loadProjectionWithRecovery();
-      await this.store.writeSnapshot(toSnapshot(recovered.projection));
+      await this.store.withSnapshotLock(async () => {
+        await this.store.writeSnapshot(toSnapshot(recovered.projection));
+      });
       const warning = [repairWarning, recovered.warning].filter(Boolean).join(" ").trim();
       return warning ? { projection: recovered.projection, warning } : { projection: recovered.projection };
     });

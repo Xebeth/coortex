@@ -53,6 +53,7 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
   private readonly runningRecord: RunningRecordController;
   private readonly metadataWarnings: string[] = [];
   private readonly metadataFailure: Promise<never>;
+  private startupTaskQueue: Promise<void> = Promise.resolve();
   private metadataFailureReject!: (error: Error) => void;
   private metadataFailureRaised = false;
 
@@ -61,6 +62,7 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
     this.metadataFailure = new Promise<never>((_, reject) => {
       this.metadataFailureReject = reject;
     });
+    void this.metadataFailure.catch(() => undefined);
   }
 
   currentRunRecord(): HostRunRecord {
@@ -89,6 +91,24 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
     }
   }
 
+  queueStartupTask(task: () => Promise<void>, context: string): void {
+    const taskPromise = this.startupTaskQueue.catch(() => undefined).then(task);
+    this.startupTaskQueue = taskPromise.catch((error) => {
+      this.failRunOnStartupError(error, context);
+    });
+  }
+
+  async waitForStartupTasks(): Promise<void> {
+    let pending = this.startupTaskQueue;
+    while (true) {
+      await pending;
+      if (pending === this.startupTaskQueue) {
+        return;
+      }
+      pending = this.startupTaskQueue;
+    }
+  }
+
   async execute<TResult>(
     input: HostRunSessionExecutionInput<TExecution, TResult>
   ): Promise<TResult> {
@@ -100,6 +120,7 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
       try {
         running = await input.startRun();
         this.options.setActiveRun(running);
+        await this.waitForStartupTasks();
         await this.refreshLease();
         heartbeatTimer = setInterval(() => {
           void this.refreshLease().catch((error) => {
@@ -123,6 +144,7 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
       }
 
       try {
+        await this.waitForStartupTasks();
         await this.runningRecord.waitForWrites();
         return await input.onExecutionCompleted(execution);
       } catch (error) {
@@ -162,6 +184,17 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
     const message = error instanceof Error ? error.message : String(error);
     this.metadataFailureReject(
       new Error(`Host run metadata persistence failed during ${context}. ${message}`)
+    );
+  }
+
+  private failRunOnStartupError(error: unknown, context: string): void {
+    if (this.metadataFailureRaised) {
+      return;
+    }
+    this.metadataFailureRaised = true;
+    const message = error instanceof Error ? error.message : String(error);
+    this.metadataFailureReject(
+      new Error(`Host run startup handling failed during ${context}. ${message}`)
     );
   }
 }

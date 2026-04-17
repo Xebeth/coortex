@@ -298,10 +298,9 @@ export class CodexAdapter implements HostAdapter {
           execution,
           outputPath
         );
-        const nativeRunId = persistedNativeRunId ?? completed.nativeRunId;
         return {
           outcome: completed.outcome,
-          ...(nativeRunId ? { nativeRunId } : {}),
+          ...(persistedNativeRunId ? { nativeRunId: persistedNativeRunId } : {}),
           ...(completed.usage ? { usage: completed.usage } : {})
         };
       },
@@ -332,8 +331,15 @@ export class CodexAdapter implements HostAdapter {
     const heartbeatMs = readPositiveIntEnv("COORTEX_RUN_HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS);
     const runStore = this.runStore(store);
     const startedAt = nowIso();
+    const requestedReclaimRecord = {
+      ...createRunningRunRecord(assignmentId, startedAt, leaseMs, requestedSessionId),
+      adapterData: {
+        nativeRunId: requestedSessionId,
+        [COORTEX_RECLAIM_LEASE_KEY]: true
+      }
+    } satisfies HostRunRecord;
     let runningRecord = await runStore.claimOrAdopt(
-      createRunningRunRecord(assignmentId, startedAt, leaseMs, requestedSessionId),
+      requestedReclaimRecord,
       (current) =>
         current.state === "running" &&
         !isRunLeaseExpired(current) &&
@@ -359,37 +365,6 @@ export class CodexAdapter implements HostAdapter {
     const outputPath = join(paths.runsDir, `${assignmentId}-${executionId}-resume-last-message.json`);
     let observedSessionId: string | undefined;
     let verifiedSessionId: string | undefined;
-    const executionInput = {
-      cwd: projection.rootPath,
-      sessionId: requestedSessionId,
-      prompt: buildCodexExecutionPrompt(envelope),
-      outputPath,
-      onEvent: async (event: Record<string, unknown>) => {
-        const sessionId = readResumeSessionId(event);
-        if (!sessionId) {
-          return;
-        }
-        if (!observedSessionId) {
-          observedSessionId = sessionId;
-        }
-        if (sessionId === requestedSessionId && verifiedSessionId !== requestedSessionId) {
-          verifiedSessionId = sessionId;
-          await lifecycle?.onSessionIdentity?.({
-            nativeSessionId: sessionId,
-            metadata: {
-              resumeEventType:
-                typeof event.type === "string" && event.type.length > 0 ? event.type : "thread.event"
-            }
-          });
-        }
-      },
-      ...(this.options.dangerouslyBypassApprovalsAndSandbox !== undefined
-        ? {
-            dangerouslyBypassApprovalsAndSandbox:
-              this.options.dangerouslyBypassApprovalsAndSandbox
-          }
-        : {})
-    };
     return executeHostResumeSession<CodexExecResult>({
       assignmentId,
       startedAt: runningRecord.startedAt,
@@ -399,7 +374,38 @@ export class CodexAdapter implements HostAdapter {
       runRecord: runningRecord,
       leaseMs,
       heartbeatMs,
-      startRun: async () => this.startResumeHandle(executionInput),
+      startRun: async ({ onSessionIdentity }) =>
+        this.startResumeHandle({
+          cwd: projection.rootPath,
+          sessionId: requestedSessionId,
+          prompt: buildCodexExecutionPrompt(envelope),
+          outputPath,
+          onEvent: async (event: Record<string, unknown>) => {
+            const sessionId = readResumeSessionId(event);
+            if (!sessionId) {
+              return;
+            }
+            if (!observedSessionId) {
+              observedSessionId = sessionId;
+            }
+            if (sessionId === requestedSessionId && verifiedSessionId !== requestedSessionId) {
+              verifiedSessionId = sessionId;
+              await onSessionIdentity({
+                nativeSessionId: sessionId,
+                metadata: {
+                  resumeEventType:
+                    typeof event.type === "string" && event.type.length > 0 ? event.type : "thread.event"
+                }
+              });
+            }
+          },
+          ...(this.options.dangerouslyBypassApprovalsAndSandbox !== undefined
+            ? {
+                dangerouslyBypassApprovalsAndSandbox:
+                  this.options.dangerouslyBypassApprovalsAndSandbox
+              }
+            : {})
+        }),
       deriveCompleted: async (execution) => {
         const completed = await deriveCodexExecutionCompletion(
           assignmentId,
@@ -416,6 +422,9 @@ export class CodexAdapter implements HostAdapter {
       getVerifiedSessionId: () => verifiedSessionId,
       summarizeExecutionFailure: summarizeExecutionError,
       summarizeVerificationFailure: summarizeResumeVerificationFailure,
+      ...(lifecycle?.onSessionIdentity
+        ? { onSessionIdentity: lifecycle.onSessionIdentity }
+        : {}),
       ...this.hostSessionTracking<CodexExecResult>()
     });
   }
@@ -434,6 +443,10 @@ export class CodexAdapter implements HostAdapter {
 
   async hasRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<boolean> {
     return this.runStore(store).hasLease(assignmentId);
+  }
+
+  async clearRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
+    await this.runStore(store).clearLease(assignmentId);
   }
 
   async releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {

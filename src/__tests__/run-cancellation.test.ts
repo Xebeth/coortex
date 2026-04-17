@@ -178,6 +178,7 @@ function createCancellationAdapter(
     async hasRunLease() {
       return false;
     },
+    async clearRunLease() {},
     async releaseRunLease() {},
     async reconcileStaleRun() {},
     async inspectRun() {

@@ -761,15 +761,28 @@ test("milestone-2 integration: provisional live-lease authority is promoted befo
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
   await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
 
+  const reconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+  const reconciledAttachment = reconciled.projection.attachments.get(attachmentId);
+  const reconciledClaim = reconciled.projection.claims.get(claimId);
+
+  assert.ok(
+    reconciled.diagnostics.some((diagnostic) => diagnostic.code === "provisional-attachment-promoted")
+  );
+  assert.deepEqual(reconciledAttachment?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
+  assert.deepEqual(reconciledClaim?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
+
   const resumed = await resumeRuntime(setup.store, setup.adapter);
   const projectionAfter = await loadOperatorProjection(setup.store);
   const attachment = projectionAfter.attachments.get(attachmentId);
 
   assert.equal(resumed.mode, "reclaimed");
   assert.equal(resumedSessionId, "smoke-thread-provisional-promoted");
-  assert.ok(
-    resumed.diagnostics.some((diagnostic) => diagnostic.code === "provisional-attachment-promoted")
-  );
   assert.equal(attachment?.state, "detached_resumable");
   assert.equal(attachment?.nativeSessionId, "smoke-thread-provisional-promoted");
 });
@@ -967,6 +980,10 @@ test("milestone-2 integration: wrapped resume persists a terminal completed resu
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
 
   assert.equal(resumed.mode, "reclaimed");
+  assert.equal(resumed.execution.outcome.kind, "result");
+  assert.equal(resumed.execution.outcome.capture.status, "completed");
+  assert.equal(resumed.execution.outcome.capture.summary, "Wrapped resume finished the assignment.");
+  assert.equal(resumed.execution.run.resultStatus, "completed");
   assert.equal(attachment?.state, "released");
   assert.equal(claim?.state, "released");
   assert.equal(projection.assignments.get(setup.assignmentId)?.state, "completed");
@@ -1035,6 +1052,12 @@ test("milestone-2 integration: wrapped resume persists a decision outcome and ke
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
 
   assert.equal(resumed.mode, "reclaimed");
+  assert.equal(resumed.execution.outcome.kind, "decision");
+  assert.equal(
+    resumed.execution.outcome.capture.blockerSummary,
+    "Need operator guidance before continuing resumed work."
+  );
+  assert.equal(resumed.execution.run.outcomeKind, "decision");
   assert.equal(attachment?.state, "detached_resumable");
   assert.deepEqual(attachment?.provenance, {
     kind: "resume",

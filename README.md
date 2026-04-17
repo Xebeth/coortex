@@ -183,8 +183,9 @@ node dist/cli/ctx.js resume
 
 `ctx inspect` prints adapter-owned host-run metadata under `hostRun` and,
 when available, the matching runtime-owned attachment context under
-`runtimeAttachment`. It is a host-run inspection surface with runtime
-context, not a second source of attachment authority.
+`runtimeAttachment`. It is a read-only host-run inspection surface with
+runtime context, not a second source of attachment authority or a
+reconciliation command.
 
 `ctx resume` first targets the single authoritative attached or detached-but-resumable attachment that still carries a stored native session id. During a verified wrapped reclaim the runtime marks that attachment attached, then returns it to `detached_resumable` when the wrapped resume process exits without a terminal runtime outcome. If no such reclaimable attachment exists, it refreshes the derived recovery envelope from current runtime state instead.
 

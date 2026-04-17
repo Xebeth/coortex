@@ -17,7 +17,7 @@ import type {
 import { RuntimeStore } from "../persistence/store.js";
 import { nowIso } from "../utils/time.js";
 
-import { getActiveClaimForAssignment } from "./attachment-claim-queries.js";
+import { getActiveClaimForAssignment } from "../projections/attachment-claim-queries.js";
 import { cleanupHostRunArtifactsWithLeaseVerification } from "./host-run-cleanup.js";
 import { persistProjectionEvents, type ProjectionWriteOptions } from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
@@ -864,11 +864,13 @@ export const AttachmentLifecycleService = {
           state: "detached_resumable",
           updatedAt: nowIso(),
           detachedAt: nowIso(),
+          provenance: buildAuthorityProvenance("recovery"),
           nativeSessionId,
           ...(adapterMetadata ? { adapterMetadata } : {})
         },
         claim: {
-          updatedAt: nowIso()
+          updatedAt: nowIso(),
+          provenance: buildAuthorityProvenance("recovery")
         }
       },
       options

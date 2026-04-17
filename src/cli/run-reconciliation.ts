@@ -18,7 +18,7 @@ import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
 import {
   getActiveClaimForAssignment,
   listProvisionalAttachmentClaims
-} from "./attachment-claim-queries.js";
+} from "../projections/attachment-claim-queries.js";
 import {
   cleanupHostRunArtifactsWithLeaseVerification,
   reconcileStaleRunWithLeaseVerification
@@ -213,7 +213,7 @@ async function reconcileActiveRunsInContext(
     }
 
     const durableRuntimeCompletedRecord = isDegradedRunRecord(record)
-      ? buildCompletedRunRecordFromRuntimeOutcome(effectiveProjection, assignmentId)
+      ? buildCompletedRunRecordFromRuntimeOutcome(effectiveProjection, record)
       : undefined;
     if (durableRuntimeCompletedRecord) {
       handledCompletedRun = true;
@@ -941,15 +941,19 @@ function isStaleRunReconciliationCandidate(record: HostRunRecord): boolean {
 
 function buildCompletedRunRecordFromRuntimeOutcome(
   projection: RuntimeProjection,
-  assignmentId: string
+  record: HostRunRecord
 ): HostRunRecord | undefined {
+  const assignmentId = record.assignmentId;
+  const startedAt = record.startedAt;
   const decision = [...projection.decisions.values()]
     .filter((candidate) => candidate.assignmentId === assignmentId)
+    .filter((candidate) => candidate.createdAt >= startedAt)
     .at(-1);
   const result = [...projection.results.values()]
     .filter(
       (candidate) =>
         candidate.assignmentId === assignmentId &&
+        candidate.createdAt >= startedAt &&
         (candidate.status === "completed" || candidate.status === "failed")
     )
     .at(-1);
@@ -962,7 +966,7 @@ function buildCompletedRunRecordFromRuntimeOutcome(
     return {
       assignmentId,
       state: "completed",
-      startedAt: result.createdAt,
+      startedAt,
       completedAt: result.createdAt,
       outcomeKind: "result",
       resultStatus: result.status,
@@ -984,7 +988,7 @@ function buildCompletedRunRecordFromRuntimeOutcome(
   return {
     assignmentId,
     state: "completed",
-    startedAt: decision!.createdAt,
+    startedAt,
     completedAt: decision!.createdAt,
     outcomeKind: "decision",
     summary: decision!.blockerSummary,
@@ -1179,9 +1183,11 @@ function selectPendingCompletedRecoveryEvents(
     outcomeRecoveredInProjection || recoveredOutcomeEventIndex !== undefined;
   const canUseReplayableConvergenceProof =
     replayableEvents !== undefined && recoveredOutcomeEventIndex !== undefined;
-  const recoveredDecision = canUseReplayableConvergenceProof
-    ? findRecoveredCompletedDecisionEvent(replayableEvents, record)
-    : findRecoveredCompletedDecision(projection, record);
+  const recoveredDecision =
+    findRecoveredCompletedDecision(projection, record) ??
+    (canUseReplayableConvergenceProof
+      ? findRecoveredCompletedDecisionEvent(replayableEvents, record)
+      : undefined);
   const recoveredDecisionState = recoveredDecision?.state;
 
   if (!outcomeAlreadyAbsorbed) {
@@ -1189,55 +1195,19 @@ function selectPendingCompletedRecoveryEvents(
   }
 
   if (record.terminalOutcome?.kind === "decision") {
-    if (
-      canUseReplayableConvergenceProof
-        ? !hasRecoveredCompletedAssignmentStateFromEvents(
-            replayableEvents,
-            record,
-            recoveredDecisionState,
-            recoveredOutcomeEventIndex
-          )
-        : !hasRecoveredCompletedAssignmentState(projection, record, recoveredDecisionState)
-    ) {
+    if (!hasRecoveredCompletedAssignmentState(projection, record, recoveredDecisionState)) {
       pendingEvents.push(assignmentEvent!);
     }
-    if (
-      canUseReplayableConvergenceProof
-        ? !hasRecoveredCompletedStatusFromEvents(
-            replayableEvents,
-            record,
-            expectedStatus,
-            recoveredOutcomeEventIndex
-          )
-        : !hasRecoveredCompletedStatus(projection, record, expectedStatus)
-    ) {
+    if (!hasRecoveredCompletedStatus(projection, record, expectedStatus)) {
       pendingEvents.push(statusEvent!);
     }
     return pendingEvents;
   }
 
-  if (
-    canUseReplayableConvergenceProof
-      ? !hasRecoveredCompletedAssignmentStateFromEvents(
-          replayableEvents,
-          record,
-          undefined,
-          recoveredOutcomeEventIndex
-        )
-      : !hasRecoveredCompletedAssignmentState(projection, record)
-  ) {
+  if (!hasRecoveredCompletedAssignmentState(projection, record)) {
     pendingEvents.push(assignmentEvent!);
   }
-  if (
-    canUseReplayableConvergenceProof
-      ? !hasRecoveredCompletedStatusFromEvents(
-          replayableEvents,
-          record,
-          expectedStatus,
-          recoveredOutcomeEventIndex
-        )
-      : !hasRecoveredCompletedStatus(projection, record, expectedStatus)
-  ) {
+  if (!hasRecoveredCompletedStatus(projection, record, expectedStatus)) {
     pendingEvents.push(statusEvent!);
   }
 
@@ -1333,57 +1303,6 @@ function findRecoveredCompletedOutcomeEventIndexFromEvents(
   return resultIndex === -1 ? undefined : resultIndex;
 }
 
-function hasRecoveredCompletedAssignmentStateFromEvents(
-  events: RuntimeEvent[],
-  record: HostRunRecord,
-  recoveredDecisionState: "open" | "resolved" | undefined,
-  recoveredOutcomeEventIndex?: number
-): boolean {
-  if (recoveredOutcomeEventIndex === undefined) {
-    return false;
-  }
-  const expectedAssignmentState = nextAssignmentStateFromRecord(record, recoveredDecisionState);
-  return events.some((event, index): event is Extract<RuntimeEvent, { type: "assignment.updated" }> => {
-    if (index <= recoveredOutcomeEventIndex) {
-      return false;
-    }
-    if (event.type !== "assignment.updated") {
-      return false;
-    }
-    return (
-      event.payload.assignmentId === record.assignmentId &&
-      event.payload.patch.state === expectedAssignmentState
-    );
-  });
-}
-
-function hasRecoveredCompletedStatusFromEvents(
-  events: RuntimeEvent[],
-  record: HostRunRecord,
-  expectedStatus: RuntimeProjection["status"],
-  recoveredOutcomeEventIndex?: number
-): boolean {
-  if (recoveredOutcomeEventIndex === undefined) {
-    return false;
-  }
-  return events.some((event, index): event is Extract<RuntimeEvent, { type: "status.updated" }> => {
-    if (index <= recoveredOutcomeEventIndex) {
-      return false;
-    }
-    if (event.type !== "status.updated") {
-      return false;
-    }
-    const status = event.payload.status;
-    if (!hasEquivalentCompletedRecoveryStatus(status, expectedStatus)) {
-      return false;
-    }
-    return !(
-      record.terminalOutcome?.kind === "result" &&
-      status.activeAssignmentIds.includes(record.assignmentId)
-    );
-  });
-}
-
 function findRecoveredCompletedDecision(
   projection: RuntimeProjection,
   record: HostRunRecord
@@ -1419,7 +1338,13 @@ function hasRecoveredCompletedStatus(
   record: HostRunRecord,
   expectedStatus: RuntimeProjection["status"]
 ): boolean {
-  if (!hasEquivalentCompletedRecoveryStatus(projection.status, expectedStatus)) {
+  if (
+    !hasEquivalentCompletedRecoveryStatus(
+      projection.status,
+      expectedStatus,
+      record.terminalOutcome?.kind === "decision"
+    )
+  ) {
     return false;
   }
   return !(
@@ -1430,9 +1355,11 @@ function hasRecoveredCompletedStatus(
 
 function hasEquivalentCompletedRecoveryStatus(
   actualStatus: RuntimeProjection["status"],
-  expectedStatus: RuntimeProjection["status"]
+  expectedStatus: RuntimeProjection["status"],
+  compareCurrentObjective: boolean
 ): boolean {
-  return actualStatus.activeMode === expectedStatus.activeMode &&
+  return (!compareCurrentObjective || actualStatus.currentObjective === expectedStatus.currentObjective) &&
+    actualStatus.activeMode === expectedStatus.activeMode &&
     actualStatus.resumeReady === expectedStatus.resumeReady &&
     actualStatus.activeAssignmentIds.length === expectedStatus.activeAssignmentIds.length &&
     actualStatus.activeAssignmentIds.every((id, index) => id === expectedStatus.activeAssignmentIds[index]);
@@ -1672,13 +1599,31 @@ function nextDecisionCurrentObjective(
   assignmentId: string,
   blockerSummary: string
 ): string {
-  const hasOpenDecision = [...projection.decisions.values()].some(
-    (decision) => decision.assignmentId === assignmentId && decision.state === "open"
-  );
-  if (hasOpenDecision) {
+  const latestDecision = [...projection.decisions.values()]
+    .filter((decision) => decision.assignmentId === assignmentId)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .at(-1);
+  if (!latestDecision) {
+    return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
+  }
+  if (latestDecision.state === "resolved") {
+    return projection.status.currentObjective;
+  }
+  if (!statusObjectiveTracksAssignment(projection, assignmentId)) {
     return projection.status.currentObjective;
   }
   return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
+}
+
+function statusObjectiveTracksAssignment(
+  projection: RuntimeProjection,
+  assignmentId: string
+): boolean {
+  const assignmentObjective = projection.assignments.get(assignmentId)?.objective;
+  if (assignmentObjective && projection.status.currentObjective === assignmentObjective) {
+    return true;
+  }
+  return projection.status.currentObjective.startsWith(`Retry assignment ${assignmentId}:`);
 }
 
 async function mutateSnapshotFallbackProjection(
