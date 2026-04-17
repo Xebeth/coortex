@@ -95,6 +95,11 @@ Responsibilities:
 
 Recovery must not depend on transcript replay.
 
+Runtime-owned attachment and claim transitions should enter through one
+shared lifecycle mutation facility. Commands and recovery may decide
+when authority needs to change, but they should not hand-build separate
+launch, reclaim, and recovery mutation rules beside each other.
+
 ---
 
 ## 4. Workflows

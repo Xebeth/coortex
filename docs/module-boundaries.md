@@ -179,8 +179,12 @@ Responsibilities:
 - doctor/validation
 - wrapped launch and wrapped resume surfaces
 - status/inspect surfaces
+- sequence adapter calls and runtime entrypoints without owning
+  attachment/claim mutation rules
+- own one dedicated runtime mutation facility for attachment/claim
+  lifecycle transitions used by launch, reclaim, and recovery
 - persist recovery-side mutations when operator commands reconcile
-  durable state
+  durable state through that shared lifecycle facility
 
 Must remain thin.
 

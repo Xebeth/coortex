@@ -3,18 +3,16 @@ import { randomUUID } from "node:crypto";
 import type {
   HostAdapter,
   HostExecutionOutcome,
-  HostSessionResumeResult,
-  HostSessionIdentity
+  HostSessionResumeResult
 } from "../adapters/contract.js";
-import { COORTEX_RECLAIM_LEASE_KEY, isRunLeaseExpired } from "../core/run-state.js";
+import { isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { isWrappedResumeCapableAttachment } from "../core/types.js";
 import type {
   AssignmentClaim,
   DecisionPacket,
   HostRunRecord,
-  RuntimeAttachment,
-  RuntimeAuthorityProvenance
+  RuntimeAttachment
 } from "../core/types.js";
 import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import { buildStaleRunReconciliation, createActiveRunDiagnostic, selectRunnableProjection } from "../recovery/host-runs.js";
@@ -22,16 +20,22 @@ import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import { RuntimeStore } from "../persistence/store.js";
 
+import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
+import {
+  cleanupHostRunArtifactsWithLeaseVerification,
+  reconcileStaleRunWithLeaseVerification
+} from "./host-run-cleanup.js";
+import {
+  applyRuntimeEventsToProjection,
+  persistProjectionEvents,
+  type ProjectionWriteOptions
+} from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 
 interface AttachmentClaimBinding {
   attachment: RuntimeAttachment;
   claim: AssignmentClaim;
-}
-
-export interface ProjectionWriteOptions {
-  snapshotFallback?: boolean;
 }
 
 export interface WrappedExecutionRecoveryResult {
@@ -49,30 +53,6 @@ const RESUMABLE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
   "attached",
   "detached_resumable"
 ]);
-
-function applyRuntimeEventsToProjection(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  events: RuntimeEvent[]
-): Awaited<ReturnType<typeof loadOperatorProjection>> {
-  const nextProjection = fromSnapshot(toSnapshot(projection));
-  for (const event of events) {
-    applyRuntimeEvent(nextProjection, event);
-  }
-  return nextProjection;
-}
-
-function buildAuthorityProvenance(
-  kind: RuntimeAuthorityProvenance["kind"]
-): RuntimeAuthorityProvenance {
-  switch (kind) {
-    case "launch":
-      return { kind, source: "ctx.run" };
-    case "resume":
-      return { kind, source: "ctx.resume" };
-    case "recovery":
-      return { kind, source: "recovery.reconcile" };
-  }
-}
 
 function assertUniqueActiveClaims(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>
@@ -203,17 +183,6 @@ export function getActiveClaimForAssignment(
   return listActiveClaimBindings(projection).find(({ claim }) => claim.assignmentId === assignmentId);
 }
 
-function sanitizeAttachmentAdapterMetadata(
-  adapterData?: Record<string, unknown>
-): Record<string, unknown> | undefined {
-  if (!adapterData) {
-    return undefined;
-  }
-  const entries = Object.entries(adapterData).filter(
-    ([key]) => key !== COORTEX_RECLAIM_LEASE_KEY
-  );
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
 
 async function mutateSnapshotFallbackProjection(
   store: RuntimeStore,
@@ -288,27 +257,6 @@ async function applyRecoveryProjectionEvents(
   return persisted.projection;
 }
 
-export async function persistProjectionEvents(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  events: RuntimeEvent[],
-  options?: ProjectionWriteOptions
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  warning?: string;
-}> {
-  if (!options?.snapshotFallback) {
-    await store.appendEvents(events);
-    return store.syncSnapshotFromEventsWithRecovery();
-  }
-
-  return {
-    projection: await store.mutateSnapshotProjection((latestProjection) =>
-      applyRuntimeEventsToProjection(latestProjection, events)
-    )
-  };
-}
-
 export async function persistWrappedExecutionOutcome(
   store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
@@ -329,698 +277,6 @@ export async function persistWrappedExecutionOutcome(
     projection: projectionAfterResult.projection,
     diagnostics: diagnosticsFromWarning(projectionAfterResult.warning, "event-log-repaired")
   };
-}
-
-export async function transitionAttachmentClaim(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  patch: {
-    attachment: Partial<RuntimeAttachment>;
-    claim: Partial<AssignmentClaim>;
-  },
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return (await persistProjectionEvents(
-    store,
-    projection,
-    [
-      {
-        eventId: randomUUID(),
-        sessionId: projection.sessionId,
-        timestamp,
-        type: "attachment.updated",
-        payload: {
-          attachmentId,
-          patch: patch.attachment
-        }
-      },
-      {
-        eventId: randomUUID(),
-        sessionId: projection.sessionId,
-        timestamp,
-        type: "claim.updated",
-        payload: {
-          claimId,
-          patch: patch.claim
-        }
-      }
-    ],
-    options
-  )).projection;
-}
-
-export async function persistAttachmentAuthority(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachment: RuntimeAttachment,
-  claim: AssignmentClaim,
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return (
-    await persistProjectionEvents(
-      store,
-      projection,
-      [
-        {
-          eventId: randomUUID(),
-          sessionId: projection.sessionId,
-          timestamp,
-          type: "attachment.created",
-          payload: { attachment }
-        },
-        {
-          eventId: randomUUID(),
-          sessionId: projection.sessionId,
-          timestamp,
-          type: "claim.created",
-          payload: { claim }
-        }
-      ],
-      options
-    )
-  ).projection;
-}
-
-export async function updateAttachmentToDetachedResumable(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  options?: ProjectionWriteOptions,
-  detachedAt = nowIso(),
-  repair?: {
-    claimId?: string;
-    provenanceKind?: RuntimeAuthorityProvenance["kind"];
-    nativeSessionId?: string;
-  }
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const events: RuntimeEvent[] = [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp: detachedAt,
-      type: "attachment.updated",
-      payload: {
-        attachmentId,
-        patch: {
-          state: "detached_resumable",
-          updatedAt: detachedAt,
-          detachedAt,
-          ...(repair?.nativeSessionId ? { nativeSessionId: repair.nativeSessionId } : {}),
-          ...(repair?.provenanceKind
-            ? { provenance: buildAuthorityProvenance(repair.provenanceKind) }
-            : {})
-        }
-      }
-    }
-  ];
-  if (repair?.claimId && repair.provenanceKind) {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp: detachedAt,
-      type: "claim.updated",
-      payload: {
-        claimId: repair.claimId,
-        patch: {
-          provenance: buildAuthorityProvenance(repair.provenanceKind)
-        }
-      }
-    });
-  }
-  return (await persistProjectionEvents(store, projection, events, options)).projection;
-}
-
-export async function releaseAttachmentClaim(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  reason: {
-    attachment: string;
-    claim: string;
-  },
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return transitionAttachmentClaim(
-    store,
-    projection,
-    attachmentId,
-    claimId,
-    {
-      attachment: {
-        state: "released",
-        updatedAt: timestamp,
-        releasedAt: timestamp,
-        releasedReason: reason.attachment
-      },
-      claim: {
-        state: "released",
-        updatedAt: timestamp,
-        releasedAt: timestamp,
-        releasedReason: reason.claim
-      }
-    },
-    options
-  );
-}
-
-export async function orphanAttachmentClaim(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  reason: {
-    attachment: string;
-    claim: string;
-  },
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return transitionAttachmentClaim(
-    store,
-    projection,
-    attachmentId,
-    claimId,
-    {
-      attachment: {
-        state: "orphaned",
-        updatedAt: timestamp,
-        orphanedAt: timestamp,
-        orphanedReason: reason.attachment
-      },
-      claim: {
-        state: "orphaned",
-        updatedAt: timestamp,
-        orphanedAt: timestamp,
-        orphanedReason: reason.claim
-      }
-    },
-    options
-  );
-}
-
-export function createLaunchAuthority(
-  adapter: HostAdapter,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
-): {
-  attachment: RuntimeAttachment;
-  claim: AssignmentClaim;
-} {
-  const timestamp = nowIso();
-  const attachmentId = randomUUID();
-  return {
-    attachment: {
-      id: attachmentId,
-      adapter: adapter.id,
-      host: adapter.host,
-      state: "provisional",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      provenance: buildAuthorityProvenance("launch")
-    },
-    claim: {
-      id: randomUUID(),
-      assignmentId,
-      attachmentId,
-      state: "active",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      provenance: buildAuthorityProvenance("launch")
-    }
-  };
-}
-
-export async function activateAttachmentSession(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  assignmentId: string,
-  kind: "launch" | "resume",
-  identity: HostSessionIdentity,
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  const existingAttachment = projection.attachments.get(attachmentId);
-  const adapterMetadata =
-    identity.metadata || existingAttachment?.adapterMetadata
-      ? {
-          ...(existingAttachment?.adapterMetadata ?? {}),
-          ...(identity.metadata ?? {})
-        }
-      : undefined;
-
-  return updateAttachmentState(
-    store,
-    projection,
-    attachmentId,
-    {
-      state: "attached",
-      updatedAt: timestamp,
-      attachedAt: timestamp,
-      nativeSessionId: identity.nativeSessionId,
-      provenance: buildAuthorityProvenance(kind),
-      ...(adapterMetadata ? { adapterMetadata } : {})
-    },
-    options,
-    {
-      kind,
-      attachmentId,
-      assignmentId
-    }
-  );
-}
-
-async function updateAttachmentState(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  patch: Partial<RuntimeAttachment>,
-  options?: ProjectionWriteOptions,
-  activation?: {
-    kind: "launch" | "resume";
-    attachmentId: string;
-    assignmentId: string;
-  }
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  const events: RuntimeEvent[] = [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "attachment.updated",
-      payload: {
-        attachmentId,
-        patch
-      }
-    }
-  ];
-  if (activation) {
-    const activeBinding = getActiveClaimForAssignment(projection, activation.assignmentId);
-    if (activeBinding?.attachment.id === attachmentId) {
-      events.push({
-        eventId: randomUUID(),
-        sessionId: projection.sessionId,
-        timestamp,
-        type: "claim.updated",
-        payload: {
-          claimId: activeBinding.claim.id,
-          patch: {
-            provenance: buildAuthorityProvenance(activation.kind)
-          }
-        }
-      });
-    }
-  }
-  if (activation) {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "runtime.activated",
-      payload: activation
-    });
-  }
-  return (await persistProjectionEvents(store, projection, events, options)).projection;
-}
-
-export function authorityFinalizationDispositionForOutcome(
-  outcome: HostExecutionOutcome["outcome"] | NonNullable<HostRunRecord["terminalOutcome"]>
-): "release" | "detach" {
-  if (outcome.kind !== "result") {
-    return "detach";
-  }
-
-  const status = "capture" in outcome ? outcome.capture.status : outcome.result.status;
-  return status === "completed" || status === "failed" ? "release" : "detach";
-}
-
-async function requeueAssignmentForRetry(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string,
-  objective: string,
-  options?: ProjectionWriteOptions
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const timestamp = nowIso();
-  return (await persistProjectionEvents(
-    store,
-    projection,
-    buildRequeueAssignmentEvents(projection, assignmentId, objective, timestamp),
-    options
-  )).projection;
-}
-
-export function buildRequeueAssignmentEvents(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string,
-  objective: string,
-  timestamp: string
-): RuntimeEvent[] {
-  return [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "assignment.updated",
-      payload: {
-        assignmentId,
-        patch: {
-          state: "queued",
-          updatedAt: timestamp
-        }
-      }
-    },
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "status.updated",
-      payload: {
-        status: {
-          ...projection.status,
-          currentObjective: `Retry assignment ${assignmentId}: ${objective}`,
-          lastDurableOutputAt: timestamp,
-          resumeReady: true
-        }
-      }
-    }
-  ];
-}
-
-export async function orphanAttachmentClaimAndRequeue(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachment: RuntimeAttachment,
-  claim: AssignmentClaim,
-  reason: string,
-  options?: ProjectionWriteOptions
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  diagnostics: CommandDiagnostic[];
-}> {
-  const timestamp = nowIso();
-  let effectiveProjection = await orphanAttachmentClaim(
-    store,
-    projection,
-    attachment.id,
-    claim.id,
-    {
-      attachment: reason,
-      claim: reason
-    },
-    options
-  );
-  const diagnostics: CommandDiagnostic[] = [];
-  const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
-    store,
-    adapter,
-    claim.assignmentId,
-    {
-      staleAt: timestamp,
-      staleReason: reason
-    }
-  );
-  if (cleanupError) {
-    diagnostics.push(
-      ...diagnosticsFromWarning(
-        `Host run cleanup artifacts could not be updated for assignment ${claim.assignmentId}. ${cleanupError.message}`,
-        "host-run-persist-failed"
-      )
-    );
-  }
-  const assignment = effectiveProjection.assignments.get(claim.assignmentId);
-  if (assignment) {
-    effectiveProjection = (
-      await persistProjectionEvents(
-        store,
-        effectiveProjection,
-        buildRequeueAssignmentEvents(
-          effectiveProjection,
-          claim.assignmentId,
-          assignment.objective,
-          timestamp
-        ),
-        options
-      )
-    ).projection;
-  }
-  return {
-    projection: effectiveProjection,
-    diagnostics
-  };
-}
-
-function buildRecoveredAuthorityRepairEvents(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string,
-  repair:
-    | {
-        kind: "release";
-        attachmentReason: string;
-        claimReason: string;
-      }
-    | {
-        kind: "orphan";
-        attachmentReason: string;
-        claimReason: string;
-      },
-  timestamp: string
-): RuntimeEvent[] {
-  const activeBinding = getActiveClaimForAssignment(projection, assignmentId);
-  if (!activeBinding) {
-    return [];
-  }
-
-  return [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "attachment.updated",
-      payload: {
-        attachmentId: activeBinding.attachment.id,
-        patch:
-          repair.kind === "release"
-            ? {
-                state: "released",
-                updatedAt: timestamp,
-                releasedAt: timestamp,
-                releasedReason: repair.attachmentReason
-              }
-            : {
-                state: "orphaned",
-                updatedAt: timestamp,
-                orphanedAt: timestamp,
-                orphanedReason: repair.attachmentReason
-              }
-      }
-    },
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "claim.updated",
-      payload: {
-        claimId: activeBinding.claim.id,
-        patch:
-          repair.kind === "release"
-            ? {
-                state: "released",
-                updatedAt: timestamp,
-                releasedAt: timestamp,
-                releasedReason: repair.claimReason
-              }
-            : {
-                state: "orphaned",
-                updatedAt: timestamp,
-                orphanedAt: timestamp,
-                orphanedReason: repair.claimReason
-              }
-      }
-    }
-  ];
-}
-
-export function buildAuthorityFinalizationEvents(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string,
-  repair:
-    | {
-        kind: "release";
-        attachmentReason: string;
-        claimReason: string;
-      }
-    | {
-        kind: "orphan";
-        attachmentReason: string;
-        claimReason: string;
-      }
-    | {
-        kind: "detach";
-        provenanceKind: RuntimeAuthorityProvenance["kind"];
-        nativeSessionId?: string;
-        adapterMetadata?: Record<string, unknown>;
-        missingIdentityReason?: {
-          attachment: string;
-          claim: string;
-        };
-      },
-  timestamp: string
-): RuntimeEvent[] {
-  if (repair.kind === "release" || repair.kind === "orphan") {
-    return buildRecoveredAuthorityRepairEvents(projection, assignmentId, repair, timestamp);
-  }
-
-  const activeBinding = getActiveClaimForAssignment(projection, assignmentId);
-  if (!activeBinding) {
-    return [];
-  }
-
-  if (activeBinding.attachment.state === "detached_resumable") {
-    const patch: Partial<RuntimeAttachment> = {
-      updatedAt: timestamp,
-      provenance: buildAuthorityProvenance(repair.provenanceKind)
-    };
-    if (!activeBinding.attachment.nativeSessionId && repair.nativeSessionId) {
-      patch.nativeSessionId = repair.nativeSessionId;
-    }
-    if (repair.adapterMetadata) {
-      patch.adapterMetadata = repair.adapterMetadata;
-    }
-    const events: RuntimeEvent[] =
-      Object.keys(patch).length > 1
-        ? [
-            {
-              eventId: randomUUID(),
-              sessionId: projection.sessionId,
-              timestamp,
-              type: "attachment.updated",
-              payload: {
-                attachmentId: activeBinding.attachment.id,
-                patch
-              }
-            }
-          ]
-        : [];
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "claim.updated",
-      payload: {
-        claimId: activeBinding.claim.id,
-        patch: {
-          provenance: buildAuthorityProvenance(repair.provenanceKind)
-        }
-      }
-    });
-    return events;
-  }
-
-  if (activeBinding.attachment.state === "provisional" && !repair.nativeSessionId) {
-    return repair.missingIdentityReason
-      ? buildRecoveredAuthorityRepairEvents(
-          projection,
-          assignmentId,
-          {
-            kind: "orphan",
-            attachmentReason: repair.missingIdentityReason.attachment,
-            claimReason: repair.missingIdentityReason.claim
-          },
-          timestamp
-        )
-      : [];
-  }
-
-  return [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "attachment.updated",
-      payload: {
-        attachmentId: activeBinding.attachment.id,
-        patch: {
-          state: "detached_resumable",
-          updatedAt: timestamp,
-          detachedAt: timestamp,
-          provenance: buildAuthorityProvenance(repair.provenanceKind),
-          ...(repair.nativeSessionId ? { nativeSessionId: repair.nativeSessionId } : {}),
-          ...(repair.adapterMetadata ? { adapterMetadata: repair.adapterMetadata } : {})
-        }
-      }
-    },
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "claim.updated",
-      payload: {
-        claimId: activeBinding.claim.id,
-        patch: {
-          provenance: buildAuthorityProvenance(repair.provenanceKind)
-        }
-      }
-    }
-  ];
-}
-
-export async function finalizeAttachmentAuthority(
-  store: RuntimeStore,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  attachmentId: string,
-  claimId: string,
-  execution: Pick<HostExecutionOutcome, "outcome" | "run">,
-  provenanceKind: "launch" | "resume" | "recovery",
-  verifiedNativeSessionId: string | undefined,
-  options?: ProjectionWriteOptions,
-  detachedAt?: string
-): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
-  const claim = projection.claims.get(claimId);
-  const attachment = projection.attachments.get(attachmentId);
-  if (!claim || claim.attachmentId !== attachmentId) {
-    throw new Error(`Cannot finalize missing active claim ${claimId} for attachment ${attachmentId}.`);
-  }
-  const detachedNativeSessionId =
-    verifiedNativeSessionId ??
-    (typeof execution.run.adapterData?.nativeRunId === "string"
-      ? execution.run.adapterData.nativeRunId
-      : attachment?.nativeSessionId);
-  const finalizationEvents = buildAuthorityFinalizationEvents(
-    projection,
-    claim.assignmentId,
-    authorityFinalizationDispositionForOutcome(execution.outcome) === "release"
-      ? {
-          kind: "release",
-          attachmentReason:
-            execution.outcome.kind === "result"
-              ? `Assignment finished with ${execution.outcome.capture.status}.`
-              : "Assignment completed with a decision.",
-          claimReason: "Assignment finished."
-        }
-      : {
-          kind: "detach",
-          provenanceKind,
-          ...(detachedNativeSessionId ? { nativeSessionId: detachedNativeSessionId } : {}),
-          missingIdentityReason: {
-            attachment: "Wrapped launch completed without native session identity finalization.",
-            claim: "Wrapped launch completed without native session identity finalization."
-          }
-        },
-    detachedAt ?? nowIso()
-  );
-  if (finalizationEvents.length === 0) {
-    return projection;
-  }
-  return (await persistProjectionEvents(store, projection, finalizationEvents, options)).projection;
 }
 
 function synthesizeRecoveredExecution(
@@ -1109,7 +365,7 @@ export async function recoverCompletedWrappedExecution(
   const recoveredExecution = synthesizeRecoveredExecution(await adapter.inspectRun(store, assignmentId));
   if (recoveredExecution) {
     const recovered = await loadReconciledProjectionWithDiagnostics(store, adapter);
-    const projectionAfter = await finalizeAttachmentAuthority(
+    const projectionAfter = await AttachmentLifecycleService.finalizeAttachmentAuthority(
       store,
       recovered.projection,
       attachmentId,
@@ -1143,7 +399,7 @@ export async function recoverCompletedWrappedExecution(
       ),
       "host-run-persist-failed"
     );
-    const detachedProjection = await updateAttachmentToDetachedResumable(
+    const detachedProjection = await AttachmentLifecycleService.updateAttachmentToDetachedResumable(
       store,
       projection,
       attachmentId,
@@ -1168,105 +424,6 @@ export async function recoverCompletedWrappedExecution(
     projection,
     diagnostics: diagnosticsFromWarning(warningPrefix, "host-run-persist-failed")
   };
-}
-
-function buildRecoveredDetachedAuthorityRepairEvents(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  record: HostRunRecord,
-  assignmentId: string,
-  timestamp: string
-): RuntimeEvent[] {
-  const activeBinding = getActiveClaimForAssignment(projection, assignmentId);
-  if (!activeBinding) {
-    return [];
-  }
-
-  const recoveredNativeSessionId =
-    typeof record.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
-      ? record.adapterData.nativeRunId
-      : activeBinding.attachment.nativeSessionId;
-  const adapterMetadata = sanitizeAttachmentAdapterMetadata(record.adapterData);
-  const detachRepair: {
-    kind: "detach";
-    provenanceKind: "recovery";
-    nativeSessionId?: string;
-    adapterMetadata?: Record<string, unknown>;
-    missingIdentityReason: {
-      attachment: string;
-      claim: string;
-    };
-  } = {
-    kind: "detach",
-    provenanceKind: "recovery",
-    missingIdentityReason: {
-      attachment:
-        "Recovered completed assignment could not prove a durable native session identity for resumable authority.",
-      claim:
-        "Recovered completed assignment could not prove a durable native session identity for resumable authority."
-    }
-  };
-  if (recoveredNativeSessionId) {
-    detachRepair.nativeSessionId = recoveredNativeSessionId;
-  }
-  if (adapterMetadata) {
-    detachRepair.adapterMetadata = adapterMetadata;
-  }
-  return buildAuthorityFinalizationEvents(
-    projection,
-    assignmentId,
-    detachRepair,
-    timestamp
-  );
-}
-
-function buildCompletedAuthorityRepairEvents(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  record: HostRunRecord,
-  timestamp: string
-): RuntimeEvent[] {
-  if (!record.terminalOutcome) {
-    return [];
-  }
-
-  if (authorityFinalizationDispositionForOutcome(record.terminalOutcome) === "detach") {
-    return buildRecoveredDetachedAuthorityRepairEvents(
-      projection,
-      record,
-      record.assignmentId,
-      timestamp
-    );
-  }
-
-  return buildRecoveredAuthorityRepairEvents(
-    projection,
-    record.assignmentId,
-    {
-      kind: "release",
-      attachmentReason:
-        record.terminalOutcome?.kind === "result"
-          ? `Recovered completed assignment finished with ${record.terminalOutcome.result.status}.`
-          : "Recovered completed assignment finished with a decision.",
-      claimReason: "Recovered completed assignment finished."
-    },
-    timestamp
-  );
-}
-
-function buildStaleAuthorityRepairEvents(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string,
-  timestamp: string
-): RuntimeEvent[] {
-  return buildRecoveredAuthorityRepairEvents(
-    projection,
-    assignmentId,
-    {
-      kind: "orphan",
-      attachmentReason: "Stale host run was requeued for retry.",
-      claimReason: "Stale host run was requeued for retry."
-    },
-    timestamp
-  );
 }
 
 async function reconcileProvisionalAttachmentClaims(
@@ -1294,24 +451,13 @@ async function reconcileProvisionalAttachmentClaims(
     const hasLiveLease = !!record && record.state === "running" && !isRunLeaseExpired(record);
 
     if (hasLiveLease && liveNativeSessionId) {
-      const adapterMetadata = sanitizeAttachmentAdapterMetadata(record?.adapterData);
-      effectiveProjection = await transitionAttachmentClaim(
+      effectiveProjection = await AttachmentLifecycleService.promoteProvisionalAttachment(
         store,
         effectiveProjection,
         attachment.id,
         claim.id,
-        {
-          attachment: {
-            state: "detached_resumable",
-            updatedAt: nowIso(),
-            detachedAt: nowIso(),
-            nativeSessionId: liveNativeSessionId,
-            ...(adapterMetadata ? { adapterMetadata } : {})
-          },
-          claim: {
-            updatedAt: nowIso()
-          }
-        },
+        liveNativeSessionId,
+        record?.adapterData,
         options
       );
       diagnostics.push({
@@ -1328,42 +474,29 @@ async function reconcileProvisionalAttachmentClaims(
     const cleanupReason = hasLiveLease
       ? "Wrapped launch left only unverifiable provisional session state."
       : "Wrapped launch ended before native session identity could be finalized.";
-    effectiveProjection = await transitionAttachmentClaim(
-      store,
-      effectiveProjection,
-      attachment.id,
-      claim.id,
-      startedHostRun || shouldRequeue
-        ? {
-            attachment: {
-              state: "orphaned",
-              updatedAt: nowIso(),
-              orphanedAt: nowIso(),
-              orphanedReason: cleanupReason
-            },
-            claim: {
-              state: "orphaned",
-              updatedAt: nowIso(),
-              orphanedAt: nowIso(),
-              orphanedReason: cleanupReason
-            }
-          }
-        : {
-            attachment: {
-              state: "released",
-              updatedAt: nowIso(),
-              releasedAt: nowIso(),
-              releasedReason: "Wrapped launch did not establish a durable host session."
-            },
-            claim: {
-              state: "released",
-              updatedAt: nowIso(),
-              releasedAt: nowIso(),
-              releasedReason: "Wrapped launch did not establish a durable host session."
-            }
-        },
-        options
-    );
+    effectiveProjection = startedHostRun || shouldRequeue
+      ? await AttachmentLifecycleService.orphanAttachmentClaim(
+          store,
+          effectiveProjection,
+          attachment.id,
+          claim.id,
+          {
+            attachment: cleanupReason,
+            claim: cleanupReason
+          },
+          options
+        )
+      : await AttachmentLifecycleService.releaseAttachmentClaim(
+          store,
+          effectiveProjection,
+          attachment.id,
+          claim.id,
+          {
+            attachment: "Wrapped launch did not establish a durable host session.",
+            claim: "Wrapped launch did not establish a durable host session."
+          },
+          options
+        );
     const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
       store,
       adapter,
@@ -1383,7 +516,7 @@ async function reconcileProvisionalAttachmentClaims(
       );
     }
     if (shouldRequeue && assignment) {
-      effectiveProjection = await requeueAssignmentForRetry(
+      effectiveProjection = await AttachmentLifecycleService.requeueAssignmentForRetry(
         store,
         effectiveProjection,
         claim.assignmentId,
@@ -1585,7 +718,7 @@ export async function reconcileActiveRuns(
           reconciliation.events,
           staleRecoveryState
         );
-        const authorityRepairEvents = buildStaleAuthorityRepairEvents(
+        const authorityRepairEvents = AttachmentLifecycleService.buildStaleAuthorityRepairEvents(
           effectiveProjection,
           assignmentId,
           reconciliation.events[0]?.timestamp ?? nowIso()
@@ -1743,7 +876,7 @@ export async function reconcileActiveRuns(
     }
 
     const pendingEvents = selectPendingStaleRecoveryEvents(reconciliation.events, staleRecoveryState);
-    const authorityRepairEvents = buildStaleAuthorityRepairEvents(
+    const authorityRepairEvents = AttachmentLifecycleService.buildStaleAuthorityRepairEvents(
       effectiveProjection,
       assignmentId,
       reconciliation.events[0]?.timestamp ?? nowIso()
@@ -1965,7 +1098,7 @@ async function reconcileCompletedRunRecord(
     };
   }
 
-  const completedAuthorityEvents = buildCompletedAuthorityRepairEvents(
+  const completedAuthorityEvents = AttachmentLifecycleService.buildCompletedAuthorityRepairEvents(
     effectiveProjection,
     record,
     completedRecovery.allEvents[0]?.timestamp ?? nowIso()
@@ -2035,68 +1168,6 @@ async function reconcileCompletedRunRecord(
     handled: true,
     replayableHydrated: replayableHydration.hydrated
   };
-}
-
-export async function cleanupHostRunArtifactsWithLeaseVerification(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  assignmentId: string,
-  options?: {
-    reconcileRecord?: HostRunRecord;
-    inspectedRecord?: HostRunRecord;
-    staleAt?: string;
-    staleReasonCode?: HostRunRecord["staleReasonCode"];
-    staleReason?: string;
-    failureLabel?: string;
-  }
-): Promise<Error | undefined> {
-  let cleanupError: Error | undefined;
-  try {
-    if (options?.reconcileRecord) {
-      await adapter.reconcileStaleRun(store, options.reconcileRecord);
-    } else {
-      const inspected = options?.inspectedRecord ?? await adapter.inspectRun(store, assignmentId);
-      if (inspected?.state === "running") {
-        await adapter.reconcileStaleRun(store, {
-          ...inspected,
-          state: "completed",
-          staleAt: options?.staleAt ?? nowIso(),
-          ...(options?.staleReasonCode ? { staleReasonCode: options.staleReasonCode } : {}),
-          ...(options?.staleReason ? { staleReason: options.staleReason } : {})
-        });
-      } else if (await adapter.hasRunLease(store, assignmentId)) {
-        await adapter.releaseRunLease(store, assignmentId);
-      }
-    }
-  } catch (error) {
-    cleanupError = error instanceof Error ? error : new Error(String(error));
-  }
-
-  if (await adapter.hasRunLease(store, assignmentId)) {
-    throw new Error(
-      `Host run ${options?.failureLabel ?? "cleanup"} failed to clear the active lease for assignment ${assignmentId}. ${
-        cleanupError?.message ?? "The lease artifact remained on disk."
-      }`
-    );
-  }
-
-  return cleanupError;
-}
-
-async function reconcileStaleRunWithLeaseVerification(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  record: HostRunRecord
-): Promise<Error | undefined> {
-  return cleanupHostRunArtifactsWithLeaseVerification(
-    store,
-    adapter,
-    record.assignmentId,
-    {
-      reconcileRecord: record,
-      failureLabel: "reconciliation"
-    }
-  );
 }
 
 function selectCompletedRunCleanupRecord(

@@ -23,26 +23,20 @@ import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
+import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
 import {
-  activateAttachmentSession,
-  createLaunchAuthority,
   cleanupWrappedResumeLeaseArtifacts,
-  finalizeAttachmentAuthority,
   getRunnableAssignment,
   listAuthoritativeAttachmentClaims,
   loadReconciledProjectionWithDiagnostics,
   listResumableAttachmentClaims,
   markAssignmentInProgress,
-  orphanAttachmentClaimAndRequeue,
-  orphanAttachmentClaim,
-  persistAttachmentAuthority,
   persistWrappedExecutionOutcome,
   projectionForRunnableAssignment,
   reconcileActiveRuns,
   recoverCompletedWrappedExecution,
-  releaseAttachmentClaim,
 } from "./run-operations.js";
-import type { ProjectionWriteOptions } from "./run-operations.js";
+import type { ProjectionWriteOptions } from "./projection-write.js";
 
 export type { CommandDiagnostic } from "./types.js";
 export { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
@@ -384,7 +378,7 @@ export async function resumeRuntime(
             assignment.id,
             resumeWriteOptions
           );
-          effectiveProjection = await activateAttachmentSession(
+          effectiveProjection = await AttachmentLifecycleService.activateAttachmentSession(
             store,
             effectiveProjection,
             target.attachment.id,
@@ -400,7 +394,7 @@ export async function resumeRuntime(
     if (isActiveHostRunLeaseError(error)) {
       throw error;
     }
-    const failedResume = await orphanAttachmentClaimAndRequeue(
+    const failedResume = await AttachmentLifecycleService.orphanAttachmentClaimAndRequeue(
       store,
       adapter,
       effectiveProjection,
@@ -462,7 +456,7 @@ export async function resumeRuntime(
       };
     }
     case "unverified_failed": {
-    const failedResume = await orphanAttachmentClaimAndRequeue(
+    const failedResume = await AttachmentLifecycleService.orphanAttachmentClaimAndRequeue(
       store,
       adapter,
       effectiveProjection,
@@ -507,7 +501,7 @@ export async function resumeRuntime(
     );
     effectiveProjection = persistedOutcome.projection;
     diagnostics.push(...persistedOutcome.diagnostics);
-      effectiveProjection = await finalizeAttachmentAuthority(
+      effectiveProjection = await AttachmentLifecycleService.finalizeAttachmentAuthority(
         store,
         effectiveProjection,
         target.attachment.id,
@@ -633,10 +627,10 @@ export async function runRuntime(
   } catch (error) {
     throw error;
   }
-  const launchAuthority = createLaunchAuthority(adapter, projectionBefore, assignment.id);
+  const launchAuthority = AttachmentLifecycleService.createLaunchAuthority(adapter, assignment.id);
   let authorityPersisted = false;
   try {
-    projectionBefore = await persistAttachmentAuthority(
+    projectionBefore = await AttachmentLifecycleService.persistAttachmentAuthority(
       store,
       projectionBefore,
       launchAuthority.attachment,
@@ -691,7 +685,7 @@ export async function runRuntime(
     execution = await adapter.executeAssignment(store, launchedProjection, envelope, claimedRun, {
       onSessionIdentity: async (identity) => {
         verifiedNativeSessionId = identity.nativeSessionId;
-        launchedProjection = await activateAttachmentSession(
+        launchedProjection = await AttachmentLifecycleService.activateAttachmentSession(
           store,
           launchedProjection ?? projectionBefore,
           launchAuthority.attachment.id,
@@ -712,7 +706,7 @@ export async function runRuntime(
     );
     let projectionAfter = persistedOutcome.projection;
     diagnostics.push(...persistedOutcome.diagnostics);
-      projectionAfter = await finalizeAttachmentAuthority(
+      projectionAfter = await AttachmentLifecycleService.finalizeAttachmentAuthority(
         store,
         projectionAfter,
         launchAuthority.attachment.id,
@@ -746,7 +740,7 @@ export async function runRuntime(
     if (!executionStarted) {
       await adapter.releaseRunLease(store, assignment.id);
       if (authorityPersisted) {
-        projectionBefore = await releaseAttachmentClaim(
+        projectionBefore = await AttachmentLifecycleService.releaseAttachmentClaim(
           store,
           projectionBefore,
           launchAuthority.attachment.id,
@@ -792,7 +786,7 @@ export async function runRuntime(
         diagnostics.push(...recoveredExecution.diagnostics);
         launchedProjection = recoveredExecution.projection;
       } else {
-        launchedProjection = await releaseAttachmentClaim(
+        launchedProjection = await AttachmentLifecycleService.releaseAttachmentClaim(
           store,
           launchedProjection,
           launchAuthority.attachment.id,
