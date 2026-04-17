@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
 import { withPathLock } from "../persistence/files.js";
+import { ProjectionRecoveryService } from "../persistence/projection-recovery.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
@@ -66,6 +67,63 @@ test("runtime store rebuilds projection from durable events and snapshots", asyn
   assert.equal(loaded.assignments.size, 1);
   assert.equal(loaded.results.size, 1);
   assert.equal(loaded.status.activeAdapter, "codex");
+});
+
+test("projection recovery service repairs a salvageable event log through store primitives", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-projection-recovery-repair-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const service = new ProjectionRecoveryService(store);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+
+  const resultEvent: RuntimeEvent = {
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: randomUUID(),
+        assignmentId: bootstrap.initialAssignmentId,
+        producerId: "worker-1",
+        status: "completed",
+        summary: "Direct recovery service repair.",
+        changedFiles: ["src/persistence/projection-recovery.ts"],
+        createdAt: nowIso()
+      }
+    }
+  };
+  await store.appendEvent(resultEvent);
+  await writeFile(store.eventsPath, `${await readFile(store.eventsPath, "utf8")}{"broken":\n`, "utf8");
+
+  const warning = await service.repairEventLog();
+  const repairedEvents = (await readFile(store.eventsPath, "utf8")).split("\n").filter(Boolean);
+  const recovered = await service.loadProjectionWithRecovery();
+
+  assert.match(warning ?? "", /Rewrote .*events\.ndjson with \d+ replayable event\(s\)\./);
+  assert.equal(repairedEvents.length, bootstrap.events.length + 1);
+  assert.equal(recovered.snapshotFallback, false);
+  assert.equal(recovered.projection.results.size, 1);
+  assert.equal(
+    recovered.projection.results.get(resultEvent.payload.result.resultId)?.summary,
+    "Direct recovery service repair."
+  );
 });
 
 test("runtime store appendEvents preserves concurrent batch writers", async () => {
@@ -170,7 +228,7 @@ test("runtime store repair serializes with concurrent appenders", async () => {
     }
   };
 
-  const originalLoadProjectionWithRecovery = store.loadProjectionWithRecovery.bind(store);
+  const originalLoadEventLines = store.loadEventLines.bind(store);
   let releaseRecovery!: () => void;
   const recoveryReleased = new Promise<void>((resolve) => {
     releaseRecovery = resolve;
@@ -181,14 +239,14 @@ test("runtime store repair serializes with concurrent appenders", async () => {
   });
   let blocked = false;
   (store as RuntimeStore & {
-    loadProjectionWithRecovery: RuntimeStore["loadProjectionWithRecovery"];
-  }).loadProjectionWithRecovery = async () => {
+    loadEventLines: RuntimeStore["loadEventLines"];
+  }).loadEventLines = async () => {
     if (!blocked) {
       blocked = true;
       signalRecoveryEntered();
       await recoveryReleased;
     }
-    return originalLoadProjectionWithRecovery();
+    return originalLoadEventLines();
   };
 
   const syncPromise = store.syncSnapshotFromEventsWithRecovery();
@@ -198,8 +256,8 @@ test("runtime store repair serializes with concurrent appenders", async () => {
 
   await Promise.all([syncPromise, appendPromise]);
   (store as RuntimeStore & {
-    loadProjectionWithRecovery: RuntimeStore["loadProjectionWithRecovery"];
-  }).loadProjectionWithRecovery = originalLoadProjectionWithRecovery;
+    loadEventLines: RuntimeStore["loadEventLines"];
+  }).loadEventLines = originalLoadEventLines;
 
   const recovered = await store.loadProjectionWithRecovery();
   const replayedResult = [...recovered.projection.results.values()].find((result) => result.resultId === resultId);

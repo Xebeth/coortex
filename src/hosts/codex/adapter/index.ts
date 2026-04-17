@@ -23,7 +23,9 @@ import {
 import { HostRunStore, type HostRunArtifactPaths } from "../../../adapters/host-run-store.js";
 import {
   executeHostResumeSession,
-  executeHostRunSession
+  executeHostRunSession,
+  type HostRunHandle,
+  type HostRunSessionTracking
 } from "../../../adapters/host-run-session.js";
 import type {
   DecisionPacket,
@@ -44,11 +46,12 @@ import type { CodexPaths } from "./types.js";
 import { writeCodexKernel } from "../kernel/static.js";
 import { CodexProfileManager } from "../profile/manager.js";
 import {
-    DefaultCodexCommandRunner,
-    type CodexCommandRunner,
-    type CodexExecResult,
-    type RunningExec
-  } from "./cli.js";
+  DefaultCodexCommandRunner,
+  type CodexCommandRunner,
+  type CodexExecResult,
+  type CodexResumeInput,
+  type RunningExec
+} from "./cli.js";
 import {
   buildCodexExecutionPrompt,
   codexExecutionOutputSchema
@@ -126,6 +129,34 @@ export class CodexAdapter implements HostAdapter {
 
   private runStore(store: RuntimeArtifactStore): HostRunStore {
     return new HostRunStore(store, this.id, this.runArtifacts());
+  }
+
+  private hostSessionTracking<TExecution extends { exitCode: number }>(): HostRunSessionTracking<TExecution> {
+    return {
+      setActiveRun: (run) => {
+        this.activeRun = run as RunningExec | undefined;
+      },
+      setActiveExecutionSettled: (settled) => {
+        this.activeExecutionSettled = settled;
+      }
+    };
+  }
+
+  private async startResumeHandle(
+    input: CodexResumeInput
+  ): Promise<HostRunHandle<CodexExecResult>> {
+    if (this.runner.startResume) {
+      return this.runner.startResume(input);
+    }
+    const resumeExecution = this.runner.runResume!(input);
+    return {
+      result: resumeExecution,
+      terminate: async () => undefined,
+      waitForExit: async () => {
+        const execution = await resumeExecution;
+        return { code: execution.exitCode };
+      }
+    };
   }
 
   async initialize(store: RuntimeArtifactStore, _projection: RuntimeProjection): Promise<void> {
@@ -277,12 +308,7 @@ export class CodexAdapter implements HostAdapter {
       ...(lifecycle?.onSessionIdentity
         ? { onSessionIdentity: lifecycle.onSessionIdentity }
         : {}),
-      setActiveRun: (run) => {
-        this.activeRun = run as RunningExec | undefined;
-      },
-      setActiveExecutionSettled: (settled) => {
-        this.activeExecutionSettled = settled;
-      }
+      ...this.hostSessionTracking<CodexExecResult>()
     });
   }
 
@@ -373,20 +399,7 @@ export class CodexAdapter implements HostAdapter {
       runRecord: runningRecord,
       leaseMs,
       heartbeatMs,
-      startRun: async () => {
-        if (this.runner.startResume) {
-          return this.runner.startResume(executionInput);
-        }
-        const resumeExecution = this.runner.runResume!(executionInput);
-        return {
-          result: resumeExecution,
-          terminate: async () => undefined,
-          waitForExit: async () => {
-            const execution = await resumeExecution;
-            return { code: execution.exitCode };
-          }
-        };
-      },
+      startRun: async () => this.startResumeHandle(executionInput),
       deriveCompleted: async (execution) => {
         const completed = await deriveCodexExecutionCompletion(
           assignmentId,
@@ -403,12 +416,7 @@ export class CodexAdapter implements HostAdapter {
       getVerifiedSessionId: () => verifiedSessionId,
       summarizeExecutionFailure: summarizeExecutionError,
       summarizeVerificationFailure: summarizeResumeVerificationFailure,
-      setActiveRun: (run) => {
-        this.activeRun = run as RunningExec | undefined;
-      },
-      setActiveExecutionSettled: (settled) => {
-        this.activeExecutionSettled = settled;
-      }
+      ...this.hostSessionTracking<CodexExecResult>()
     });
   }
 

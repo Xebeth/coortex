@@ -6,6 +6,7 @@ import {
   MalformedHostRunLeaseArtifactError,
   type HostRunArtifactPaths
 } from "../adapters/host-run-store.js";
+import { HostRunLeaseRepository } from "../adapters/host-run-lease-repository.js";
 import type { RuntimeArtifactStore } from "../adapters/contract.js";
 import type { HostRunRecord } from "../core/types.js";
 
@@ -89,6 +90,54 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
     return `v${this.versionCounter}`;
   }
 }
+
+test("host run lease repository exposes durable missing, valid, and malformed lease facts", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const repository = new HostRunLeaseRepository(store, "custom", artifacts);
+  const validLease: HostRunRecord = {
+    assignmentId: "assignment-valid",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+
+  await store.writeJsonArtifact(artifacts.runLeasePath(validLease.assignmentId), validLease);
+  await store.writeTextArtifact(artifacts.runLeasePath("assignment-malformed"), "{");
+
+  assert.equal((await repository.readLease("assignment-missing")).state, "missing");
+
+  const readValidLease = await repository.readLease(validLease.assignmentId);
+  assert.equal(readValidLease.state, "valid");
+  assert.deepEqual(readValidLease.record, validLease);
+
+  const malformedLease = await repository.readLease("assignment-malformed");
+  assert.equal(malformedLease.state, "malformed");
+  assert.equal(malformedLease.raw, "{");
+});
+
+test("host run lease repository preserves malformed last-run pointers as typed facts", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const repository = new HostRunLeaseRepository(store, "custom", artifacts);
+
+  await store.writeTextArtifact(artifacts.lastRunPath(), "{");
+
+  const pointer = await repository.readLastRunPointer();
+
+  assert.equal(pointer.state, "malformed");
+  assert.equal(pointer.raw, "{");
+  assert.equal(await repository.inspect(), undefined);
+});
 
 test("host run store uses adapter-provided artifact roles instead of codex paths", async () => {
   const store = new MemoryArtifactStore();

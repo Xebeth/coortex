@@ -922,6 +922,111 @@ test("codex adapter terminates a spawned run if the initial lease refresh fails"
   assert.equal(waitForExitCalls, 1);
 });
 
+test("codex adapter terminates a spawned resume if the initial lease refresh fails", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-refresh-failure-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const assignmentId = bootstrap.initialAssignmentId;
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  let runningWriteCount = 0;
+  (store as RuntimeStore & {
+    writeJsonArtifact: RuntimeStore["writeJsonArtifact"];
+  }).writeJsonArtifact = async (artifactPath, value) => {
+    if (
+      artifactPath === `adapters/codex/runs/${assignmentId}.json` &&
+      typeof value === "object" &&
+      value !== null &&
+      "state" in value &&
+      value.state === "running"
+    ) {
+      runningWriteCount += 1;
+      if (runningWriteCount === 2) {
+        throw new Error("simulated resume refresh failure");
+      }
+    }
+    return originalWriteJsonArtifact(artifactPath, value);
+  };
+
+  let terminateSignals: Array<"graceful" | "force" | undefined> = [];
+  let waitForExitCalls = 0;
+  let rejectResult!: (error: Error) => void;
+  const result = new Promise<{ exitCode: number; stdout: string; stderr: string }>((_, reject) => {
+    rejectResult = reject;
+  });
+  void result.catch(() => undefined);
+
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in wrapped resume refresh failure coverage");
+    },
+    async startResume() {
+      return {
+        result,
+        terminate: async (signal) => {
+          terminateSignals.push(signal);
+          queueMicrotask(() => {
+            rejectResult(new Error("terminated after resume refresh failure"));
+          });
+        },
+        waitForExit: async () => {
+          waitForExitCalls += 1;
+          return { code: 1 };
+        }
+      };
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  await adapter.initialize(store, projection);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession!(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-refresh-failure",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(resumeResult.reclaimed, false);
+  assert.equal(resumeResult.reclaimState, "unverified_failed");
+  assert.match(resumeResult.warning ?? "", /simulated resume refresh failure/i);
+  assert.deepEqual(terminateSignals, ["graceful"]);
+  assert.equal(waitForExitCalls, 1);
+});
+
 test("codex adapter serializes run-record writes so heartbeat updates do not drop the thread handle", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-serialized-"));
   const store = RuntimeStore.forProject(projectRoot);

@@ -6,6 +6,7 @@ import {
   executeHostRunSession,
   type HostRunHandle
 } from "../adapters/host-run-session.js";
+import { HostRunSessionCoordinator } from "../adapters/host-run-session-coordinator.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../adapters/host-run-store.js";
 import type { RuntimeArtifactStore } from "../adapters/contract.js";
 import { createRunningRunRecord } from "../adapters/host-run-records.js";
@@ -82,6 +83,124 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
     return `v${this.versionCounter}`;
   }
 }
+
+test("host-run session coordinator records native run id persistence warnings", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-coordinator-warning";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (
+      relativePath === artifacts.runLeasePath(assignmentId) &&
+      typeof value === "object" &&
+      value !== null &&
+      "adapterData" in value
+    ) {
+      throw new Error("simulated coordinator metadata failure");
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  try {
+    const coordinator = new HostRunSessionCoordinator<{ exitCode: number }>({
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 5_000,
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    const persisted = await coordinator.persistNativeRunId("native-coordinator-warning");
+
+    assert.equal(persisted, false);
+    assert.equal(coordinator.nativeRunId(), undefined);
+    assert.match(
+      coordinator.collectWarnings() ?? "",
+      /Host run metadata persistence failed during thread-start handling/
+    );
+  } finally {
+    store.writeJsonArtifact = originalWriteJsonArtifact;
+  }
+});
+
+test("host-run session coordinator tracks active handles and settled state", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-coordinator-tracking";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  let resolveExecution!: (execution: { exitCode: number }) => void;
+  const executionResult = new Promise<{ exitCode: number }>((resolve) => {
+    resolveExecution = resolve;
+  });
+  const activeRuns: Array<HostRunHandle<{ exitCode: number }> | undefined> = [];
+  const settledStates: Array<Promise<void> | undefined> = [];
+  const running: HostRunHandle<{ exitCode: number }> = {
+    result: executionResult,
+    terminate: async () => undefined,
+    waitForExit: async () => ({ code: 0 })
+  };
+
+  try {
+    const coordinator = new HostRunSessionCoordinator<{ exitCode: number }>({
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 5_000,
+      setActiveRun: (run) => {
+        activeRuns.push(run);
+      },
+      setActiveExecutionSettled: (settled) => {
+        settledStates.push(settled);
+      }
+    });
+
+    const executionPromise = coordinator.execute({
+      startRun: async () => running,
+      onRuntimeFailure: async (error) => {
+        throw error;
+      },
+      onExecutionCompleted: async (execution) => execution.exitCode,
+      onPostExitFailure: async (error) => {
+        throw error;
+      }
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(activeRuns[0], running);
+    assert.equal(settledStates[0] instanceof Promise, true);
+
+    resolveExecution({ exitCode: 0 });
+    assert.equal(await executionPromise, 0);
+    assert.equal(activeRuns.at(-1), undefined);
+    assert.equal(settledStates.at(-1), undefined);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
 
 test("host-run session matrix keeps completed state authoritative after a queued heartbeat callback", async () => {
   const store = new MemoryArtifactStore();
