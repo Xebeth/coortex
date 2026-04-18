@@ -9,3 +9,8 @@ export interface CodexConfigInstallation {
   configPath: string;
   modelInstructionsFile: string;
 }
+
+export interface CodexSkillPackInstallation {
+  skillsRoot: string;
+  managedSkills: string[];
+}

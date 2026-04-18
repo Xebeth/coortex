@@ -33,6 +33,7 @@ The Codex adapter is responsible for:
 
 - generating or validating the Coortex Codex profile
 - generating the stable kernel instruction file for Codex
+- installing the Coortex-managed Codex review skill pack into project-local `.codex/skills`
 - building bounded task envelopes for Codex runs
 - mapping Codex-native execution results into Coortex runtime artifacts
 - normalizing Codex-native telemetry into the Coortex telemetry model
@@ -50,6 +51,7 @@ The default Codex profile must remain unchanged.
 The Coortex-specific Codex profile may manage:
 
 - `model_instructions_file`
+- the Coortex-managed review skill pack installed into project-local `.codex/skills`
 - Coortex-specific developer instructions if needed
 - Coortex-specific environment/config placeholders
 - later host-specific hooks or MCP registration if required

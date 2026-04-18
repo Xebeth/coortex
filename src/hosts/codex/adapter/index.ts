@@ -33,6 +33,7 @@ import { buildTaskEnvelope } from "./envelope.js";
 import type { CodexPaths } from "./types.js";
 import { writeCodexKernel } from "../kernel/static.js";
 import { CodexProfileManager } from "../profile/manager.js";
+import { CodexSkillPackManager } from "../profile/skill-pack.js";
 import {
   DefaultCodexCommandRunner,
   type CodexCommandRunner,
@@ -117,7 +118,9 @@ export class CodexAdapter implements HostAdapter {
     await writeCodexKernel(paths.kernelPath);
 
     const profileManager = new CodexProfileManager(store);
+    const skillPackManager = new CodexSkillPackManager(store);
     await profileManager.install(paths.kernelPath);
+    await skillPackManager.install();
     await store.writeJsonArtifact(`adapters/${this.id}/capabilities.json`, this.getCapabilities());
     await store.writeJsonArtifact(`adapters/${this.id}/exec-output-schema.json`, codexExecutionOutputSchema());
   }
@@ -125,6 +128,7 @@ export class CodexAdapter implements HostAdapter {
   async doctor(store: RuntimeArtifactStore): Promise<DoctorCheck[]> {
     const paths = this.paths(store);
     const profileManager = new CodexProfileManager(store);
+    const skillPackManager = new CodexSkillPackManager(store);
 
     return [
       {
@@ -142,7 +146,8 @@ export class CodexAdapter implements HostAdapter {
         ok: true,
         detail: this.options.dangerouslyBypassApprovalsAndSandbox === true ? "enabled" : "disabled"
       },
-      await profileManager.doctor()
+      await profileManager.doctor(),
+      await skillPackManager.doctor()
     ];
   }
 

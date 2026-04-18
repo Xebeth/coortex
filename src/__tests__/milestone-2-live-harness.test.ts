@@ -52,11 +52,14 @@ liveHarness(
       assert.match(stdout(init), /Initialized Coortex runtime/);
       assert.match(stdout(doctor), /OK config/);
       assert.match(stdout(doctor), /OK codex-kernel/);
+      assert.match(stdout(doctor), /OK codex-skill-pack/);
       assert.match(stdout(doctor), /OK codex-exec-schema/);
       assert.ok(snapshot);
       await assertPathExists(join(projectRoot, ".coortex", "adapters", "codex", "kernel.md"));
       await assertPathExists(join(projectRoot, ".coortex", "adapters", "codex", "profile.json"));
+      await assertPathExists(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"));
       await assertPathExists(join(projectRoot, ".codex", "config.toml"));
+      await assertPathExists(join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"));
     });
 
     await t.test("happy path real run persists result, status, inspect, and telemetry", async () => {

@@ -954,11 +954,17 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     env
   });
   assert.match(doctor.stdout, /OK codex-profile/);
+  assert.match(doctor.stdout, /OK codex-skill-pack/);
   assert.match(doctor.stdout, /OK codex-exec-schema/);
   assert.match(doctor.stdout, /OK codex-danger-mode disabled/);
 
   const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
   assert.match(codexConfig, /model_instructions_file = "/);
+  const reviewFixerSkill = await readFile(
+    join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"),
+    "utf8"
+  );
+  assert.match(reviewFixerSkill, /Review Fixer/);
 
   const envelope = await readFile(
     join(projectRoot, ".coortex", "runtime", "last-resume-envelope.json"),
