@@ -34,7 +34,8 @@ Worker type:
 - keep the lane prompt task-scoped and omit redundant meta-role disclaimers
 - do not substitute `explorer` or `worker` for final review output
 
-Use the configured lenses for that surface.
+Pass the configured surface lenses through unchanged. The lane skill owns the
+meaning of each built-in lens id.
 
 Scheduling:
 - if coverage lanes exceed current subagent capacity, run them in bounded waves

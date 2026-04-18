@@ -6,35 +6,36 @@ Use them as the starting catalog when configuring a project baseline.
 
 ## Built-in lenses
 
-- `authority`
-  - Check which layer owns truth and whether any other layer behaves authoritatively.
+These are the same built-in lens ids that `coortex-review-lane` understands at
+runtime. A baseline should configure a small ordered subset of them per
+surface.
 
-- `lifecycle`
-  - Check whether states and transitions form one coherent model across side paths.
+- `goal-fidelity`
+  - Check requested behavior, closure-gate requirements, and review-handoff
+    claims before style or cleanup concerns.
 
-- `recovery`
-  - Check interruption, replay, fallback, and durability behavior.
+- `qa-execution`
+  - Check runnable behavior, failure paths, and executable evidence when the
+    review surface or lane explicitly needs execution-backed confidence.
 
-- `soc`
-  - Check separation of concerns and boundary hygiene.
+- `quality`
+  - Check logic correctness, maintainability, boundary hygiene, and pattern
+    consistency inside the bounded surface.
 
-- `contract`
-  - Check whether types, APIs, specs, and invariants model the real behavior.
+- `security`
+  - Check security risks and trust-boundary mistakes only.
 
-- `operator-truth`
-  - Check whether user-facing review surfaces reflect reconciled truth instead of raw internals.
+- `api-contract`
+  - Check public contract compatibility, error semantics, and downstream caller
+    impact.
 
-- `defect-family`
-  - Check whether a finding is one manifestation of a broader root cause.
+- `performance`
+  - Check hot-path or algorithmic risks that materially affect the bounded
+    review scope.
 
-- `duplication`
-  - Check for duplicate logic, split-brain paths, and drift between nearby implementations.
-
-- `intent-drift`
-  - Check whether a module or subsystem has mutated beyond its intended role.
-
-- `docs-tests`
-  - Check whether docs and tests reinforce or miss the actual contract.
+- `context-history`
+  - Check nearby sibling paths, docs, adjacent callers, and relevant history to
+    judge whether the root cause is wider than the immediate diff.
 
 ## Configuration guidance
 

@@ -52,9 +52,12 @@ surfaces:
       - "docs/runtime-state-model.md"
       - "docs/architecture.md"
     configured_builtin_lenses:
-      - lens_id: "authority"
+      - lens_id: "goal-fidelity"
         priority: "high"
-        reason: "recovery must preserve owned truth"
+        reason: "recovery must preserve the documented invariants and closure conditions"
+      - lens_id: "context-history"
+        priority: "medium"
+        reason: "nearby recovery/reconcile paths must stay aligned"
     configured_custom_lenses:
       - id: "reclaim-symmetry"
         name: "Reclaim Symmetry"
@@ -95,7 +98,9 @@ surfaces:
     contract_docs:
       - "docs/runtime-state-model.md"
     configured_builtin_lenses:
-      - lens_id: "authority"
+      - lens_id: "goal-fidelity"
+        priority: "high"
+      - lens_id: "context-history"
         priority: "high"
     configured_custom_lenses: []
 ```

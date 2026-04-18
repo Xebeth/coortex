@@ -66,6 +66,9 @@ When a project has recurring narrow review modes, this skill may also write stan
 ## Lens Configuration
 
 - Use the built-in lens catalog from `references/lens-catalog.md`.
+- Treat those built-in lens ids as Coortex runtime concerns, not just labels.
+  `review-baseline` chooses the ordered lens bundle per surface, and
+  `coortex-review-lane` supplies the actual review behavior for those ids.
 - Ask the user which built-in lenses matter most for each surface.
 - Allow custom lenses when the built-ins are not sufficient.
 - For each custom lens, use the shape required by `references/baseline-schema.md`.
