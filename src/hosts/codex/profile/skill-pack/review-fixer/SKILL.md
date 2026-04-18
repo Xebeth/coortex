@@ -32,7 +32,7 @@ owning seam rather than patching the nearest manifestation.
 9. Verify the fix.
 10. Before moving to a different family, emit a short family closeout checkpoint.
 11. Report family closure and emit a mandatory `review_return_handoff`.
-11a. Run the bundled result-state helper against the final `review_return_handoff` before finalizing.
+11a. Serialize the machine handoff blocks to JSON and run the bundled result-state helper against the final `review_return_handoff` before finalizing.
 12. Append the final trace records on disk.
 
 ## Hard Rules
@@ -72,7 +72,7 @@ owning seam rather than patching the nearest manifestation.
 - Do not use `explorer` as the final repair worker for any lane.
 - Do not rely on inherited thread context for repair lanes. Pass only the scoped family/slice prompt plus the relevant `review_handoff` and closure-gate data.
 - Always emit a `review_return_handoff`. Do not rely on fixer self-audit as the terminal acceptance step.
-- Use the bundled `scripts/fix_result_state.py` helper to validate the final `review_return_handoff` and deferred-family structure before finalizing.
+- Use the bundled `scripts/fix_result_state.py` helper to validate the final `review_return_handoff` and deferred-family structure before finalizing. Serialize the relevant handoff blocks to JSON before invoking it.
 - Use the bundled `scripts/fix_result_state.py` helper for deterministic trace path/file handling as well as final handoff validation. Keep the model focused on repair judgments and evidence.
 - Do not write a full transcript or chain-of-thought trace. Persist only phase-boundary operational trace records and observable repair/verification actions.
 - Keep detailed trace data on disk. Do not serialize trace internals into `review_return_handoff` or normal final output unless the user explicitly asks for trace details.

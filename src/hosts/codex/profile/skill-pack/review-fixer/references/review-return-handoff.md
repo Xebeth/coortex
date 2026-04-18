@@ -6,6 +6,7 @@ independent targeted re-review.
 Validate the finished handoff with the bundled helper before finalizing:
 
 ```bash
+# Serialize the handoff blocks to JSON before validating them.
 python scripts/fix_result_state.py validate-review-return \
   --review-return-handoff <path> \
   --review-handoff <path>

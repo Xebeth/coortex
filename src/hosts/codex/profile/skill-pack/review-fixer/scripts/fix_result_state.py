@@ -8,12 +8,6 @@ import pathlib
 import re
 from typing import Any
 
-try:
-    import yaml
-except ImportError as exc:  # pragma: no cover - dependency failure path
-    raise SystemExit("PyYAML is required to run fix_result_state.py") from exc
-
-
 CLOSURE_STATUSES = {
     "symptom-fixed-only",
     "family-partially-closed",
@@ -68,8 +62,8 @@ FIXER_ORIENTED_ACTION_PATTERNS = (
 )
 
 
-def load_yaml_like(path: pathlib.Path) -> dict[str, Any]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+def load_json_object(path: pathlib.Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise SystemExit(f"{path} did not parse to a mapping")
     return data
@@ -283,10 +277,10 @@ def validate_deferred_family(
 
 
 def validate_review_return(args: argparse.Namespace) -> int:
-    data = unwrap_root(load_yaml_like(pathlib.Path(args.review_return_handoff)), "review_return_handoff")
+    data = unwrap_root(load_json_object(pathlib.Path(args.review_return_handoff)), "review_return_handoff")
     review_data: dict[str, Any] | None = None
     if args.review_handoff:
-        review_data = unwrap_root(load_yaml_like(pathlib.Path(args.review_handoff)), "review_handoff")
+        review_data = unwrap_root(load_json_object(pathlib.Path(args.review_handoff)), "review_handoff")
 
     errors: list[str] = []
     warnings: list[str] = []
@@ -458,11 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--review-return-handoff",
         required=True,
-        help="Path to the review_return_handoff YAML/JSON file.",
+        help="Path to the review_return_handoff JSON file.",
     )
     validate.add_argument(
         "--review-handoff",
-        help="Optional path to the original review_handoff YAML/JSON file for family-id mapping checks.",
+        help="Optional path to the original review_handoff JSON file for family-id mapping checks.",
     )
     validate.set_defaults(func=validate_review_return)
 

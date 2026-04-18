@@ -9,14 +9,8 @@ import pathlib
 import re
 from typing import Any
 
-try:
-    import yaml
-except ImportError as exc:  # pragma: no cover - dependency failure path
-    raise SystemExit("PyYAML is required to run return_review_state.py") from exc
-
-
-def load_yaml_like(path: pathlib.Path) -> dict[str, Any]:
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+def load_json_object(path: pathlib.Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise SystemExit(f"{path} did not parse to a mapping")
     return data
@@ -265,8 +259,8 @@ def current_run_reopens(args: argparse.Namespace) -> int:
 
 
 def classify_deferred(args: argparse.Namespace) -> int:
-    review_data = unwrap_root(load_yaml_like(pathlib.Path(args.review_handoff)), "review_handoff")
-    return_data = unwrap_root(load_yaml_like(pathlib.Path(args.review_return_handoff)), "review_return_handoff")
+    review_data = unwrap_root(load_json_object(pathlib.Path(args.review_handoff)), "review_handoff")
+    return_data = unwrap_root(load_json_object(pathlib.Path(args.review_return_handoff)), "review_return_handoff")
 
     families = review_data.get("families")
     if not isinstance(families, list):
@@ -404,8 +398,8 @@ def classify_deferred(args: argparse.Namespace) -> int:
 
 
 def build_carried_handoff(args: argparse.Namespace) -> int:
-    review_data = unwrap_root(load_yaml_like(pathlib.Path(args.review_handoff)), "review_handoff")
-    return_data = unwrap_root(load_yaml_like(pathlib.Path(args.review_return_handoff)), "review_return_handoff")
+    review_data = unwrap_root(load_json_object(pathlib.Path(args.review_handoff)), "review_handoff")
+    return_data = unwrap_root(load_json_object(pathlib.Path(args.review_return_handoff)), "review_return_handoff")
     classification_data = json.loads(pathlib.Path(args.classification_json).read_text(encoding="utf-8"))
 
     families = review_data.get("families")
@@ -468,11 +462,11 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
         }
     }
 
-    rendered = yaml.safe_dump(output, sort_keys=False)
+    rendered = json.dumps(output, indent=2, sort_keys=False)
     if args.output:
-        pathlib.Path(args.output).write_text(rendered, encoding="utf-8")
+        pathlib.Path(args.output).write_text(f"{rendered}\n", encoding="utf-8")
     else:
-        print(rendered, end="")
+        print(rendered)
 
     if args.summary:
         print(
@@ -565,11 +559,11 @@ def build_parser() -> argparse.ArgumentParser:
         "classify-deferred",
         help="Validate and classify fixer-reported deferred families against the original review handoff and changed files.",
     )
-    classify.add_argument("--review-handoff", required=True, help="Path to the review_handoff YAML/JSON file.")
+    classify.add_argument("--review-handoff", required=True, help="Path to the review_handoff JSON file.")
     classify.add_argument(
         "--review-return-handoff",
         required=True,
-        help="Path to the review_return_handoff YAML/JSON file.",
+        help="Path to the review_return_handoff JSON file.",
     )
     classify.add_argument(
         "--changed-file",
