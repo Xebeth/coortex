@@ -55,6 +55,9 @@ These match the built-in lens ids configured by `review-baseline` and used by
   - inspect externally visible contract compatibility and caller impact
 - `performance`
   - inspect only material hot-path or algorithmic risks in scope
+- `portability`
+  - inspect platform, filesystem, shell, path, and repo-layout assumptions
+    that could break behavior across environments or host setups
 - `context-history`
   - inspect sibling paths, adjacent callers, docs, and relevant history needed
     to judge whether the root cause is wider than the immediate diff

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import copy
 from datetime import datetime, timezone
+import fnmatch
 import json
 import pathlib
 import re
@@ -69,6 +70,25 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     },
 }
 
+KNOWN_RUNTIME_FOCUS_TOKENS = {
+    "goal-fidelity",
+    "qa-execution",
+    "quality",
+    "security",
+    "api-contract",
+    "performance",
+    "portability",
+    "context-history",
+    "soc",
+}
+
+FOCUS_ALIASES = {
+    "separation-of-concerns": "soc",
+    "separation_of_concerns": "soc",
+    "separation of concerns": "soc",
+    "separation-concerns": "soc",
+}
+
 def load_json_object(path: pathlib.Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -94,6 +114,26 @@ def normalize_string_list(value: Any) -> list[str]:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "item"
+
+
+def normalize_focus_token(value: str) -> str:
+    raw = value.strip().lower()
+    return FOCUS_ALIASES.get(raw, raw.replace("_", "-").replace(" ", "-"))
+
+
+def normalize_project_path(value: str) -> str:
+    path = value.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path.rstrip("/") if path not in {"", "/"} else path
+
+
+def wildcard_kind(value: str) -> str:
+    if not any(char in value for char in "*?["):
+        return "exact"
+    if value.endswith("/**") and value.count("*") == 2 and "?" not in value and "[" not in value:
+        return "tree"
+    return "unsupported"
 
 
 def default_run_id(mode: str) -> str:
@@ -697,6 +737,206 @@ def normalize_carried_open_reason(
     return "family-local-gap-remaining"
 
 
+def anchored_patterns(surface: dict[str, Any]) -> list[str]:
+    return normalize_string_list(surface.get("primary_anchors")) + normalize_string_list(
+        surface.get("supporting_anchors")
+    )
+
+
+def path_subset_supported(path_subset: str) -> bool:
+    return wildcard_kind(path_subset) in {"exact", "tree"}
+
+
+def anchor_contains_path_subset(anchor: str, path_subset: str) -> bool:
+    anchor_norm = normalize_project_path(anchor)
+    subset_norm = normalize_project_path(path_subset)
+    anchor_kind = wildcard_kind(anchor_norm)
+    subset_kind = wildcard_kind(subset_norm)
+
+    if subset_kind == "unsupported":
+        return False
+
+    if subset_kind == "exact":
+        if anchor_kind == "exact":
+            return subset_norm == anchor_norm
+        if anchor_kind == "tree":
+            anchor_prefix = anchor_norm[:-3].rstrip("/")
+            return (
+                subset_norm == anchor_prefix
+                or subset_norm.startswith(anchor_prefix + "/")
+            )
+        return fnmatch.fnmatchcase(subset_norm, anchor_norm)
+
+    if subset_kind == "tree":
+        subset_prefix = subset_norm[:-3].rstrip("/")
+        if anchor_kind == "tree":
+            anchor_prefix = anchor_norm[:-3].rstrip("/")
+            return subset_prefix == anchor_prefix or subset_prefix.startswith(anchor_prefix + "/")
+        return False
+
+    return False
+
+
+def resolve_surface_reference(
+    surface_value: str | None,
+    surfaces: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    if not surface_value:
+        return None, []
+
+    requested = normalize_focus_token(surface_value)
+    matches = [
+        surface
+        for surface in surfaces
+        if requested in {
+            normalize_focus_token(str(surface.get("id") or "")),
+            normalize_focus_token(str(surface.get("name") or "")),
+        }
+    ]
+    if not matches:
+        return None, [f"requested surface {surface_value!r} does not match any baseline surface"]
+    if len(matches) > 1:
+        return None, [f"requested surface {surface_value!r} matched multiple baseline surfaces"]
+    return matches[0], []
+
+
+def configured_focus_tokens(surface: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for lens in surface.get("configured_builtin_lenses", []):
+        if isinstance(lens, dict) and lens.get("lens_id"):
+            tokens.add(normalize_focus_token(str(lens["lens_id"])))
+    for lens in surface.get("configured_custom_lenses", []):
+        if isinstance(lens, dict):
+            if lens.get("id"):
+                tokens.add(normalize_focus_token(str(lens["id"])))
+            if lens.get("name"):
+                tokens.add(normalize_focus_token(str(lens["name"])))
+    return tokens
+
+
+def validate_full_review_narrowing(args: argparse.Namespace) -> int:
+    baseline_data = load_json_object(pathlib.Path(args.baseline_json))
+    surfaces = baseline_data.get("surfaces")
+    if not isinstance(surfaces, list) or not surfaces:
+        raise SystemExit("baseline_json.surfaces must be a non-empty list")
+
+    valid_surfaces = [surface for surface in surfaces if isinstance(surface, dict)]
+    if not valid_surfaces:
+        raise SystemExit("baseline_json.surfaces must contain surface mappings")
+
+    errors: list[str] = []
+
+    explicit_surface, surface_errors = resolve_surface_reference(args.surface, valid_surfaces)
+    errors.extend(surface_errors)
+
+    path_subset = normalize_project_path(args.path_subset) if args.path_subset else None
+    if path_subset and not path_subset_supported(path_subset):
+        errors.append(
+            "path_subset must be a project-relative file path, directory path, or a recursive directory glob ending in /**"
+        )
+
+    matching_surfaces: list[dict[str, Any]] = []
+    if path_subset:
+        matching_surfaces = [
+            surface
+            for surface in valid_surfaces
+            if any(anchor_contains_path_subset(anchor, path_subset) for anchor in anchored_patterns(surface))
+        ]
+        if not matching_surfaces:
+            errors.append(f"path_subset {path_subset!r} does not fit inside any baseline surface anchors")
+
+    selected_surface = explicit_surface
+    if selected_surface and path_subset:
+        if not any(surface is selected_surface for surface in matching_surfaces):
+            errors.append(
+                f"path_subset {path_subset!r} does not fit inside the requested surface {selected_surface.get('id')!r}"
+            )
+        elif len(matching_surfaces) > 1:
+            errors.append(
+                f"path_subset {path_subset!r} overlaps multiple baseline surfaces and cannot be used as a clean run-local narrowing"
+            )
+    elif not selected_surface and path_subset:
+        if len(matching_surfaces) == 1:
+            selected_surface = matching_surfaces[0]
+        elif len(matching_surfaces) > 1:
+            errors.append(
+                f"path_subset {path_subset!r} overlaps multiple baseline surfaces and needs an explicit surface or baseline refresh"
+            )
+
+    if not selected_surface and not args.surface and not path_subset:
+        errors.append("run-local narrowing requires a resolvable surface, a path_subset, or both")
+
+    normalized_focus = [normalize_focus_token(value) for value in normalize_string_list(args.focus)]
+    if selected_surface:
+        surface_focus_tokens = configured_focus_tokens(selected_surface)
+        invalid_focus = [
+            token
+            for token in normalized_focus
+            if token not in surface_focus_tokens and token not in KNOWN_RUNTIME_FOCUS_TOKENS
+        ]
+        if invalid_focus:
+            errors.append(
+                "focus override contains unsupported token(s): " + ", ".join(sorted(set(invalid_focus)))
+            )
+    elif normalized_focus:
+        errors.append("focus override requires a resolved narrowed surface")
+
+    if errors:
+        print(
+            json.dumps(
+                {
+                    "mode": "full-discovery-review",
+                    "narrowing_valid": False,
+                    "errors": errors,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
+
+    assert selected_surface is not None
+    selected_surface_id = str(selected_surface.get("id") or "")
+    selected_surface_name = str(selected_surface.get("name") or "")
+    selected_builtin_lenses = [
+        normalize_focus_token(str(lens.get("lens_id")))
+        for lens in selected_surface.get("configured_builtin_lenses", [])
+        if isinstance(lens, dict) and lens.get("lens_id")
+    ]
+    selected_custom_lenses = [
+        normalize_focus_token(str(lens.get("id") or lens.get("name")))
+        for lens in selected_surface.get("configured_custom_lenses", [])
+        if isinstance(lens, dict) and (lens.get("id") or lens.get("name"))
+    ]
+    configured_tokens = configured_focus_tokens(selected_surface)
+    configured_focus = [token for token in normalized_focus if token in configured_tokens]
+    run_local_focus = [token for token in normalized_focus if token not in configured_tokens]
+
+    output = {
+        "mode": "full-discovery-review",
+        "narrowing_valid": True,
+        "narrowing": {
+            "selected_surface_id": selected_surface_id,
+            "selected_surface_name": selected_surface_name,
+            "path_subset": path_subset,
+            "requested_focus": normalized_focus,
+            "configured_focus": configured_focus,
+            "run_local_focus": run_local_focus,
+            "configured_builtin_lenses": selected_builtin_lenses,
+            "configured_custom_lenses": selected_custom_lenses,
+        },
+    }
+    if path_subset:
+        output["narrowing"]["path_subset_match_basis"] = (
+            "path_subset resolved uniquely inside the selected baseline surface anchors"
+        )
+    elif args.surface:
+        output["narrowing"]["path_subset_match_basis"] = "surface-only narrowing"
+
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Deterministic helper for review-orchestrator targeted return-review state."
@@ -812,6 +1052,31 @@ def build_parser() -> argparse.ArgumentParser:
     carried.add_argument("--output")
     carried.add_argument("--summary", action="store_true")
     carried.set_defaults(func=build_carried_handoff)
+
+    narrowing = subparsers.add_parser(
+        "validate-full-review-narrowing",
+        help="Validate and normalize a run-local full-review narrowing override against the selected baseline.",
+    )
+    narrowing.add_argument(
+        "--baseline-json",
+        required=True,
+        help="Path to the selected baseline serialized to JSON.",
+    )
+    narrowing.add_argument(
+        "--surface",
+        help="Inferred baseline surface id or surface name to narrow to.",
+    )
+    narrowing.add_argument(
+        "--path-subset",
+        help="Project-relative file path, directory path, or recursive directory glob (dir/**) to narrow within the selected surface.",
+    )
+    narrowing.add_argument(
+        "--focus",
+        action="append",
+        default=[],
+        help="Run-local focus token. Repeat for multiple focuses.",
+    )
+    narrowing.set_defaults(func=validate_full_review_narrowing)
 
     return parser
 
