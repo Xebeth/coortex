@@ -371,6 +371,24 @@ def classify_deferred(args: argparse.Namespace) -> int:
                 "actual diff does not materially overlap the deferred family's likely paths and no handled blocker forces reevaluation"
             )
 
+        if (
+            classification == "carry-forward-without-lane"
+            and reason_kind == "user-scope-excluded"
+            and touch_state == "not-started"
+            and not overlap_files
+            and not owning_seam_touched
+            and not blocking_ids_in_slice
+        ):
+            actionability = "dormant-open-family"
+            actionability_reason = (
+                "family stayed open for visibility, but this slice explicitly excluded it and the current diff does not reactivate it"
+            )
+        else:
+            actionability = "actionable-for-next-fixer"
+            actionability_reason = (
+                "family remains suitable for the next fixer handoff under the current defer classification"
+            )
+
         results.append(
             {
                 "family_id": family_id,
@@ -378,6 +396,8 @@ def classify_deferred(args: argparse.Namespace) -> int:
                 "touch_state": touch_state,
                 "classification": classification,
                 "classification_reason": classification_reason,
+                "actionability": actionability,
+                "actionability_reason": actionability_reason,
                 "overlap_files": overlap_files,
                 "owning_seam_touched": owning_seam_touched,
                 "blocking_family_ids_in_slice": blocking_ids_in_slice,
@@ -429,10 +449,19 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
     include_classifications = set(args.include_classification or ["carry-forward-without-lane"])
     selected_families: list[dict[str, Any]] = []
     carried_ids: list[str] = []
+    dormant_ids: list[str] = []
     for result in raw_results:
         if not isinstance(result, dict):
             continue
         if result.get("classification") not in include_classifications:
+            continue
+        if (
+            result.get("actionability") == "dormant-open-family"
+            and not args.include_dormant
+        ):
+            family_id = str(result.get("family_id") or "")
+            if family_id:
+                dormant_ids.append(family_id)
             continue
         family_id = str(result.get("family_id") or "")
         if not family_id:
@@ -473,6 +502,7 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "family_ids_carried_forward": carried_ids,
+                    "family_ids_excluded_as_dormant": dormant_ids,
                     "output": args.output or "stdout",
                 },
                 indent=2,
@@ -588,6 +618,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-classification",
         action="append",
         help="Classification(s) to carry forward. Defaults to carry-forward-without-lane.",
+    )
+    carried.add_argument(
+        "--include-dormant",
+        action="store_true",
+        help="Also carry forward dormant still-open families that were explicitly excluded from the current slice.",
     )
     carried.add_argument("--output")
     carried.add_argument("--summary", action="store_true")
