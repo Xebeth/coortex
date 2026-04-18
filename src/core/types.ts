@@ -12,6 +12,7 @@ export interface Assignment {
   state: AssignmentState;
   createdAt: string;
   updatedAt: string;
+  lastStaleRunInstanceId?: string | undefined;
 }
 
 export interface ResultPacket {
@@ -51,6 +52,7 @@ export interface RuntimeStatus {
   activeAdapter: string;
   lastDurableOutputAt: string;
   resumeReady: boolean;
+  lastStaleRunInstanceId?: string | undefined;
 }
 
 export type AttachmentState =
@@ -172,6 +174,7 @@ export interface HostRunRecord {
   assignmentId: string;
   state: "running" | "completed";
   startedAt: string;
+  runInstanceId?: string;
   heartbeatAt?: string;
   leaseExpiresAt?: string;
   staleAt?: string;

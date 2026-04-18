@@ -111,6 +111,9 @@ rules:
 5. A running record with an expired lease is treated as stale.
 6. Malformed active-lease metadata with no valid completed run record is
    treated as stale running state so reconciliation can clear it.
+7. Shared inspection materialization must preserve that malformed-lease
+   blocker by default; callers must not need an opt-in flag to see the
+   same precedence that `status`, `resume`, and `run` rely on.
 
 ---
 
@@ -178,9 +181,10 @@ The operation must be idempotent. Re-running `status`, `resume`, or
 `run` after reconciliation must not repeatedly requeue the same stale
 run.
 
-Idempotence is a runtime-state guarantee, not a `currentObjective`
-string check. Once runtime events have durably moved the assignment back
-to `queued`, later benign `status.updated` drift must not cause the same
+Idempotence is a runtime-state guarantee keyed to a durable host-run
+instance identity, not a `currentObjective` string check or timestamp
+heuristic. Once runtime events have durably moved the assignment back to
+`queued`, later benign `status.updated` drift must not cause the same
 stale host run to be requeued again.
 
 This idempotence applies to the same stale host-run instance. A later
@@ -251,7 +255,9 @@ runtime truth on their own.
   adapter-owned host-run metadata with matching runtime attachment
   context from operator projection, but it must not reconcile stale or
   completed runs, synthesize new attachment truth, or silently rewrite
-  runtime state.
+  runtime state. It must also fail closed if the runtime attachment or
+  claim graph is malformed rather than silently omitting broken
+  authority edges from the inspection view.
 
 - `ctx status`
   Must show the same reconciled state that `ctx resume` and `ctx run`
@@ -267,7 +273,13 @@ runtime truth on their own.
   host-run boundary as `ctx run`.
   That boundary must be acquired atomically inside the adapter /
   host-run store surface, including reclaim of an already-live eligible
-  lease.
+  lease. If reclaim adopts an already-live eligible lease, that takeover
+  must mint a new durable run-owner fence and later heartbeat,
+  completion, rollback, destructive terminal lease cleanup, and
+  degraded terminal-warning cleanup writes must prove that adopted
+  fence instead of relying only on the initial takeover CAS. Terminal
+  cleanup must not fall back to an unfenced plain delete once lease
+  ownership has been proved.
   Failure to acquire that boundary because another reclaim already owns
   it is duplicate blocking, not reclaim failure; it must not orphan or
   requeue the current authoritative attachment/claim.
@@ -303,15 +315,18 @@ runtime truth on their own.
   is already detached but missing that id, recovery must backfill it
   from durable host metadata before wrapped reclaim is considered
   available again.
-  They must also use the same host approval and sandbox mode selection
-  unless the runtime contract is updated to model a real host-imposed
-  difference.
+  They must also use the same runtime policy inputs for approval,
+  sandbox, and bypass behavior. If the host imposes different baseline
+  launch and resume CLI modes, that difference must be explicit and
+  documented rather than copied accidentally from launch defaults.
 
 - `ctx run` and `ctx resume`
   When a new or recovered decision becomes the active state, the
   operator-facing `currentObjective` must stop pointing at stale
   pre-decision work and instead reflect the blocker summary unless the
-  runtime already has newer decision-specific status text.
+  runtime already has newer decision-specific status text. Once that
+  decision is resolved, lifecycle synthesis must restore runnable
+  assignment truth instead of persisting blocked state.
 
 ---
 
@@ -363,6 +378,14 @@ truth is authoritative:
 Snapshot-fallback durability must behave like one coherent state-machine
 transition, not a sequence of unrelated local rewrites.
 
+The same lock boundary must also be crash-recoverable. Event-log,
+snapshot, and lease callers may not be wedged forever by orphaned path
+locks from dead or reused process ids, and snapshot sync must derive its
+durable write payload while still holding the snapshot lock that guards
+the write. If a newer snapshot-only mutation lands before that final
+locked write begins, snapshot sync must preserve that newer durable
+snapshot truth instead of overwriting it with older event-derived state.
+
 ---
 
 ## CLI exit semantics
@@ -400,11 +423,16 @@ The test suite should explicitly cover:
 - invalid lease expiry
 - malformed lease with no run record
 - malformed lease with completed run record
+- malformed lease blocker materialized by default in shared inspection
 - stale lease artifact with no durable run record
 - stale reconciliation clears the lease artifact
 - stale-run reconciliation is idempotent across `status`, `resume`, and
   `run`
+- stale reconciliation identity is keyed to a durable run instance, not
+  `startedAt` or status drift
 - a later fresh stale retry emits a new stale reconciliation
+- snapshot-fallback later stale retries remain distinct from earlier
+  stale repairs
 - multiple stale leases preserve latest status updates
 - final non-running persistence only degrades to a warning after lease
   cleanup succeeds
@@ -432,4 +460,6 @@ The test suite should explicitly cover:
 - malformed event tail after snapshot
 - malformed suffix that replays cleanly after snapshot
 - malformed suffix that does not replay after snapshot
+- malformed attachment or claim graphs fail closed across inspection and
+  reconciliation surfaces
 - strict rebuild failure on malformed event logs

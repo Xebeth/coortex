@@ -22,6 +22,10 @@ export interface RuntimeArtifactStore {
     expectedVersion: ArtifactVersion | null,
     nextContent: string
   ): Promise<{ ok: boolean; version: ArtifactVersion | null }>;
+  deleteTextArtifactCas(
+    relativePath: string,
+    expectedVersion: ArtifactVersion | null
+  ): Promise<{ ok: boolean; version: ArtifactVersion | null }>;
   writeJsonArtifact(relativePath: string, value: unknown): Promise<string>;
   writeTextArtifact(relativePath: string, content: string): Promise<string>;
   deleteArtifact(relativePath: string): Promise<void>;

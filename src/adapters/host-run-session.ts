@@ -115,7 +115,8 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         input.assignmentId,
         input.startedAt,
         completedAt,
-        nativeRunId
+        nativeRunId,
+        input.runRecord.runInstanceId
       );
       const warning = coordinator.collectWarnings(await input.runStore.persistWarning(runRecord));
 
@@ -219,7 +220,8 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
         input.assignmentId,
         input.startedAt,
         stoppedAt,
-        input.requestedSessionId
+        input.requestedSessionId,
+        input.runRecord.runInstanceId
       );
       const warning = coordinator.collectWarnings(await input.runStore.persistWarning(runRecord));
       return {
@@ -268,7 +270,8 @@ async function buildFailedRunOutcome<TExecution extends { exitCode: number }>(
     input.assignmentId,
     input.startedAt,
     completedAt,
-    nativeRunId
+    nativeRunId,
+    input.runRecord.runInstanceId
   );
   const warning = coordinator.collectWarnings(await input.runStore.persistWarning(runRecord));
   return {

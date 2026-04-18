@@ -1,6 +1,6 @@
 import type { RuntimeEvent } from "../core/events.js";
 import type { RuntimeProjection } from "../core/types.js";
-import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
+import { applyRuntimeEventsToProjection as applyRuntimeEventsToProjectionShared } from "../projections/runtime-projection.js";
 import { RuntimeStore } from "../persistence/store.js";
 
 export interface ProjectionWriteOptions {
@@ -11,11 +11,7 @@ export function applyRuntimeEventsToProjection(
   projection: RuntimeProjection,
   events: RuntimeEvent[]
 ): RuntimeProjection {
-  const nextProjection = fromSnapshot(toSnapshot(projection));
-  for (const event of events) {
-    applyRuntimeEvent(nextProjection, event);
-  }
-  return nextProjection;
+  return applyRuntimeEventsToProjectionShared(projection, events);
 }
 
 export async function persistProjectionEvents(

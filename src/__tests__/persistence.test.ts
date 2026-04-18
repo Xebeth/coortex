@@ -126,6 +126,60 @@ test("projection recovery service repairs a salvageable event log through store 
   );
 });
 
+test("runtime store rejects malformed claim suffixes after the snapshot boundary", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-broken-claim-suffix-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await store.writeSnapshot(toSnapshot(await store.rebuildProjection()));
+
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "claim.created",
+    payload: {
+      claim: {
+        id: randomUUID(),
+        assignmentId: bootstrap.initialAssignmentId,
+        attachmentId: "missing-attachment",
+        state: "active",
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+        provenance: {
+          kind: "resume",
+          source: "ctx.resume"
+        }
+      }
+    }
+  });
+
+  await assert.rejects(
+    store.loadProjectionWithRecovery(),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    store.syncSnapshotFromEventsWithRecovery(),
+    /claim graph references missing attachments/
+  );
+});
+
 test("runtime store appendEvents preserves concurrent batch writers", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-concurrent-batches-"));
   const store = RuntimeStore.forProject(projectRoot);
@@ -348,7 +402,7 @@ test("runtime store serializes concurrent snapshot projection mutations", async 
   ]);
 });
 
-test("runtime store snapshot recovery sync holds the snapshot lock against concurrent mutations", async () => {
+test("runtime store snapshot recovery sync preserves newer snapshot-only truth under the lock", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-sync-lock-"));
   const store = RuntimeStore.forProject(projectRoot);
   const sessionId = randomUUID();
@@ -408,51 +462,61 @@ test("runtime store snapshot recovery sync holds the snapshot lock against concu
   };
   await store.appendEvent(recoveredEvent);
 
-  const originalWriteSnapshot = store.writeSnapshot.bind(store);
-  let releaseSyncWrite!: () => void;
-  const syncWriteReleased = new Promise<void>((resolve) => {
-    releaseSyncWrite = resolve;
+  const originalWithSnapshotLock = store.withSnapshotLock.bind(store);
+  let releaseSyncLock!: () => void;
+  const syncLockReleased = new Promise<void>((resolve) => {
+    releaseSyncLock = resolve;
   });
-  let signalSyncWriteEntered!: () => void;
-  const syncWriteEntered = new Promise<void>((resolve) => {
-    signalSyncWriteEntered = resolve;
+  let signalSyncLockEntered!: () => void;
+  const syncLockEntered = new Promise<void>((resolve) => {
+    signalSyncLockEntered = resolve;
   });
-  let blockedFirstSyncWrite = false;
+  let blockedFirstSnapshotLock = false;
   (store as RuntimeStore & {
-    writeSnapshot: RuntimeStore["writeSnapshot"];
-  }).writeSnapshot = async (snapshot) => {
-    if (!blockedFirstSyncWrite) {
-      blockedFirstSyncWrite = true;
-      signalSyncWriteEntered();
-      await syncWriteReleased;
+    withSnapshotLock: RuntimeStore["withSnapshotLock"];
+  }).withSnapshotLock = async (action) => {
+    if (!blockedFirstSnapshotLock) {
+      blockedFirstSnapshotLock = true;
+      signalSyncLockEntered();
+      await syncLockReleased;
     }
-    await originalWriteSnapshot(snapshot);
+    return originalWithSnapshotLock(action);
   };
 
   const syncPromise = store.syncSnapshotFromEventsWithRecovery();
-  await syncWriteEntered;
+  await syncLockEntered;
+  let signalMutationEntered!: () => void;
+  const mutationEntered = new Promise<void>((resolve) => {
+    signalMutationEntered = resolve;
+  });
   const mutationPromise = store.mutateSnapshotProjection((projection) => {
+    signalMutationEntered();
     const nextProjection = fromSnapshot(toSnapshot(projection));
     applyRuntimeEvent(nextProjection, concurrentMutationEvent);
     return nextProjection;
   });
-  releaseSyncWrite();
+  await mutationEntered;
+  await mutationPromise;
+  releaseSyncLock();
 
   try {
-    await Promise.all([syncPromise, mutationPromise]);
+    await syncPromise;
   } finally {
     (store as RuntimeStore & {
-      writeSnapshot: RuntimeStore["writeSnapshot"];
-    }).writeSnapshot = originalWriteSnapshot;
+      withSnapshotLock: RuntimeStore["withSnapshotLock"];
+    }).withSnapshotLock = originalWithSnapshotLock;
   }
 
+  const syncResult = await syncPromise;
   const snapshot = await store.loadSnapshot();
   const summaries = snapshot?.results.map((result) => result.summary).sort();
 
-  assert.deepEqual(summaries, [
-    "Concurrent snapshot mutation also survives.",
-    "Recovered event survives snapshot sync."
-  ]);
+  assert.equal(syncResult.projection.results.size, 1);
+  assert.equal(
+    [...syncResult.projection.results.values()][0]?.summary,
+    "Concurrent snapshot mutation also survives."
+  );
+  assert.deepEqual(summaries, ["Concurrent snapshot mutation also survives."]);
 });
 
 test("withPathLock times out instead of reaping a live holder", async () => {
@@ -491,6 +555,80 @@ test("withPathLock times out instead of reaping a live holder", async () => {
   assert.equal(secondEntered, false);
   releaseHolder();
   await firstHolder;
+});
+
+test("withPathLock reaps a stale holder from a dead owner process", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-stale-lock-"));
+  const lockPath = join(projectRoot, "runtime", "events.ndjson");
+  const lockDir = `${lockPath}.lock`;
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(
+    join(lockDir, "owner.json"),
+    JSON.stringify({
+      pid: 999_999,
+      acquiredAt: "2026-04-18T00:00:00.000Z"
+    }),
+    "utf8"
+  );
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  let entered = false;
+  await withPathLock(lockPath, async () => {
+    entered = true;
+  });
+
+  assert.equal(entered, true);
+});
+
+test("withPathLock reaps a stale holder when the pid identity does not match", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-reused-pid-lock-"));
+  const lockPath = join(projectRoot, "runtime", "events.ndjson");
+  const lockDir = `${lockPath}.lock`;
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(
+    join(lockDir, "owner.json"),
+    JSON.stringify({
+      pid: process.pid,
+      acquiredAt: "2026-04-18T00:00:00.000Z",
+      processIdentity: "stale-holder"
+    }),
+    "utf8"
+  );
+
+  let entered = false;
+  await withPathLock(lockPath, async () => {
+    entered = true;
+  });
+
+  assert.equal(entered, true);
+});
+
+test("runtime store lease CAS survives a stale path lock from a reused pid", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-stale-cas-lock-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const relativePath = "adapters/custom/runs/assignment-1.lease.json";
+  await store.writeTextArtifact(relativePath, "{\"state\":\"running\"}");
+  const current = await store.readVersionedTextArtifact(relativePath, "custom run lease");
+  const lockDir = join(store.rootDir, `${relativePath}.lock`);
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(
+    join(lockDir, "owner.json"),
+    JSON.stringify({
+      pid: process.pid,
+      acquiredAt: "2026-04-18T00:00:00.000Z",
+      processIdentity: "stale-holder"
+    }),
+    "utf8"
+  );
+
+  const updated = await store.writeTextArtifactCas(
+    relativePath,
+    current.version,
+    "{\"state\":\"completed\"}"
+  );
+
+  assert.equal(updated.ok, true);
+  assert.equal((await store.readTextArtifact(relativePath, "custom run lease"))?.trim(), "{\"state\":\"completed\"}");
 });
 
 test("runtime store rebuildProjection stays strict on malformed events", async () => {

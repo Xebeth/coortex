@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { RuntimeArtifactStore } from "./contract.js";
 import { materializeInspectableRunRecord } from "./host-run-inspection.js";
 import {
@@ -27,6 +29,19 @@ export class MalformedHostRunLeaseArtifactError extends ActiveHostRunLeaseError 
 
 export function isActiveHostRunLeaseError(error: unknown): error is ActiveHostRunLeaseError {
   return error instanceof ActiveHostRunLeaseError;
+}
+
+class HostRunOwnershipFenceError extends Error {
+  constructor(
+    readonly assignmentId: string,
+    readonly operation: string
+  ) {
+    super(`Assignment ${assignmentId} lost host run ownership during ${operation}.`);
+  }
+}
+
+function isHostRunOwnershipFenceError(error: unknown): error is HostRunOwnershipFenceError {
+  return error instanceof HostRunOwnershipFenceError;
 }
 
 export class HostRunStore {
@@ -79,7 +94,11 @@ export class HostRunStore {
       throw new ActiveHostRunLeaseError(record.assignmentId);
     }
 
-    const adoptedRecord = buildAdoptedRecord(currentLease.record);
+    const adoptedRecord = withAdoptedOwnershipFence(
+      currentLease.record,
+      buildAdoptedRecord(currentLease.record),
+      record
+    );
     const swapped = await this.repository.swapLease(
       record.assignmentId,
       currentLease.version,
@@ -119,11 +138,7 @@ export class HostRunStore {
 
   async write(record: HostRunRecord): Promise<void> {
     const writePromise = this.writeQueue.catch(() => undefined).then(async () => {
-      if (record.state === "running") {
-        await this.repository.writeLease(record);
-      } else {
-        await this.repository.deleteLease(record.assignmentId);
-      }
+      await this.persistLeaseState(record);
       await this.repository.writeRunRecord(record);
       await this.repository.writeLastRunPointer(record);
     });
@@ -132,11 +147,12 @@ export class HostRunStore {
   }
 
   async persistWarning(record: HostRunRecord): Promise<string | undefined> {
+    const ownerFence = getRunOwnerFence(record);
     try {
       await this.write(record);
       return undefined;
     } catch (error) {
-      if (record.state !== "running") {
+      if (record.state !== "running" && !ownerFence && !isHostRunOwnershipFenceError(error)) {
         const cleanupError = await this.tryDeleteLease(record.assignmentId);
         if (cleanupError) {
           const message = error instanceof Error ? error.message : String(error);
@@ -265,31 +281,35 @@ export class HostRunStore {
         rollback.previousLeaseRecord
       );
       if (!rollbackLease.ok) {
-        rollbackErrors.push("lease rollback failed after adopt metadata persistence error.");
-      }
-
-      try {
-        if (previousRunRecord) {
-          await this.repository.writeRunRecord(previousRunRecord);
-        } else {
-          await this.repository.deleteRunRecord(adoptedRecord.assignmentId);
-        }
-      } catch (rollbackError) {
         rollbackErrors.push(
-          `run record rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          "lease rollback stopped because a newer adopted ownership boundary is already durable."
         );
       }
 
-      try {
-        if (previousLastRun.state === "valid") {
-          await this.repository.writeLastRunPointer(previousLastRun.record);
-        } else {
-          await this.repository.deleteLastRunPointer();
+      if (rollbackLease.ok) {
+        try {
+          if (previousRunRecord) {
+            await this.repository.writeRunRecord(previousRunRecord);
+          } else {
+            await this.repository.deleteRunRecord(adoptedRecord.assignmentId);
+          }
+        } catch (rollbackError) {
+          rollbackErrors.push(
+            `run record rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
         }
-      } catch (rollbackError) {
-        rollbackErrors.push(
-          `last-run rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-        );
+
+        try {
+          if (previousLastRun.state === "valid") {
+            await this.repository.writeLastRunPointer(previousLastRun.record);
+          } else {
+            await this.repository.deleteLastRunPointer();
+          }
+        } catch (rollbackError) {
+          rollbackErrors.push(
+            `last-run rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
+        }
       }
 
       const message = error instanceof Error ? error.message : String(error);
@@ -300,6 +320,107 @@ export class HostRunStore {
       }
       throw error;
     }
+  }
+
+  private async persistLeaseState(record: HostRunRecord): Promise<void> {
+    const ownerFence = getRunOwnerFence(record);
+    if (!ownerFence) {
+      if (record.state === "running") {
+        await this.repository.writeLease(record);
+      } else {
+        await this.repository.deleteLease(record.assignmentId);
+      }
+      return;
+    }
+
+    if (record.state === "running") {
+      const currentLease = await this.repository.readLease(record.assignmentId);
+      if (currentLease.state !== "valid") {
+        throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
+      }
+      ensureMatchingRunOwnerFence(record.assignmentId, "running lease refresh", ownerFence, currentLease.record);
+      const swapped = await this.repository.swapLease(record.assignmentId, currentLease.version, record);
+      if (!swapped.ok) {
+        throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
+      }
+      return;
+    }
+
+    const currentLease = await this.repository.readLease(record.assignmentId);
+    if (currentLease.state === "valid") {
+      ensureMatchingRunOwnerFence(record.assignmentId, "completed lease finalization", ownerFence, currentLease.record);
+      const refreshed = await this.repository.swapLease(
+        record.assignmentId,
+        currentLease.version,
+        currentLease.record
+      );
+      if (!refreshed.ok) {
+        throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
+      }
+      const deleted = await this.repository.deleteLeaseVersioned(
+        record.assignmentId,
+        refreshed.version
+      );
+      if (!deleted.ok) {
+        throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
+      }
+    } else if (currentLease.state === "malformed") {
+      throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
+    }
+
+    const currentRunRecord = await this.repository.readRunRecord(record.assignmentId);
+    ensureMatchingRunOwnerFence(record.assignmentId, "completed run persistence", ownerFence, currentRunRecord);
+
+    const lastRun = await this.repository.readLastRunPointer();
+    if (lastRun.state === "valid" && lastRun.record.assignmentId === record.assignmentId) {
+      ensureMatchingRunOwnerFence(record.assignmentId, "completed last-run persistence", ownerFence, lastRun.record);
+    }
+
+  }
+}
+
+function withAdoptedOwnershipFence(
+  currentRecord: HostRunRecord,
+  adoptedRecord: HostRunRecord,
+  requestedRecord: HostRunRecord
+): HostRunRecord {
+  const requestedFence = getRunOwnerFence(requestedRecord);
+  const currentFence = getRunOwnerFence(currentRecord);
+  const adoptedFence = getRunOwnerFence(adoptedRecord);
+  const nextFence =
+    requestedFence && requestedFence !== currentFence
+      ? requestedFence
+      : adoptedFence && adoptedFence !== currentFence
+        ? adoptedFence
+        : randomUUID();
+  return {
+    ...adoptedRecord,
+    runInstanceId: nextFence
+  };
+}
+
+function getRunOwnerFence(
+  record: Pick<HostRunRecord, "runInstanceId" | "state" | "staleReasonCode"> | undefined
+): string | undefined {
+  return typeof record?.runInstanceId === "string" &&
+    record.runInstanceId.length > 0 &&
+    (
+      record.state === "running" ||
+      (record.state === "completed" && !record.staleReasonCode)
+    )
+    ? record.runInstanceId
+    : undefined;
+}
+
+function ensureMatchingRunOwnerFence(
+  assignmentId: string,
+  operation: string,
+  expectedFence: string,
+  record: Pick<HostRunRecord, "runInstanceId" | "state" | "staleReasonCode"> | undefined
+): void {
+  const actualFence = getRunOwnerFence(record);
+  if (actualFence && actualFence !== expectedFence) {
+    throw new HostRunOwnershipFenceError(assignmentId, operation);
   }
 }
 

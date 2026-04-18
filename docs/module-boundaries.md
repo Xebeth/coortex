@@ -64,7 +64,7 @@ Responsibilities:
 - event log
 - snapshots
 - atomic writes
-- schema versioning in later phases
+- schema stability and ownership in later phases
 
 Must not define workflow or adapter policy.
 

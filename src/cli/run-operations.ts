@@ -56,6 +56,7 @@ export async function markAssignmentInProgress(
       assignmentId,
       patch: {
         state: "in_progress",
+        lastStaleRunInstanceId: undefined,
         updatedAt: timestamp
       }
     }
@@ -332,7 +333,9 @@ export function projectionForRunnableAssignment(
 
 function nextAssignmentState(execution: Pick<HostExecutionOutcome, "outcome" | "run">) {
   if (execution.outcome.kind === "decision") {
-    return "blocked" as const;
+    return execution.outcome.capture.state === "resolved"
+      ? ("in_progress" as const)
+      : ("blocked" as const);
   }
   switch (execution.outcome.capture.status) {
     case "completed":
@@ -368,20 +371,26 @@ function nextRuntimeStatus(
           ? nextDecisionCurrentObjective(
               projection,
               assignmentId,
-              execution.outcome.capture.blockerSummary
+              execution.outcome.capture.blockerSummary,
+              execution.outcome.capture.state ?? "open"
             )
           : projection.status.currentObjective,
     activeAssignmentIds,
     lastDurableOutputAt: nowIso(),
-    resumeReady: true
+    resumeReady: true,
+    lastStaleRunInstanceId: undefined
   };
 }
 
 function nextDecisionCurrentObjective(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   assignmentId: string,
-  blockerSummary: string
+  blockerSummary: string,
+  decisionState: "open" | "resolved"
 ): string {
+  if (decisionState === "resolved") {
+    return projection.assignments.get(assignmentId)?.objective ?? projection.status.currentObjective;
+  }
   const latestDecision = [...projection.decisions.values()]
     .filter((decision) => decision.assignmentId === assignmentId)
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))

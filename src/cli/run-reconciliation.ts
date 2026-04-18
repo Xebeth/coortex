@@ -1,14 +1,19 @@
 import { randomUUID } from "node:crypto";
 
 import type { HostAdapter } from "../adapters/contract.js";
-import { isRunLeaseExpired } from "../core/run-state.js";
+import { getRunInstanceId, isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type {
   DecisionPacket,
   HostRunRecord,
   RuntimeProjection
 } from "../core/types.js";
-import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
+import {
+  applyRuntimeEventsToProjection,
+  fromSnapshot,
+  toSnapshot
+} from "../projections/runtime-projection.js";
+import { isRuntimeAuthorityIntegrityError } from "../projections/attachment-claim-queries.js";
 import { ProjectionRecoveryService } from "../persistence/projection-recovery.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { buildStaleRunReconciliation, createActiveRunDiagnostic } from "../recovery/host-runs.js";
@@ -156,8 +161,6 @@ async function reconcileActiveRunsInContext(
   let effectiveProjection = fromSnapshot(toSnapshot(projection));
   let changed = false;
   let snapshotFallbackReplayHydrated = false;
-  let queuedTransitions: Map<string, string[]> | undefined;
-  let staleStatusTransitions: Map<string, string[]> | undefined;
   let handledCompletedRun = false;
   const runtimeKnownAssignmentIds = [...projection.assignments.keys()];
   const enumeratedRecords = await context.adapter.inspectRuns(context.store);
@@ -268,29 +271,17 @@ async function reconcileActiveRunsInContext(
           continue;
         }
 
-        queuedTransitions ??= await loadQueuedTransitions(context.projectionRecovery, replayableEvents);
-        staleStatusTransitions ??= await loadStaleRecoveryStatusTransitions(
-          context.projectionRecovery,
-          replayableEvents
-        );
         const staleRecoveryState = getStaleRunRecoveryState(
+          effectiveProjection,
           assignmentId,
-          record,
-          queuedTransitions,
-          staleStatusTransitions
+          record
         );
         const reconciliation = buildStaleRunReconciliation(effectiveProjection, assignmentId, record);
-        const expectedStatus =
-          reconciliation.events[1]?.type === "status.updated"
-            ? reconciliation.events[1].payload.status
-            : effectiveProjection.status;
         if (
           isStaleRunAlreadyReconciled(
             effectiveProjection,
             assignmentId,
-            staleRecoveryState,
-            expectedStatus,
-            snapshotFallback
+            staleRecoveryState
           )
         ) {
           changed = true;
@@ -331,9 +322,7 @@ async function reconcileActiveRunsInContext(
           changed = true;
           if (snapshotFallback) {
             effectiveProjection = await mutateSnapshotFallbackProjection(
-              context.store,
-              replayableEvents,
-              snapshotBoundaryEventId,
+              context,
               (latestProjection) => applyRuntimeEventsToProjection(latestProjection, reconciliation.events)
             );
           } else {
@@ -359,18 +348,6 @@ async function reconcileActiveRunsInContext(
         }
 
         changed = true;
-        if (!staleRecoveryState.queuedTransitionTimestamp) {
-          queuedTransitions.set(assignmentId, [
-            ...(queuedTransitions.get(assignmentId) ?? []),
-            reconciliation.events[0]!.timestamp
-          ]);
-        }
-        if (!staleRecoveryState.statusTransitionTimestamp) {
-          staleStatusTransitions.set(assignmentId, [
-            ...(staleStatusTransitions.get(assignmentId) ?? []),
-            reconciliation.events[1]!.timestamp
-          ]);
-        }
         effectiveProjection = await applyRecoveryProjectionEvents(
           context,
           effectiveProjection,
@@ -431,29 +408,17 @@ async function reconcileActiveRunsInContext(
       continue;
     }
 
-    queuedTransitions ??= await loadQueuedTransitions(context.projectionRecovery, replayableEvents);
-    staleStatusTransitions ??= await loadStaleRecoveryStatusTransitions(
-      context.projectionRecovery,
-      replayableEvents
-    );
     const staleRecoveryState = getStaleRunRecoveryState(
+      effectiveProjection,
       assignmentId,
-      record,
-      queuedTransitions,
-      staleStatusTransitions
+      record
     );
     const reconciliation = buildStaleRunReconciliation(effectiveProjection, assignmentId, record);
-    const expectedStatus =
-      reconciliation.events[1]?.type === "status.updated"
-        ? reconciliation.events[1].payload.status
-        : effectiveProjection.status;
     if (
       isStaleRunAlreadyReconciled(
         effectiveProjection,
         assignmentId,
-        staleRecoveryState,
-        expectedStatus,
-        snapshotFallback
+        staleRecoveryState
       )
     ) {
       changed = true;
@@ -529,18 +494,6 @@ async function reconcileActiveRunsInContext(
     }
 
     changed = true;
-    if (!staleRecoveryState.queuedTransitionTimestamp) {
-      queuedTransitions.set(assignmentId, [
-        ...(queuedTransitions.get(assignmentId) ?? []),
-        reconciliation.events[0]!.timestamp
-      ]);
-    }
-    if (!staleRecoveryState.statusTransitionTimestamp) {
-      staleStatusTransitions.set(assignmentId, [
-        ...(staleStatusTransitions.get(assignmentId) ?? []),
-        reconciliation.events[1]!.timestamp
-      ]);
-    }
     effectiveProjection = await applyRecoveryProjectionEvents(
       context,
       effectiveProjection,
@@ -793,6 +746,15 @@ async function reconcileCompletedRunRecord(
         options.snapshotBoundaryEventId ?? ""
       )
     : completedReplayableEvents;
+  const completedDecisionHydration = hydrateCompletedDecisionFromReplayableEvents(
+    effectiveProjection,
+    record,
+    completedRecoveryProofEvents
+  );
+  if (completedDecisionHydration.hydrated) {
+    effectiveProjection = completedDecisionHydration.projection;
+    changed = true;
+  }
   const completedRecovery = buildCompletedRunReconciliation(
     effectiveProjection,
     record,
@@ -911,21 +873,13 @@ function selectCompletedRunCleanupRecord(
 function isStaleRunAlreadyReconciled(
   projection: RuntimeProjection,
   assignmentId: string,
-  recoveryState: StaleRunRecoveryState,
-  expectedStatus: RuntimeProjection["status"],
-  snapshotFallback: boolean
+  recoveryState: StaleRunRecoveryState
 ): boolean {
-  const assignment = projection.assignments.get(assignmentId);
   return (
-    assignment?.state === "queued" &&
+    recoveryState.assignmentRecovered &&
+    recoveryState.statusRecovered &&
     !getActiveClaimForAssignment(projection, assignmentId) &&
-    (
-      (snapshotFallback && hasEquivalentRuntimeStatus(projection.status, expectedStatus)) ||
-      (
-        Boolean(recoveryState.queuedTransitionTimestamp) &&
-        Boolean(recoveryState.statusTransitionTimestamp)
-      )
-    )
+    projection.assignments.get(assignmentId)?.state === "queued"
   );
 }
 
@@ -1007,75 +961,29 @@ function buildCompletedRunRecordFromRuntimeOutcome(
   };
 }
 
-async function loadQueuedTransitions(
-  projectionRecovery: ProjectionRecoveryService,
-  replayableEvents?: RuntimeEvent[]
-): Promise<Map<string, string[]>> {
-  const queuedTransitions = new Map<string, string[]>();
-  const { events } = replayableEvents ? { events: replayableEvents } : await projectionRecovery.loadReplayableEvents();
-  for (const event of events) {
-    if (event.type === "assignment.updated" && event.payload.patch.state === "queued") {
-      queuedTransitions.set(event.payload.assignmentId, [
-        ...(queuedTransitions.get(event.payload.assignmentId) ?? []),
-        event.timestamp
-      ]);
-    }
-  }
-  return queuedTransitions;
-}
-
-async function loadStaleRecoveryStatusTransitions(
-  projectionRecovery: ProjectionRecoveryService,
-  replayableEvents?: RuntimeEvent[]
-): Promise<Map<string, string[]>> {
-  const statusTransitions = new Map<string, string[]>();
-  const { events } = replayableEvents ? { events: replayableEvents } : await projectionRecovery.loadReplayableEvents();
-  for (const event of events) {
-    if (event.type !== "status.updated") {
-      continue;
-    }
-    const match = /^Retry assignment ([^:]+): /.exec(event.payload.status.currentObjective);
-    if (!match) {
-      continue;
-    }
-    const assignmentId = match[1]!;
-    if (!event.payload.status.activeAssignmentIds.includes(assignmentId)) {
-      continue;
-    }
-    statusTransitions.set(assignmentId, [...(statusTransitions.get(assignmentId) ?? []), event.timestamp]);
-  }
-  return statusTransitions;
-}
-
 interface StaleRunRecoveryState {
-  queuedTransitionTimestamp: string | undefined;
-  statusTransitionTimestamp: string | undefined;
+  runInstanceId: string | undefined;
+  assignmentRecovered: boolean;
+  statusRecovered: boolean;
 }
 
 function getStaleRunRecoveryState(
+  projection: RuntimeProjection,
   assignmentId: string,
-  record: HostRunRecord,
-  queuedTransitions: Map<string, string[]>,
-  staleStatusTransitions: Map<string, string[]>
+  record: HostRunRecord
 ): StaleRunRecoveryState {
-  const startedAt = Date.parse(record.startedAt);
-  if (!Number.isFinite(startedAt)) {
-    return {
-      queuedTransitionTimestamp: undefined,
-      statusTransitionTimestamp: undefined
-    };
-  }
-
-  const queuedTransitionTimestamp = (queuedTransitions.get(assignmentId) ?? []).find(
-    (timestamp) => Date.parse(timestamp) >= startedAt
-  );
-  const statusTransitionTimestamp = (staleStatusTransitions.get(assignmentId) ?? []).find(
-    (timestamp) => Date.parse(timestamp) >= startedAt
-  );
+  const runInstanceId = getRunInstanceId(record);
+  const assignment = projection.assignments.get(assignmentId);
 
   return {
-    queuedTransitionTimestamp,
-    statusTransitionTimestamp
+    runInstanceId,
+    assignmentRecovered:
+      typeof runInstanceId === "string" &&
+      assignment?.state === "queued" &&
+      assignment.lastStaleRunInstanceId === runInstanceId,
+    statusRecovered:
+      typeof runInstanceId === "string" &&
+      projection.status.lastStaleRunInstanceId === runInstanceId
   };
 }
 
@@ -1126,10 +1034,10 @@ function selectPendingStaleRecoveryEvents(
   const pendingEvents: RuntimeEvent[] = [];
   const [assignmentEvent, statusEvent] = events;
 
-  if (!recoveryState.queuedTransitionTimestamp) {
+  if (!recoveryState.assignmentRecovered) {
     pendingEvents.push(assignmentEvent!);
   }
-  if (!recoveryState.statusTransitionTimestamp) {
+  if (!recoveryState.statusRecovered) {
     pendingEvents.push(statusEvent!);
   }
 
@@ -1145,14 +1053,29 @@ function buildCompletedRunReconciliation(
     return undefined;
   }
   const timestamp = nowIso();
-  const expectedStatus = nextRuntimeStatusFromRecord(projection, record, timestamp);
-  const events = buildRecoveredOutcomeEvents(projection, record, timestamp);
+  const recoveredDecision =
+    findRecoveredCompletedDecision(projection, record) ??
+    findRecoveredCompletedDecisionEvent(replayableEvents ?? [], record);
+  const recoveredDecisionState = recoveredDecision?.state;
+  const expectedStatus = nextRuntimeStatusFromRecord(
+    projection,
+    record,
+    timestamp,
+    recoveredDecisionState
+  );
+  const events = buildRecoveredOutcomeEvents(
+    projection,
+    record,
+    timestamp,
+    recoveredDecisionState
+  );
   const pendingEvents = selectPendingCompletedRecoveryEvents(
     projection,
     record,
     events,
     expectedStatus,
-    replayableEvents
+    replayableEvents,
+    recoveredDecisionState
   );
   const assignmentId = record.assignmentId;
   return {
@@ -1171,7 +1094,8 @@ function selectPendingCompletedRecoveryEvents(
   record: HostRunRecord,
   events: RuntimeEvent[],
   expectedStatus: RuntimeProjection["status"],
-  replayableEvents?: RuntimeEvent[]
+  replayableEvents?: RuntimeEvent[],
+  recoveredDecisionState?: "open" | "resolved"
 ): RuntimeEvent[] {
   const [outcomeEvent, assignmentEvent, statusEvent] = events;
   const pendingEvents: RuntimeEvent[] = [];
@@ -1188,14 +1112,14 @@ function selectPendingCompletedRecoveryEvents(
     (canUseReplayableConvergenceProof
       ? findRecoveredCompletedDecisionEvent(replayableEvents, record)
       : undefined);
-  const recoveredDecisionState = recoveredDecision?.state;
+  const effectiveDecisionState = recoveredDecisionState ?? recoveredDecision?.state;
 
   if (!outcomeAlreadyAbsorbed) {
     return [...events];
   }
 
   if (record.terminalOutcome?.kind === "decision") {
-    if (!hasRecoveredCompletedAssignmentState(projection, record, recoveredDecisionState)) {
+    if (!hasRecoveredCompletedAssignmentState(projection, record, effectiveDecisionState)) {
       pendingEvents.push(assignmentEvent!);
     }
     if (!hasRecoveredCompletedStatus(projection, record, expectedStatus)) {
@@ -1250,16 +1174,7 @@ function findRecoveredCompletedDecisionEvent(
   }
   return events
     .filter((event): event is Extract<RuntimeEvent, { type: "decision.created" }> => event.type === "decision.created")
-    .find((event) => {
-      if (event.payload.decision.assignmentId !== record.assignmentId) {
-        return false;
-      }
-      return terminalOutcome.decision.decisionId
-        ? event.payload.decision.decisionId === terminalOutcome.decision.decisionId
-        : event.payload.decision.blockerSummary === terminalOutcome.decision.blockerSummary &&
-            event.payload.decision.recommendedOption === terminalOutcome.decision.recommendedOption &&
-            event.payload.decision.createdAt === terminalOutcome.decision.createdAt;
-    })?.payload.decision;
+    .find((event) => matchesRecoveredCompletedDecision(record, event.payload.decision))?.payload.decision;
 }
 
 function findRecoveredCompletedOutcomeEventIndexFromEvents(
@@ -1312,15 +1227,110 @@ function findRecoveredCompletedDecision(
     return undefined;
   }
   return [...projection.decisions.values()].find((decision) => {
-    if (decision.assignmentId !== record.assignmentId) {
-      return false;
-    }
-    return terminalOutcome.decision.decisionId
-      ? decision.decisionId === terminalOutcome.decision.decisionId
-      : decision.blockerSummary === terminalOutcome.decision.blockerSummary &&
-          decision.recommendedOption === terminalOutcome.decision.recommendedOption &&
-          decision.createdAt === terminalOutcome.decision.createdAt;
+    return matchesRecoveredCompletedDecision(record, decision);
   });
+}
+
+function matchesRecoveredCompletedDecision(
+  record: HostRunRecord,
+  decision: Pick<DecisionPacket, "assignmentId" | "decisionId" | "blockerSummary" | "recommendedOption" | "createdAt">
+): boolean {
+  const terminalOutcome = record.terminalOutcome;
+  if (!terminalOutcome || terminalOutcome.kind !== "decision") {
+    return false;
+  }
+  if (decision.assignmentId !== record.assignmentId) {
+    return false;
+  }
+  return terminalOutcome.decision.decisionId
+    ? decision.decisionId === terminalOutcome.decision.decisionId
+    : decision.blockerSummary === terminalOutcome.decision.blockerSummary &&
+        decision.recommendedOption === terminalOutcome.decision.recommendedOption &&
+        decision.createdAt === terminalOutcome.decision.createdAt;
+}
+
+function hydrateCompletedDecisionFromReplayableEvents(
+  projection: RuntimeProjection,
+  record: HostRunRecord,
+  replayableEvents?: RuntimeEvent[]
+): {
+  projection: RuntimeProjection;
+  hydrated: boolean;
+} {
+  if (!replayableEvents || replayableEvents.length === 0 || record.terminalOutcome?.kind !== "decision") {
+    return {
+      projection,
+      hydrated: false
+    };
+  }
+
+  const replayableDecisionEvents = selectRecoveredCompletedDecisionReplayEvents(
+    projection,
+    record,
+    replayableEvents
+  );
+  if (replayableDecisionEvents.length === 0) {
+    return {
+      projection,
+      hydrated: false
+    };
+  }
+
+  let hydratedProjection = projection;
+  let hydrated = false;
+  for (const event of replayableDecisionEvents) {
+    try {
+      hydratedProjection = applyRuntimeEventsToProjection(hydratedProjection, [event]);
+      hydrated = true;
+    } catch (error) {
+      if (isRuntimeAuthorityIntegrityError(error)) {
+        throw error;
+      }
+      continue;
+    }
+  }
+
+  return {
+    projection: hydrated ? hydratedProjection : projection,
+    hydrated
+  };
+}
+
+function selectRecoveredCompletedDecisionReplayEvents(
+  projection: RuntimeProjection,
+  record: HostRunRecord,
+  replayableEvents: RuntimeEvent[]
+): Array<
+  | Extract<RuntimeEvent, { type: "decision.created" }>
+  | Extract<RuntimeEvent, { type: "decision.resolved" }>
+> {
+  if (record.terminalOutcome?.kind !== "decision") {
+    return [];
+  }
+
+  const replayableDecisionCreates = replayableEvents.filter(
+    (event): event is Extract<RuntimeEvent, { type: "decision.created" }> =>
+      event.type === "decision.created" &&
+      matchesRecoveredCompletedDecision(record, event.payload.decision)
+  );
+  const knownDecisionIds = new Set(
+    [
+      record.terminalOutcome.decision.decisionId,
+      findRecoveredCompletedDecision(projection, record)?.decisionId,
+      ...replayableDecisionCreates.map((event) => event.payload.decision.decisionId)
+    ].filter((value): value is string => typeof value === "string" && value.length > 0)
+  );
+
+  return replayableEvents.filter(
+    (
+      event
+    ): event is
+      | Extract<RuntimeEvent, { type: "decision.created" }>
+      | Extract<RuntimeEvent, { type: "decision.resolved" }> =>
+      (event.type === "decision.created" &&
+        matchesRecoveredCompletedDecision(record, event.payload.decision)) ||
+      (event.type === "decision.resolved" && knownDecisionIds.has(event.payload.decisionId))
+  );
 }
 
 function hasRecoveredCompletedAssignmentState(
@@ -1383,13 +1393,16 @@ function hydrateProjectionFromReplayableEvents(
     };
   }
 
-  const hydratedProjection = fromSnapshot(toSnapshot(projection));
+  let hydratedProjection = projection;
   let hydrated = false;
   for (const event of hydrationEvents) {
     try {
-      applyRuntimeEvent(hydratedProjection, event);
+      hydratedProjection = applyRuntimeEventsToProjection(hydratedProjection, [event]);
       hydrated = true;
-    } catch {
+    } catch (error) {
+      if (isRuntimeAuthorityIntegrityError(error)) {
+        throw error;
+      }
       continue;
     }
   }
@@ -1403,17 +1416,6 @@ function listLiveLeaseAssignments(records: HostRunRecord[]): string[] {
   return records
     .filter((record) => record.state === "running" && !isRunLeaseExpired(record))
     .map((record) => record.assignmentId);
-}
-
-function hasEquivalentRuntimeStatus(
-  actualStatus: RuntimeProjection["status"],
-  expectedStatus: RuntimeProjection["status"]
-): boolean {
-  return actualStatus.currentObjective === expectedStatus.currentObjective &&
-    actualStatus.activeMode === expectedStatus.activeMode &&
-    actualStatus.resumeReady === expectedStatus.resumeReady &&
-    actualStatus.activeAssignmentIds.length === expectedStatus.activeAssignmentIds.length &&
-    actualStatus.activeAssignmentIds.every((id, index) => id === expectedStatus.activeAssignmentIds[index]);
 }
 
 function selectReplayableSuffixEvents(
@@ -1460,26 +1462,41 @@ function hydrateMissingAssignmentFromReplayableEvents(
     };
   }
 
-  const hydratedProjection = fromSnapshot(toSnapshot(projection));
-  applyRuntimeEvent(hydratedProjection, assignmentEvent);
-  return {
-    projection: hydratedProjection,
-    hydrated: true
-  };
+  try {
+    return {
+      projection: applyRuntimeEventsToProjection(projection, [assignmentEvent]),
+      hydrated: true
+    };
+  } catch (error) {
+    if (isRuntimeAuthorityIntegrityError(error)) {
+      throw error;
+    }
+    return {
+      projection,
+      hydrated: false
+    };
+  }
 }
 
 function buildRecoveredOutcomeEvents(
   projection: RuntimeProjection,
   record: HostRunRecord,
-  timestamp: string
+  timestamp: string,
+  recoveredDecisionState?: "open" | "resolved"
 ): RuntimeEvent[] {
   if (!record.terminalOutcome) {
     throw new Error(`Completed host run for assignment ${record.assignmentId} is missing terminal outcome data.`);
   }
-  const status = nextRuntimeStatusFromRecord(projection, record, timestamp);
+  const status = nextRuntimeStatusFromRecord(
+    projection,
+    record,
+    timestamp,
+    recoveredDecisionState
+  );
   const events: RuntimeEvent[] = [];
 
   if (record.terminalOutcome.kind === "decision") {
+    const decisionState = recoveredDecisionState ?? record.terminalOutcome.decision.state;
     events.push({
       eventId: randomUUID(),
       sessionId: projection.sessionId,
@@ -1493,7 +1510,7 @@ function buildRecoveredOutcomeEvents(
           blockerSummary: record.terminalOutcome.decision.blockerSummary,
           options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
           recommendedOption: record.terminalOutcome.decision.recommendedOption,
-          state: record.terminalOutcome.decision.state,
+          state: decisionState,
           createdAt: record.terminalOutcome.decision.createdAt
         }
       }
@@ -1526,7 +1543,7 @@ function buildRecoveredOutcomeEvents(
     payload: {
       assignmentId: record.assignmentId,
       patch: {
-        state: nextAssignmentStateFromRecord(record),
+        state: nextAssignmentStateFromRecord(record, recoveredDecisionState),
         updatedAt: timestamp
       }
     }
@@ -1536,7 +1553,7 @@ function buildRecoveredOutcomeEvents(
     sessionId: projection.sessionId,
     timestamp,
     type: "status.updated",
-    payload: { status: nextRuntimeStatusFromRecord(projection, record, timestamp) }
+    payload: { status }
   });
 
   return events;
@@ -1547,7 +1564,8 @@ function nextAssignmentStateFromRecord(record: HostRunRecord, recoveredDecisionS
     return "failed" as const;
   }
   if (record.terminalOutcome.kind === "decision") {
-    return recoveredDecisionState === "resolved" ? "in_progress" : ("blocked" as const);
+    const decisionState = recoveredDecisionState ?? record.terminalOutcome.decision.state;
+    return decisionState === "resolved" ? ("in_progress" as const) : ("blocked" as const);
   }
   switch (record.terminalOutcome.result.status) {
     case "completed":
@@ -1562,7 +1580,8 @@ function nextAssignmentStateFromRecord(record: HostRunRecord, recoveredDecisionS
 function nextRuntimeStatusFromRecord(
   projection: RuntimeProjection,
   record: HostRunRecord,
-  timestamp: string
+  timestamp: string,
+  recoveredDecisionState?: "open" | "resolved"
 ) {
   const terminal =
     record.terminalOutcome?.kind === "result" &&
@@ -1585,7 +1604,8 @@ function nextRuntimeStatusFromRecord(
           ? nextDecisionCurrentObjective(
               projection,
               record.assignmentId,
-              record.terminalOutcome.decision.blockerSummary
+              record.terminalOutcome.decision.blockerSummary,
+              recoveredDecisionState ?? record.terminalOutcome.decision.state
             )
           : projection.status.currentObjective,
     activeAssignmentIds,
@@ -1597,8 +1617,16 @@ function nextRuntimeStatusFromRecord(
 function nextDecisionCurrentObjective(
   projection: RuntimeProjection,
   assignmentId: string,
-  blockerSummary: string
+  blockerSummary: string,
+  decisionState: "open" | "resolved"
 ): string {
+  if (decisionState === "resolved") {
+    const assignmentObjective = projection.assignments.get(assignmentId)?.objective;
+    if (assignmentObjective && projection.status.currentObjective === blockerSummary) {
+      return assignmentObjective;
+    }
+    return projection.status.currentObjective;
+  }
   const latestDecision = [...projection.decisions.values()]
     .filter((decision) => decision.assignmentId === assignmentId)
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
@@ -1627,19 +1655,26 @@ function statusObjectiveTracksAssignment(
 }
 
 async function mutateSnapshotFallbackProjection(
-  store: RuntimeStore,
-  replayableEvents: RuntimeEvent[] | undefined,
-  snapshotBoundaryEventId: string | undefined,
+  context: RunReconciliationContext,
   mutate: (projection: RuntimeProjection) => RuntimeProjection | Promise<RuntimeProjection>
 ): Promise<RuntimeProjection> {
-  return store.mutateSnapshotProjection(async (latestProjection) => {
-    const hydrated = hydrateProjectionFromReplayableEvents(
-      latestProjection,
-      replayableEvents,
-      snapshotBoundaryEventId
-    );
-    return mutate(hydrated.projection);
-  });
+  return context.store.withEventsLock(async () =>
+    context.store.withSnapshotLock(async () => {
+      const latestSnapshot = await context.store.loadSnapshot();
+      if (!latestSnapshot) {
+        throw new Error("Snapshot-fallback reconciliation requires a durable snapshot.");
+      }
+      const replayableEvents = (await context.projectionRecovery.loadReplayableEvents()).events;
+      const hydrated = hydrateProjectionFromReplayableEvents(
+        fromSnapshot(latestSnapshot),
+        replayableEvents,
+        latestSnapshot.lastEventId
+      );
+      const nextProjection = await mutate(hydrated.projection);
+      await context.store.writeSnapshot(toSnapshot(nextProjection));
+      return nextProjection;
+    })
+  );
 }
 
 async function syncProjectionSnapshot(
@@ -1651,12 +1686,7 @@ async function syncProjectionSnapshot(
 }> {
   if (options.snapshotFallback) {
     return {
-      projection: await mutateSnapshotFallbackProjection(
-        context.store,
-        options.replayableEvents,
-        options.snapshotBoundaryEventId,
-        (latestProjection) => latestProjection
-      )
+      projection: await mutateSnapshotFallbackProjection(context, (latestProjection) => latestProjection)
     };
   }
   return context.projectionRecovery.syncSnapshotFromEventsWithRecovery();
@@ -1703,24 +1733,10 @@ async function persistProjectionEvents(
   }
 
   return {
-    projection: await mutateSnapshotFallbackProjection(
-      context.store,
-      recoveryOptions.replayableEvents,
-      recoveryOptions.snapshotBoundaryEventId,
-      (latestProjection) => applyRuntimeEventsToProjection(latestProjection, events)
+    projection: await mutateSnapshotFallbackProjection(context, (latestProjection) =>
+      applyRuntimeEventsToProjection(latestProjection, events)
     )
   };
-}
-
-function applyRuntimeEventsToProjection(
-  projection: RuntimeProjection,
-  events: RuntimeEvent[]
-): RuntimeProjection {
-  const nextProjection = fromSnapshot(toSnapshot(projection));
-  for (const event of events) {
-    applyRuntimeEvent(nextProjection, event);
-  }
-  return nextProjection;
 }
 
 function warningDiagnostics(

@@ -206,6 +206,21 @@ export class RuntimeStore implements ProjectionRecoveryStore {
     });
   }
 
+  async deleteTextArtifactCas(
+    relativePath: string,
+    expectedVersion: string | null
+  ): Promise<{ ok: boolean; version: string | null }> {
+    const fullPath = join(this.rootDir, relativePath);
+    return withPathLock(fullPath, async () => {
+      const current = await readVersionedTextFile(fullPath);
+      if (current.version !== expectedVersion) {
+        return { ok: false, version: current.version };
+      }
+      await rm(fullPath, { force: true });
+      return { ok: true, version: null };
+    });
+  }
+
   async writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {
     const fullPath = join(this.rootDir, relativePath);
     await writeJsonAtomic(fullPath, value);

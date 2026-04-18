@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type { HostExecutionOutcome } from "./contract.js";
 import type { HostRunRecord } from "../core/types.js";
 
@@ -6,13 +8,15 @@ export function buildCompletedRunRecord(
   assignmentId: string,
   startedAt: string,
   completedAt: string,
-  nativeRunId?: string
+  nativeRunId?: string,
+  runInstanceId?: string
 ): HostRunRecord {
   if (outcome.outcome.kind === "decision") {
     return {
       assignmentId,
       state: "completed",
       startedAt,
+      ...(runInstanceId ? { runInstanceId } : {}),
       completedAt,
       outcomeKind: "decision",
       summary: outcome.outcome.capture.blockerSummary,
@@ -38,6 +42,7 @@ export function buildCompletedRunRecord(
     assignmentId,
     state: "completed",
     startedAt,
+    ...(runInstanceId ? { runInstanceId } : {}),
     completedAt,
     outcomeKind: "result",
     resultStatus: outcome.outcome.capture.status,
@@ -67,6 +72,7 @@ export function createRunningRunRecord(
     assignmentId,
     state: "running",
     startedAt,
+    runInstanceId: randomUUID(),
     heartbeatAt: startedAt,
     leaseExpiresAt: new Date(Date.parse(startedAt) + leaseMs).toISOString(),
     ...(nativeRunId ? { adapterData: { nativeRunId } } : {})

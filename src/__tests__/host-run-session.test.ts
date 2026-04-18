@@ -61,6 +61,19 @@ class MemoryArtifactStore implements RuntimeArtifactStore {
     return { ok: true, version };
   }
 
+  async deleteTextArtifactCas(
+    relativePath: string,
+    expectedVersion: string | null
+  ): Promise<{ ok: boolean; version: string | null }> {
+    const current = this.artifacts.get(relativePath);
+    const currentVersion = current?.version ?? null;
+    if (currentVersion !== expectedVersion) {
+      return { ok: false, version: currentVersion };
+    }
+    this.artifacts.delete(relativePath);
+    return { ok: true, version: null };
+  }
+
   async writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {
     this.artifacts.set(relativePath, {
       content: JSON.stringify(value),
@@ -97,17 +110,15 @@ test("host-run session coordinator records native run id persistence warnings", 
   const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
   await runStore.claim(claimedRun);
 
-  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
-  store.writeJsonArtifact = async (relativePath, value) => {
-    if (
-      relativePath === artifacts.runLeasePath(assignmentId) &&
-      typeof value === "object" &&
-      value !== null &&
-      "adapterData" in value
-    ) {
-      throw new Error("simulated coordinator metadata failure");
+  const originalWriteTextArtifactCas = store.writeTextArtifactCas.bind(store);
+  store.writeTextArtifactCas = async (relativePath, expectedVersion, nextContent) => {
+    if (relativePath === artifacts.runLeasePath(assignmentId)) {
+      const leaseRecord = JSON.parse(nextContent) as { adapterData?: unknown };
+      if (leaseRecord.adapterData !== undefined) {
+        throw new Error("simulated coordinator metadata failure");
+      }
     }
-    return originalWriteJsonArtifact(relativePath, value);
+    return originalWriteTextArtifactCas(relativePath, expectedVersion, nextContent);
   };
 
   try {
@@ -129,7 +140,7 @@ test("host-run session coordinator records native run id persistence warnings", 
       /Host run metadata persistence failed during thread-start handling/
     );
   } finally {
-    store.writeJsonArtifact = originalWriteJsonArtifact;
+    store.writeTextArtifactCas = originalWriteTextArtifactCas;
   }
 });
 
@@ -341,16 +352,20 @@ test("host-run session matrix keeps completed state authoritative after a queued
   globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
 
   const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  const originalWriteTextArtifactCas = store.writeTextArtifactCas.bind(store);
   store.writeJsonArtifact = async (relativePath, value) => {
     const state =
       typeof value === "object" && value !== null && "state" in value
         ? String((value as { state?: unknown }).state)
         : undefined;
     writeEvents.push({ relativePath, state });
-    if (
-      relativePath === artifacts.runLeasePath(assignmentId) &&
-      state === "running"
-    ) {
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+  store.writeTextArtifactCas = async (relativePath, expectedVersion, nextContent) => {
+    const leaseRecord = JSON.parse(nextContent) as { state?: unknown };
+    const state = leaseRecord.state === undefined ? undefined : String(leaseRecord.state);
+    writeEvents.push({ relativePath, state });
+    if (relativePath === artifacts.runLeasePath(assignmentId) && state === "running") {
       runningLeaseWrites += 1;
       if (!heartbeatWriteBlocked && runningLeaseWrites === 3) {
         heartbeatWriteBlocked = true;
@@ -358,7 +373,7 @@ test("host-run session matrix keeps completed state authoritative after a queued
         await heartbeatWriteReleased;
       }
     }
-    return originalWriteJsonArtifact(relativePath, value);
+    return originalWriteTextArtifactCas(relativePath, expectedVersion, nextContent);
   };
 
   try {
@@ -453,6 +468,7 @@ test("host-run session matrix keeps completed state authoritative after a queued
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
     store.writeJsonArtifact = originalWriteJsonArtifact;
+    store.writeTextArtifactCas = originalWriteTextArtifactCas;
   }
 });
 
@@ -477,6 +493,7 @@ test("host-run session matrix refreshes the lease before derived completion meta
   globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
 
   const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  const originalWriteTextArtifactCas = store.writeTextArtifactCas.bind(store);
   const writeEvents: Array<{ relativePath: string; state: string | undefined }> = [];
   let leaseRefreshObserved!: () => void;
   const leaseRefreshSeen = new Promise<void>((resolve) => {
@@ -496,12 +513,18 @@ test("host-run session matrix refreshes the lease before derived completion meta
           ? String((value as { state?: unknown }).state)
           : undefined
     });
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+  store.writeTextArtifactCas = async (relativePath, expectedVersion, nextContent) => {
+    const leaseRecord = JSON.parse(nextContent) as { state?: unknown };
+    const state = leaseRecord.state === undefined ? undefined : String(leaseRecord.state);
+    writeEvents.push({ relativePath, state });
     if (!leaseRefreshBlocked && relativePath === artifacts.runLeasePath(assignmentId)) {
       leaseRefreshBlocked = true;
       leaseRefreshObserved();
       await leaseRefreshReleased;
     }
-    return originalWriteJsonArtifact(relativePath, value);
+    return originalWriteTextArtifactCas(relativePath, expectedVersion, nextContent);
   };
 
   try {
@@ -587,6 +610,7 @@ test("host-run session matrix refreshes the lease before derived completion meta
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
     store.writeJsonArtifact = originalWriteJsonArtifact;
+    store.writeTextArtifactCas = originalWriteTextArtifactCas;
   }
 });
 
@@ -612,22 +636,17 @@ test("host-run session matrix fails the run when heartbeat persistence stops wor
   }) as typeof globalThis.setInterval;
   globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
 
-  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  const originalWriteTextArtifactCas = store.writeTextArtifactCas.bind(store);
   let leaseWriteCount = 0;
-  store.writeJsonArtifact = async (relativePath, value) => {
-    if (
-      relativePath === artifacts.runLeasePath(assignmentId) &&
-      typeof value === "object" &&
-      value !== null &&
-      "state" in value &&
-      value.state === "running"
-    ) {
+  store.writeTextArtifactCas = async (relativePath, expectedVersion, nextContent) => {
+    const leaseRecord = JSON.parse(nextContent) as { state?: unknown };
+    if (relativePath === artifacts.runLeasePath(assignmentId) && leaseRecord.state === "running") {
       leaseWriteCount += 1;
-      if (leaseWriteCount >= 3) {
+      if (leaseWriteCount === 3) {
         throw new Error("simulated heartbeat persistence failure");
       }
     }
-    return originalWriteJsonArtifact(relativePath, value);
+    return originalWriteTextArtifactCas(relativePath, expectedVersion, nextContent);
   };
 
   try {
@@ -686,6 +705,7 @@ test("host-run session matrix fails the run when heartbeat persistence stops wor
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
+    store.writeTextArtifactCas = originalWriteTextArtifactCas;
   }
 });
 
@@ -773,17 +793,15 @@ test("host-run session does not surface launch identity when metadata persistenc
   const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
   await runStore.claim(claimedRun);
 
-  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
-  store.writeJsonArtifact = async (relativePath, value) => {
-    if (
-      relativePath === artifacts.runLeasePath(assignmentId) &&
-      typeof value === "object" &&
-      value !== null &&
-      "adapterData" in value
-    ) {
-      throw new Error("simulated thread-start metadata failure");
+  const originalWriteTextArtifactCas = store.writeTextArtifactCas.bind(store);
+  store.writeTextArtifactCas = async (relativePath, expectedVersion, nextContent) => {
+    if (relativePath === artifacts.runLeasePath(assignmentId)) {
+      const leaseRecord = JSON.parse(nextContent) as { adapterData?: unknown };
+      if (leaseRecord.adapterData !== undefined) {
+        throw new Error("simulated thread-start metadata failure");
+      }
     }
-    return originalWriteJsonArtifact(relativePath, value);
+    return originalWriteTextArtifactCas(relativePath, expectedVersion, nextContent);
   };
 
   let seenIdentity: string | undefined;
@@ -846,7 +864,7 @@ test("host-run session does not surface launch identity when metadata persistenc
     assert.equal(execution.run.adapterData?.nativeRunId, undefined);
     assert.match(execution.warning ?? "", /thread-start metadata failure/);
   } finally {
-    store.writeJsonArtifact = originalWriteJsonArtifact;
+    store.writeTextArtifactCas = originalWriteTextArtifactCas;
   }
 });
 

@@ -27,7 +27,7 @@ export function materializeInspectableRunRecord(
   if (authoritative) {
     return normalizeInspectableRunRecord(authoritative);
   }
-  if (options?.includeMalformedLeaseRecord && inspection.lease.state === "malformed") {
+  if (options?.includeMalformedLeaseRecord !== false && inspection.lease.state === "malformed") {
     return createMalformedLeaseRecord(inspection.assignmentId, inspection.lease.raw);
   }
   return undefined;

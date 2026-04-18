@@ -162,6 +162,16 @@ export class HostRunLeaseRepository {
     await this.store.deleteArtifact(this.artifacts.runLeasePath(assignmentId));
   }
 
+  async deleteLeaseVersioned(
+    assignmentId: string,
+    expectedVersion: string | null
+  ): Promise<{ ok: boolean; version: string | null }> {
+    return this.store.deleteTextArtifactCas(
+      this.artifacts.runLeasePath(assignmentId),
+      expectedVersion
+    );
+  }
+
   async readRunRecord(assignmentId: string): Promise<HostRunRecord | undefined> {
     return this.store.readJsonArtifact<HostRunRecord>(
       this.artifacts.runRecordPath(assignmentId),

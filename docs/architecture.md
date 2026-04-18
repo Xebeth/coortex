@@ -76,6 +76,10 @@ Projections derive query-friendly views:
 - telemetry rollups
 
 The event log is authoritative. Projections are rebuildable.
+Serialized path locks that guard event-log, snapshot, and lease writes
+must be crash-recoverable so dead processes cannot wedge later recovery.
+Those locks must verify the holder's process identity, not just PID
+liveness, before treating an existing lock as still owned.
 
 ---
 

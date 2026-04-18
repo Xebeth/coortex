@@ -422,9 +422,10 @@ test("recovery brief rejects duplicate active claims for the same assignment", a
     }
   ]);
 
-  const projection = await store.rebuildProjection();
-
-  assert.throws(() => buildRecoveryBrief(projection), /multiple active claims are present/);
+  await assert.rejects(
+    store.rebuildProjection(),
+    /multiple active claims are present/
+  );
 });
 
 test("recovery brief rejects ambiguous resumable attachments across active assignments", async () => {

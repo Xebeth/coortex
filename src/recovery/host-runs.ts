@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { RuntimeEvent } from "../core/events.js";
 import type { HostRunRecord, RuntimeProjection } from "../core/types.js";
-import { getNativeRunId } from "../core/run-state.js";
+import { getNativeRunId, getRunInstanceId } from "../core/run-state.js";
 import { nowIso } from "../utils/time.js";
 
 export interface RecoveryDiagnostic {
@@ -16,6 +16,7 @@ export interface StaleRunReconciliation {
   events: RuntimeEvent[];
   diagnostic: RecoveryDiagnostic;
   telemetryMetadata: {
+    runInstanceId: string;
     nativeRunId: string;
     leaseExpiresAt: string;
     heartbeatAt: string;
@@ -63,9 +64,11 @@ export function buildStaleRunReconciliation(
 ): StaleRunReconciliation {
   const staleReasonCode = record.staleReasonCode ?? describeStaleRunReasonCode(record);
   const staleReason = record.staleReason ?? describeStaleRunReason(record);
+  const runInstanceId = getRunInstanceId(record);
   const staleRecord: HostRunRecord = {
     ...record,
     state: "completed",
+    ...(runInstanceId ? { runInstanceId } : {}),
     staleAt: timestamp,
     staleReasonCode,
     staleReason
@@ -83,6 +86,7 @@ export function buildStaleRunReconciliation(
         assignmentId,
         patch: {
           state: "queued",
+          ...(runInstanceId ? { lastStaleRunInstanceId: runInstanceId } : {}),
           updatedAt: timestamp
         }
       }
@@ -97,7 +101,8 @@ export function buildStaleRunReconciliation(
           ...projection.status,
           currentObjective: `Retry assignment ${assignmentId}: ${objective}`,
           lastDurableOutputAt: timestamp,
-          resumeReady: true
+          resumeReady: true,
+          ...(runInstanceId ? { lastStaleRunInstanceId: runInstanceId } : {})
         }
       }
     }
@@ -114,6 +119,7 @@ export function buildStaleRunReconciliation(
       }.`
     },
     telemetryMetadata: {
+      runInstanceId: runInstanceId ?? "",
       nativeRunId: nativeRunId ?? "",
       leaseExpiresAt: record.leaseExpiresAt ?? "",
       heartbeatAt: record.heartbeatAt ?? "",

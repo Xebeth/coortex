@@ -133,7 +133,7 @@ The persistence layer must provide:
 - snapshots
 - projections
 - atomic writes
-- schema versioning
+- stable schema ownership
 - durable recovery artifacts
 
 Recovery must operate from durable state rather than transcript replay.

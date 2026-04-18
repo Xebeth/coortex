@@ -3,11 +3,12 @@ import type { RuntimeEvent } from "../core/events.js";
 import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import { parseJson } from "../utils/json.js";
 import {
-  applyRuntimeEvent,
+  applyRuntimeEventsToProjection,
   fromSnapshot,
   projectRuntimeState,
   toSnapshot
 } from "../projections/runtime-projection.js";
+import { isRuntimeAuthorityIntegrityError } from "../projections/attachment-claim-queries.js";
 
 export interface ReplayableRuntimeEvents {
   events: RuntimeEvent[];
@@ -89,6 +90,9 @@ export class ProjectionRecoveryService {
           replayed: replayEventsAfterSnapshot(snapshot!, events)
         };
       } catch (error) {
+        if (isRuntimeAuthorityIntegrityError(error)) {
+          throw error;
+        }
         const detail = error instanceof Error ? error.message : String(error);
         return {
           fallback: fallbackToSnapshot(
@@ -150,6 +154,9 @@ export class ProjectionRecoveryService {
         const projection = projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
         return warning ? { projection, warning, snapshotFallback: false } : { projection, snapshotFallback: false };
       } catch (error) {
+        if (isRuntimeAuthorityIntegrityError(error)) {
+          throw error;
+        }
         if (!snapshot) {
           throw error;
         }
@@ -187,14 +194,25 @@ export class ProjectionRecoveryService {
   }
 
   async syncSnapshotFromEventsWithRecovery(): Promise<ProjectionSyncResult> {
+    const initialSnapshotFingerprint = snapshotFingerprint(await this.store.loadSnapshot());
     return this.store.withEventsLock(async () => {
-      const repairWarning = await this.repairEventLogLocked();
-      const recovered = await this.loadProjectionWithRecovery();
-      await this.store.withSnapshotLock(async () => {
+      return this.store.withSnapshotLock(async () => {
+        const repairWarning = await this.repairEventLogLocked();
+        const recovered = await this.loadProjectionWithRecovery();
+        const latestSnapshot = await this.store.loadSnapshot();
+        if (
+          latestSnapshot &&
+          snapshotFingerprint(latestSnapshot) !== initialSnapshotFingerprint
+        ) {
+          const warning = [repairWarning, recovered.warning].filter(Boolean).join(" ").trim();
+          return warning
+            ? { projection: fromSnapshot(latestSnapshot), warning }
+            : { projection: fromSnapshot(latestSnapshot) };
+        }
         await this.store.writeSnapshot(toSnapshot(recovered.projection));
+        const warning = [repairWarning, recovered.warning].filter(Boolean).join(" ").trim();
+        return warning ? { projection: recovered.projection, warning } : { projection: recovered.projection };
       });
-      const warning = [repairWarning, recovered.warning].filter(Boolean).join(" ").trim();
-      return warning ? { projection: recovered.projection, warning } : { projection: recovered.projection };
     });
   }
 
@@ -258,9 +276,9 @@ function replayEventsAfterSnapshot(
   if (snapshotIndex === -1) {
     return undefined;
   }
-  const projection = fromSnapshot(snapshot);
-  for (const event of events.slice(snapshotIndex + 1)) {
-    applyRuntimeEvent(projection, event);
-  }
-  return projection;
+  return applyRuntimeEventsToProjection(fromSnapshot(snapshot), events.slice(snapshotIndex + 1));
+}
+
+function snapshotFingerprint(snapshot: RuntimeSnapshot | undefined): string {
+  return snapshot ? JSON.stringify(snapshot) : "<missing>";
 }

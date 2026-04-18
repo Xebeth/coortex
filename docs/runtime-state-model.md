@@ -69,6 +69,9 @@ Required fields:
 - `created_at`
 
 Decision state should be understandable without relying on host-native session text.
+Resolved decisions are durable history, not active blockers. Once a
+decision is resolved, lifecycle synthesis must stop treating that
+decision as the current blocked state.
 
 ## 4. Runtime / Session Status
 
@@ -88,6 +91,8 @@ Suggested fields:
 state. When a decision becomes the active state, the status should move
 off the pre-decision assignment objective and reflect the blocker
 summary or a newer runtime-authored decision-specific objective.
+When that decision is later resolved, `current_objective` must return to
+the runnable assignment objective or newer runtime-authored status text.
 
 ## 5. Recovery Brief
 
@@ -202,6 +207,9 @@ Milestone 2 keeps the claim rule narrow:
 - at most one active claim may exist per assignment
 - at most one authoritative attached or detached-but-resumable
   attachment may exist per runtime
+- active claim graphs must be internally closed: a claim may not point
+  at a missing assignment or attachment, and command surfaces must
+  reject malformed graphs instead of treating them as absent authority
 
 ## 8. Host Run Record
 

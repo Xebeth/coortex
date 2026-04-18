@@ -10,6 +10,14 @@ export interface AttachmentClaimBinding {
   claim: AssignmentClaim;
 }
 
+export class RuntimeAuthorityIntegrityError extends Error {}
+
+export function isRuntimeAuthorityIntegrityError(
+  error: unknown
+): error is RuntimeAuthorityIntegrityError {
+  return error instanceof RuntimeAuthorityIntegrityError;
+}
+
 const AUTHORITATIVE_ATTACHMENT_STATES = new Set<RuntimeAttachment["state"]>([
   "attached",
   "detached_resumable"
@@ -27,6 +35,32 @@ export function getActiveClaimForAssignment(
   return listActiveClaimBindings(projection).find(({ claim }) => claim.assignmentId === assignmentId);
 }
 
+export function assertAttachmentClaimGraphIntegrity(projection: RuntimeProjection): void {
+  assertUniqueActiveClaims(projection);
+
+  const missingAttachments = [...projection.claims.values()].filter(
+    (claim) => !projection.attachments.has(claim.attachmentId)
+  );
+  if (missingAttachments.length > 0) {
+    throw new RuntimeAuthorityIntegrityError(
+      `Invalid runtime state: claim graph references missing attachments (${missingAttachments
+        .map((claim) => `${claim.id} -> ${claim.attachmentId}`)
+        .join("; ")}).`
+    );
+  }
+
+  const missingAssignments = [...projection.claims.values()].filter(
+    (claim) => !projection.assignments.has(claim.assignmentId)
+  );
+  if (missingAssignments.length > 0) {
+    throw new RuntimeAuthorityIntegrityError(
+      `Invalid runtime state: claim graph references missing assignments (${missingAssignments
+        .map((claim) => `${claim.id} -> ${claim.assignmentId}`)
+        .join("; ")}).`
+    );
+  }
+}
+
 export function assertUniqueActiveClaims(projection: RuntimeProjection): void {
   const activeClaimsByAssignment = new Map<string, string[]>();
   for (const claim of projection.claims.values()) {
@@ -42,7 +76,7 @@ export function assertUniqueActiveClaims(projection: RuntimeProjection): void {
   if (duplicates.length === 0) {
     return;
   }
-  throw new Error(
+  throw new RuntimeAuthorityIntegrityError(
     `Invalid runtime state: multiple active claims are present (${duplicates
       .map(([assignmentId, ids]) => `${assignmentId}: ${ids.join(", ")}`)
       .join("; ")}).`
@@ -52,13 +86,13 @@ export function assertUniqueActiveClaims(projection: RuntimeProjection): void {
 export function listActiveClaimBindings(
   projection: RuntimeProjection
 ): AttachmentClaimBinding[] {
-  assertUniqueActiveClaims(projection);
+  assertAttachmentClaimGraphIntegrity(projection);
   return [...projection.claims.values()]
     .filter((claim) => claim.state === "active")
-    .flatMap((claim) => {
-      const attachment = projection.attachments.get(claim.attachmentId);
-      return attachment ? [{ attachment, claim }] : [];
-    });
+    .map((claim) => ({
+      attachment: projection.attachments.get(claim.attachmentId)!,
+      claim
+    }));
 }
 
 export function listAuthoritativeAttachmentClaims(

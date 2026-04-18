@@ -10,6 +10,7 @@ import type {
   RuntimeSnapshot,
   RuntimeStatus
 } from "../core/types.js";
+import { assertAttachmentClaimGraphIntegrity } from "./attachment-claim-queries.js";
 
 const EMPTY_STATUS: RuntimeStatus = {
   activeMode: "idle",
@@ -151,7 +152,20 @@ export function projectRuntimeState(
   for (const event of events) {
     applyRuntimeEvent(projection, event);
   }
+  assertAttachmentClaimGraphIntegrity(projection);
   return projection;
+}
+
+export function applyRuntimeEventsToProjection(
+  projection: RuntimeProjection,
+  events: RuntimeEvent[]
+): RuntimeProjection {
+  const nextProjection = fromSnapshot(toSnapshot(projection));
+  for (const event of events) {
+    applyRuntimeEvent(nextProjection, event);
+  }
+  assertAttachmentClaimGraphIntegrity(nextProjection);
+  return nextProjection;
 }
 
 export function toSnapshot(projection: RuntimeProjection): RuntimeSnapshot {
@@ -190,6 +204,7 @@ export function fromSnapshot(snapshot: RuntimeSnapshot): RuntimeProjection {
   if (snapshot.lastEventId) {
     projection.lastEventId = snapshot.lastEventId;
   }
+  assertAttachmentClaimGraphIntegrity(projection);
   return projection;
 }
 
