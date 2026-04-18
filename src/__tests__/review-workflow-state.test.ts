@@ -499,3 +499,97 @@ test("fixer trace helper validates final-fix records before appending", async ()
     )
   );
 });
+
+test("family ledger records reopen-after-closed and surfaces it for the current run", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-family-ledger-"));
+
+  const initial = await runPythonJson(returnReviewStateScript, [
+    "append-family-ledger",
+    "--trace-root",
+    tempDir,
+    "--run-id",
+    "review-orchestrator-full-review-20260418T100000Z",
+    "--review-mode",
+    "full-review",
+    "--review-target-mode",
+    "branch",
+    "--review-target-summary",
+    "initial review",
+    "--family-id",
+    "F05",
+    "--family-title",
+    "Reclaim adoption still lacks durable owner fencing",
+    "--family-state",
+    "closed",
+    "--raw-status",
+    "closure-confirmed",
+    "--reason-summary",
+    "Initial review accepted the reclaim fencing fix."
+  ]);
+
+  assert.equal(initial.exitCode, 0);
+  assert.deepEqual(initial.json, {
+    ledger_file: join(tempDir, "family-ledger.jsonl"),
+    previous_state: null,
+    recorded: true,
+    reopened_after_closed: false
+  });
+
+  const reopen = await runPythonJson(returnReviewStateScript, [
+    "append-family-ledger",
+    "--trace-root",
+    tempDir,
+    "--run-id",
+    "review-orchestrator-return-review-20260418T110000Z",
+    "--review-mode",
+    "targeted-return-review",
+    "--review-target-mode",
+    "return-review",
+    "--review-target-summary",
+    "follow-up review",
+    "--family-id",
+    "F05",
+    "--family-title",
+    "Reclaim adoption still lacks durable owner fencing",
+    "--family-state",
+    "open",
+    "--raw-status",
+    "still-open-confirmed",
+    "--reason-summary",
+    "Follow-up review reopened the family after the prior closure claim."
+  ]);
+
+  assert.equal(reopen.exitCode, 0);
+  assert.deepEqual(reopen.json, {
+    ledger_file: join(tempDir, "family-ledger.jsonl"),
+    previous_state: "closed",
+    recorded: true,
+    reopened_after_closed: true
+  });
+
+  const currentRunReopens = await runPythonJson(returnReviewStateScript, [
+    "current-run-reopens",
+    "--trace-root",
+    tempDir,
+    "--run-id",
+    "review-orchestrator-return-review-20260418T110000Z"
+  ]);
+
+  assert.equal(currentRunReopens.exitCode, 0);
+  assert.deepEqual(currentRunReopens.json, {
+    ledger_file: join(tempDir, "family-ledger.jsonl"),
+    reopened_families_in_run: [
+      {
+        family_id: "F05",
+        family_title: "Reclaim adoption still lacks durable owner fencing",
+        previous_state: "closed",
+        current_state: "open",
+        previous_run_id: "review-orchestrator-full-review-20260418T100000Z",
+        raw_status: "still-open-confirmed",
+        reason_summary:
+          "Follow-up review reopened the family after the prior closure claim."
+      }
+    ],
+    run_id: "review-orchestrator-return-review-20260418T110000Z"
+  });
+});
