@@ -32,6 +32,7 @@ Do not use it as a general fix or implementation skill.
 ## Built-in lenses
 
 These are Coortex review concerns, not separate skills.
+They should match the built-in lens ids configured by `review-baseline`.
 
 - `goal-fidelity`
   - verify the requested behavior, closure gate, and review-handoff claims
