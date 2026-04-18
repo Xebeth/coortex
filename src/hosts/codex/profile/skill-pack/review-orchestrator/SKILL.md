@@ -44,7 +44,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
    - load the original `review_handoff`
    - load the `review_return_handoff`
    - gather the actual fix diff
-   - run the bundled return-review state helper for deferred-family validation/classification when `deferred_families` are present
+   - serialize the machine handoff blocks to JSON and run the bundled return-review state helper for deferred-family validation/classification when `deferred_families` are present
    - run return-review prep
    - spawn return-review lanes, using bounded waves when required lane count exceeds current subagent capacity
    - if the fixer reported deferred families that materially overlap the current diff or no longer look safely deferrable, spawn family-local or broader cross-family re-review lanes for those families too
@@ -79,7 +79,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
 - In targeted return-review mode, do not stop at a verdict ledger when families remain open. Emit a refreshed downstream `review_handoff` containing only the still-actionable families.
 - A refreshed downstream `review_handoff` must be rebuilt from the original family entry plus return-review lane evidence. Do not reuse the original family entry unchanged, and do not replace it with bare `family_results` verdict rows.
 - In targeted return-review mode, preserve structured fixer-reported deferred families. If a deferred family still remains actionable and its defer reason still holds, carry it forward in the refreshed downstream `review_handoff`; if the defer reason points to a broader shared seam, reopen exploration under that broader hypothesis.
-- Use the bundled `scripts/return_review_state.py` helper for deterministic deferred-family validation/classification and keep the model focused on the judgment calls the script cannot make.
+- Use the bundled `scripts/return_review_state.py` helper for deterministic deferred-family validation/classification and keep the model focused on the judgment calls the script cannot make. Serialize the relevant handoff blocks to JSON before invoking it.
 - Use the bundled `scripts/return_review_state.py` helper for deterministic trace path/file handling and carried-deferred handoff assembly. Keep the model focused on review judgments and evidence.
 - Use the repository family ledger on disk to track which families were deemed closed and later reopened. Treat repeated reopenings as a workflow-quality/debugging signal.
 - Use the bundled helper, not prose reconstruction, to decide which reopened families from the current run should be surfaced to the user.

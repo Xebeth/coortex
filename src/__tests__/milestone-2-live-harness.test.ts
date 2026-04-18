@@ -59,8 +59,18 @@ liveHarness(
       await assertPathExists(join(projectRoot, ".coortex", "adapters", "codex", "profile.json"));
       await assertPathExists(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"));
       await assertPathExists(join(projectRoot, ".codex", "config.toml"));
-      await assertPathExists(join(projectRoot, ".codex", "skills", "coortex-review-lane", "SKILL.md"));
-      await assertPathExists(join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"));
+      const skillPackManifest = JSON.parse(
+        await readFile(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"), "utf8")
+      ) as { managedSkills: string[] };
+      assert.deepEqual(skillPackManifest.managedSkills, [
+        "coortex-review-lane",
+        "review-baseline",
+        "review-fixer",
+        "review-orchestrator"
+      ]);
+      for (const skillName of skillPackManifest.managedSkills) {
+        await assertPathExists(join(projectRoot, ".codex", "skills", skillName, "SKILL.md"));
+      }
     });
 
     await t.test("happy path real run persists result, status, inspect, and telemetry", async () => {

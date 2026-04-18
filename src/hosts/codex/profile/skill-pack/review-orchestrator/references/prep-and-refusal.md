@@ -59,6 +59,7 @@ When `deferred_families` are present in `review_return_handoff`, start with the
 bundled helper:
 
 ```bash
+# Serialize the handoff blocks to JSON before invoking the helper.
 python scripts/return_review_state.py classify-deferred \
   --review-handoff <path> \
   --review-return-handoff <path> \

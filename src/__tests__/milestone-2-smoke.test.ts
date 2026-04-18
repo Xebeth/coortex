@@ -114,10 +114,10 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
     throw new Error("runExec should not be called during init-only smoke coverage");
   });
 
-  const skillPackManifest = await readFile(
+  const skillPackManifest = JSON.parse(await readFile(
     join(setup.projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"),
     "utf8"
-  );
+  )) as { managedSkills: string[] };
   const reviewFixerSkill = await readFile(
     join(setup.projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"),
     "utf8"
@@ -127,7 +127,15 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
     "utf8"
   );
 
-  assert.match(skillPackManifest, /"managedSkills": \[/);
+  assert.deepEqual(skillPackManifest.managedSkills, [
+    "coortex-review-lane",
+    "review-baseline",
+    "review-fixer",
+    "review-orchestrator"
+  ]);
+  for (const skillName of skillPackManifest.managedSkills) {
+    await readFile(join(setup.projectRoot, ".codex", "skills", skillName, "SKILL.md"), "utf8");
+  }
   assert.match(reviewFixerSkill, /Review Fixer/);
   assert.match(reviewLaneSkill, /Coortex Review Lane/);
 });

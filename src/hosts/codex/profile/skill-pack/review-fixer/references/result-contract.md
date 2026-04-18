@@ -69,6 +69,7 @@ Emit a mandatory `review_return_handoff` for downstream re-review.
 Before finalizing it, run the bundled helper:
 
 ```bash
+# Serialize the handoff blocks to JSON before validating them.
 python scripts/fix_result_state.py validate-review-return \
   --review-return-handoff <path> \
   --review-handoff <path>

@@ -156,6 +156,7 @@ When deferred families are only being carried forward without a new lane, use
 the bundled helper to assemble that skeleton deterministically:
 
 ```bash
+# Serialize the handoff blocks to JSON before invoking the helper.
 python scripts/return_review_state.py build-carried-handoff \
   --review-handoff <path> \
   --review-return-handoff <path> \

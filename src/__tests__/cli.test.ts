@@ -960,14 +960,20 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
 
   const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
   assert.match(codexConfig, /model_instructions_file = "/);
-  const reviewFixerSkill = await readFile(
-    join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"),
-    "utf8"
-  );
-  const reviewLaneSkill = await readFile(
-    join(projectRoot, ".codex", "skills", "coortex-review-lane", "SKILL.md"),
-    "utf8"
-  );
+  const skillPackManifest = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"), "utf8")
+  ) as { managedSkills: string[] };
+  assert.deepEqual(skillPackManifest.managedSkills, [
+    "coortex-review-lane",
+    "review-baseline",
+    "review-fixer",
+    "review-orchestrator"
+  ]);
+  for (const skillName of skillPackManifest.managedSkills) {
+    await readFile(join(projectRoot, ".codex", "skills", skillName, "SKILL.md"), "utf8");
+  }
+  const reviewFixerSkill = await readFile(join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"), "utf8");
+  const reviewLaneSkill = await readFile(join(projectRoot, ".codex", "skills", "coortex-review-lane", "SKILL.md"), "utf8");
   assert.match(reviewFixerSkill, /Review Fixer/);
   assert.match(reviewLaneSkill, /Coortex Review Lane/);
 
