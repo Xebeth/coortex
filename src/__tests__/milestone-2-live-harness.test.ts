@@ -59,6 +59,7 @@ liveHarness(
       await assertPathExists(join(projectRoot, ".coortex", "adapters", "codex", "profile.json"));
       await assertPathExists(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"));
       await assertPathExists(join(projectRoot, ".codex", "config.toml"));
+      await assertPathExists(join(projectRoot, ".codex", "skills", "coortex-review-lane", "SKILL.md"));
       await assertPathExists(join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"));
     });
 

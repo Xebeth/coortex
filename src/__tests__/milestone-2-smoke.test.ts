@@ -122,9 +122,14 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
     join(setup.projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"),
     "utf8"
   );
+  const reviewLaneSkill = await readFile(
+    join(setup.projectRoot, ".codex", "skills", "coortex-review-lane", "SKILL.md"),
+    "utf8"
+  );
 
   assert.match(skillPackManifest, /"managedSkills": \[/);
   assert.match(reviewFixerSkill, /Review Fixer/);
+  assert.match(reviewLaneSkill, /Coortex Review Lane/);
 });
 
 test("milestone-2 smoke: decision path persists a blocker through the real run path", async () => {

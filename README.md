@@ -152,7 +152,7 @@ Generated files include:
 - `.coortex/adapters/codex/profile.json`
 - `.coortex/adapters/codex/skill-pack.json`
 - `.codex/config.toml` with a Coortex-managed `model_instructions_file` block for project-local Codex integration
-- `.codex/skills/review-baseline`, `.codex/skills/review-orchestrator`, and `.codex/skills/review-fixer` as the Coortex-managed Codex review skill pack
+- `.codex/skills/coortex-review-lane`, `.codex/skills/review-baseline`, `.codex/skills/review-orchestrator`, and `.codex/skills/review-fixer` as the Coortex-managed Codex review skill pack
 
 ## Local usage
 
