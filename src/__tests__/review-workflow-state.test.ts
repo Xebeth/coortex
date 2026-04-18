@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -368,6 +368,104 @@ test("build-carried-handoff normalizes broader cross-family defer context withou
     reevaluate_when: ["the next fixer slice starts for this family"]
   });
   assert.ok(!("reviewer_next_step" in family));
+});
+
+test("full-review baseline helper prefers a working .coortex baseline over docs fallback", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-"));
+  await mkdir(join(tempDir, ".coortex"), { recursive: true });
+  await mkdir(join(tempDir, "docs"), { recursive: true });
+
+  const workingBaseline = join(tempDir, ".coortex", "review-baseline.yaml");
+  const docsBaseline = join(tempDir, "docs", "review-baseline.yaml");
+  await writeFile(workingBaseline, "baseline_version: 1\n", "utf8");
+  await writeFile(docsBaseline, "baseline_version: 1\n", "utf8");
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "resolve-full-review-baseline",
+    "--project-root",
+    tempDir
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    baseline_resolved: true,
+    baseline_path: workingBaseline,
+    resolution_source: "working-primary"
+  });
+});
+
+test("full-review baseline helper falls back to docs baseline when no working baseline exists", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-"));
+  await mkdir(join(tempDir, "docs"), { recursive: true });
+
+  const docsBaseline = join(tempDir, "docs", "review-baseline.yaml");
+  await writeFile(docsBaseline, "baseline_version: 1\n", "utf8");
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "resolve-full-review-baseline",
+    "--project-root",
+    tempDir
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    baseline_resolved: true,
+    baseline_path: docsBaseline,
+    resolution_source: "docs-primary"
+  });
+});
+
+test("full-review baseline helper respects an explicit baseline path over automatic resolution", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-"));
+  await mkdir(join(tempDir, ".coortex", "review-baselines"), { recursive: true });
+  await mkdir(join(tempDir, "docs"), { recursive: true });
+
+  const explicitBaseline = join(tempDir, ".coortex", "review-baselines", "branch.yaml");
+  const docsBaseline = join(tempDir, "docs", "review-baseline.yaml");
+  await writeFile(explicitBaseline, "baseline_version: 1\n", "utf8");
+  await writeFile(docsBaseline, "baseline_version: 1\n", "utf8");
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "resolve-full-review-baseline",
+    "--project-root",
+    tempDir,
+    "--explicit-path",
+    ".coortex/review-baselines/branch.yaml"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    baseline_resolved: true,
+    baseline_path: explicitBaseline,
+    resolution_source: "explicit-path"
+  });
+});
+
+test("full-review baseline helper reports missing candidates when no baseline is present", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-"));
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "resolve-full-review-baseline",
+    "--project-root",
+    tempDir
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    baseline_resolved: false,
+    errors: [
+      "no full-review baseline was found via explicit path, .coortex/review-baseline.yaml, docs/review-baseline.yaml, or doc/review-baseline.yaml"
+    ],
+    candidates_checked: [
+      join(tempDir, ".coortex", "review-baseline.yaml"),
+      join(tempDir, "docs", "review-baseline.yaml"),
+      join(tempDir, "doc", "review-baseline.yaml")
+    ]
+  });
 });
 
 test("full-review narrowing helper resolves one inferred surface/path subset and normalizes run-local focus", async () => {

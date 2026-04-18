@@ -11,7 +11,23 @@ Choose the prep path that matches the review mode.
 1. Resolve the baseline file:
    - explicit path when the user provided one
    - otherwise an explicitly requested alternative baseline listed by the primary baseline
-   - otherwise the primary baseline
+   - otherwise run the bundled helper:
+
+```bash
+python scripts/return_review_state.py resolve-full-review-baseline \
+  --project-root <repo-root> \
+  [--explicit-path <baseline-path>]
+```
+
+The helper resolves the active primary baseline in this order:
+- explicit path when one is provided
+- `.coortex/review-baseline.yaml`
+- `docs/review-baseline.yaml`
+- `doc/review-baseline.yaml`
+
+Treat `.coortex/review-baseline.yaml` as the repo-local working baseline. Use
+the docs/doc paths as durable committed fallbacks when no working baseline is
+present.
 2. Load the selected baseline.
 3. When the user asks for a run-local narrowing inside that baseline, start with the bundled helper:
 

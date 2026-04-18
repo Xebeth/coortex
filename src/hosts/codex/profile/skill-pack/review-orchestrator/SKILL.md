@@ -31,11 +31,14 @@ In targeted return-review mode, stay family-local and review the completed fix a
    - targeted return review from `review_handoff + review_return_handoff`
 3. Create or resume the run trace directory/files via the bundled helper described in `references/trace-artifact.md`.
 4. If this is a full discovery review:
-   - load the baseline from a user-provided explicit path when one was supplied
+   - resolve the baseline from a user-provided explicit path when one was supplied
    - if the user explicitly requests a listed alternative baseline by id, name, path, or stated purpose, resolve and load that variant baseline instead of the primary one
-   - otherwise, load the baseline from the project's explicit configured path if one exists
-   - otherwise, use `docs/review-baseline.yaml` when the project has a `docs/` directory, or `doc/review-baseline.yaml` when it has a `doc/` directory but no `docs/` directory
-   - if the project has neither `docs/` nor `doc/` and no explicit baseline path is established, ask the user where the baseline lives before proceeding
+   - otherwise, use the bundled helper to resolve the active primary baseline in this order:
+     - `.coortex/review-baseline.yaml`
+     - `docs/review-baseline.yaml`
+     - `doc/review-baseline.yaml`
+   - treat `.coortex/review-baseline.yaml` as the repo-local working baseline and the docs/doc locations as durable committed fallbacks
+   - if none of those paths resolve and no explicit baseline path was supplied, ask the user where the baseline lives before proceeding
    - if the user asks for a run-local narrowing inside the selected baseline, infer a candidate surface/path-subset/focus tuple from the user's wording, serialize the selected baseline to JSON, and run the bundled narrowing helper before prep
    - run full-review prep
    - spawn coverage lanes, using bounded waves when required lane count exceeds current subagent capacity
@@ -62,6 +65,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
 - In full discovery review, refuse if the baseline is missing, unparseable, stale, or too underspecified for grounded execution.
 - In full discovery review, use the primary baseline by default. Only switch to an alternative baseline when the user explicitly requests one or provides an explicit baseline path.
 - If an alternative baseline is selected, it must be standalone and parseable on its own. Do not merge it with the primary baseline at runtime.
+- Treat `.coortex/review-baseline.yaml` as the preferred working baseline when it exists. This lets active branch/worktree review use a local admin-zone baseline without forcing committed baseline churn.
 - In full discovery review, run-local narrowing may only reduce the selected baseline to one compatible surface/path subset plus optional focus emphasis. It must not invent new surfaces, rewrite anchors, or compose several baseline files.
 - When the user asks for a natural-language narrowing such as a module name or focus phrase, infer the candidate override tuple and run the bundled helper to validate it. Do not require the user to supply the structured tuple directly.
 - Do not fall back to temporary rediscovery.
@@ -112,8 +116,11 @@ Prep must:
 - for full discovery review:
   - resolve which baseline file is being used:
     - explicit path
-    - primary baseline
     - explicitly requested alternative baseline
+    - `.coortex/review-baseline.yaml`
+    - `docs/review-baseline.yaml`
+    - `doc/review-baseline.yaml`
+  - use `scripts/return_review_state.py resolve-full-review-baseline ...` for deterministic primary-baseline resolution before prep
   - when the user asks for run-local narrowing within the selected baseline:
     - infer a candidate surface id/name, path subset, and focus override from the user's wording
     - serialize the selected baseline to JSON and run `scripts/return_review_state.py validate-full-review-narrowing ...`
