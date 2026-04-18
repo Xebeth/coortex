@@ -63,6 +63,7 @@ liveHarness(
         await readFile(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"), "utf8")
       ) as { managedSkills: string[] };
       assert.deepEqual(skillPackManifest.managedSkills, [
+        "coortex-review",
         "coortex-review-lane",
         "review-baseline",
         "review-fixer",

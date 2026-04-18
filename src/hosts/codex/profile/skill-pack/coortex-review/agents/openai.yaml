@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coortex Review"
+  short_description: "Review one bounded Coortex scope"
+  default_prompt: "Use $coortex-review to review one bounded Coortex seam, family, surface, or module. Keep the scope single-agent and refuse broad review work that really needs multiple independent lanes under $review-orchestrator. Check the requested contract, closure gate, and behavioral claims before style or cleanup concerns, apply any configured lenses in order, gather explicit file-backed evidence, and prefer visible uncertainty over rounding up to a pass. If the prompt provides an exact output schema, follow it instead of the default findings/verdict format."

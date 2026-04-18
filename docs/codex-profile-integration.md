@@ -51,7 +51,7 @@ The default Codex profile must remain unchanged.
 The Coortex-specific Codex profile may manage:
 
 - `model_instructions_file`
-- the Coortex-managed review skill pack installed into project-local `.codex/skills`, including the lane-review dependency skill used by the review workflow
+- the Coortex-managed review skill pack installed into project-local `.codex/skills`, including the user-facing bounded reviewer and the lane-review dependency skill used by the review workflow
 - Coortex-specific developer instructions if needed
 - Coortex-specific environment/config placeholders
 - later host-specific hooks or MCP registration if required
