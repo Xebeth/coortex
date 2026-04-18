@@ -47,6 +47,7 @@ When a project has recurring narrow review modes, this skill may also write stan
 - Do not redo broad primary-baseline discovery when the user only wants to add or refresh an alternative baseline and the existing primary baseline is still usable as reference context.
 - If the project has a `docs/` directory, default the baseline location to `docs/review-baseline.yaml` unless the project already has an explicit path.
 - If the project has a `doc/` directory but no `docs/` directory, default the baseline location to `doc/review-baseline.yaml` unless the project already has an explicit path.
+- When the user wants a non-committed working baseline for active branch/worktree review, default the primary baseline location to `.coortex/review-baseline.yaml`.
 - If the project has neither `docs/` nor `doc/` and no explicit baseline path is already established, ask the user where the baseline should live before writing it.
 - Keep the baseline structured and concise enough for another skill to consume directly.
 - Store project-specific configuration in the baseline. Do not copy the full generic lens catalog into it.
@@ -55,6 +56,7 @@ When a project has recurring narrow review modes, this skill may also write stan
 - Only create alternative baseline files when the project has a stable repeated need for narrower review passes, such as finer surface breakdown or fewer lenses for a targeted check.
 - Alternative baseline files must be standalone consumable baselines, not patch files or partial overrides that require another skill to merge them with the primary baseline.
 - When writing alternative baseline files, default them under `docs/review-baselines/` or `doc/review-baselines/` when those directories exist.
+- When writing non-committed working alternative baselines, default them under `.coortex/review-baselines/`.
 
 ## Surface Discovery
 
@@ -82,6 +84,7 @@ When a project has recurring narrow review modes, this skill may also write stan
 ## Alternative Baselines
 
 - Use alternative baseline files for recurring targeted checks, not for one-off review windows.
+- Use `.coortex` baseline paths for active working baselines that should not yet be committed.
 - If the user is only adding or refreshing an alternative baseline, keep the primary baseline unchanged except for any metadata pointer updates needed to register the new alternative.
 - Ask explicitly whether a new alternative baseline should be:
   - `derived` from the existing primary baseline

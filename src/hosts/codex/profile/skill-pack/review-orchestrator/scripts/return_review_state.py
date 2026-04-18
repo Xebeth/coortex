@@ -136,6 +136,13 @@ def wildcard_kind(value: str) -> str:
     return "unsupported"
 
 
+def resolve_user_path(project_root: pathlib.Path, raw_path: str) -> pathlib.Path:
+    candidate = pathlib.Path(raw_path)
+    if candidate.is_absolute():
+        return candidate
+    return project_root / candidate
+
+
 def default_run_id(mode: str) -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"review-orchestrator-{mode}-{timestamp}"
@@ -737,6 +744,75 @@ def normalize_carried_open_reason(
     return "family-local-gap-remaining"
 
 
+def resolve_full_review_baseline(args: argparse.Namespace) -> int:
+    project_root = pathlib.Path(args.project_root).resolve()
+    if args.explicit_path:
+        baseline_path = resolve_user_path(project_root, args.explicit_path)
+        if not baseline_path.exists():
+            print(
+                json.dumps(
+                    {
+                        "mode": "full-discovery-review",
+                        "baseline_resolved": False,
+                        "errors": [f"explicit baseline path {str(baseline_path)!r} does not exist"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        print(
+            json.dumps(
+                {
+                    "mode": "full-discovery-review",
+                    "baseline_resolved": True,
+                    "baseline_path": str(baseline_path),
+                    "resolution_source": "explicit-path",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    candidates = [
+        ("working-primary", project_root / ".coortex" / "review-baseline.yaml"),
+        ("docs-primary", project_root / "docs" / "review-baseline.yaml"),
+        ("doc-primary", project_root / "doc" / "review-baseline.yaml"),
+    ]
+    for source, path in candidates:
+        if path.exists():
+            print(
+                json.dumps(
+                    {
+                        "mode": "full-discovery-review",
+                        "baseline_resolved": True,
+                        "baseline_path": str(path),
+                        "resolution_source": source,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+
+    print(
+        json.dumps(
+            {
+                "mode": "full-discovery-review",
+                "baseline_resolved": False,
+                "errors": [
+                    "no full-review baseline was found via explicit path, .coortex/review-baseline.yaml, docs/review-baseline.yaml, or doc/review-baseline.yaml"
+                ],
+                "candidates_checked": [str(path) for _, path in candidates],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 2
+
+
 def anchored_patterns(surface: dict[str, Any]) -> list[str]:
     return normalize_string_list(surface.get("primary_anchors")) + normalize_string_list(
         surface.get("supporting_anchors")
@@ -1052,6 +1128,21 @@ def build_parser() -> argparse.ArgumentParser:
     carried.add_argument("--output")
     carried.add_argument("--summary", action="store_true")
     carried.set_defaults(func=build_carried_handoff)
+
+    baseline = subparsers.add_parser(
+        "resolve-full-review-baseline",
+        help="Resolve the active full-review baseline path for a project.",
+    )
+    baseline.add_argument(
+        "--project-root",
+        required=True,
+        help="Project root used for baseline resolution.",
+    )
+    baseline.add_argument(
+        "--explicit-path",
+        help="Optional user-provided explicit baseline path, absolute or project-relative.",
+    )
+    baseline.set_defaults(func=resolve_full_review_baseline)
 
     narrowing = subparsers.add_parser(
         "validate-full-review-narrowing",

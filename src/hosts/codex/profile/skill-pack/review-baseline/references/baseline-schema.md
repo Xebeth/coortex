@@ -6,9 +6,13 @@ Default path:
 - `docs/review-baseline.yaml` when the project has a `docs/` directory
 - `doc/review-baseline.yaml` when the project has a `doc/` directory but no `docs/` directory
 
+Recommended working baseline path:
+- `.coortex/review-baseline.yaml` for a repo-local non-committed baseline used during active branch/worktree dogfooding
+
 Recommended alternative baseline directory:
 - `docs/review-baselines/` when the project has a `docs/` directory
 - `doc/review-baselines/` when the project has a `doc/` directory but no `docs/` directory
+- `.coortex/review-baselines/` for repo-local non-committed working alternatives
 
 If the project does not have a `docs/` or `doc/` directory and no explicit baseline path is already established:
 - ask the user where the baseline should live before writing it
