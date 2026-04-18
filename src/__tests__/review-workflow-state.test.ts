@@ -370,6 +370,360 @@ test("build-carried-handoff normalizes broader cross-family defer context withou
   assert.ok(!("reviewer_next_step" in family));
 });
 
+test("full-review narrowing helper resolves one inferred surface/path subset and normalizes run-local focus", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
+  const baselinePath = join(tempDir, "baseline.json");
+
+  await writeFile(
+    baselinePath,
+    JSON.stringify(
+      {
+        baseline_version: 1,
+        updated_at: "2026-04-18",
+        surfaces: [
+          {
+            id: "runtime-authority",
+            name: "Runtime Authority",
+            primary_anchors: ["src/core/**", "src/projections/**"],
+            supporting_anchors: ["docs/runtime-state-model.md"],
+            configured_builtin_lenses: [
+              { lens_id: "goal-fidelity", priority: "high" },
+              { lens_id: "context-history", priority: "medium" }
+            ],
+            configured_custom_lenses: []
+          },
+          {
+            id: "cli-operator-surfaces",
+            name: "CLI Operator Surfaces",
+            primary_anchors: ["src/cli/**"],
+            supporting_anchors: ["README.md"],
+            configured_builtin_lenses: [{ lens_id: "quality", priority: "high" }],
+            configured_custom_lenses: []
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-full-review-narrowing",
+    "--baseline-json",
+    baselinePath,
+    "--path-subset",
+    "src/core/**",
+    "--focus",
+    "separation-of-concerns"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    narrowing_valid: true,
+    narrowing: {
+      selected_surface_id: "runtime-authority",
+      selected_surface_name: "Runtime Authority",
+      path_subset: "src/core/**",
+      requested_focus: ["soc"],
+      configured_focus: [],
+      run_local_focus: ["soc"],
+      configured_builtin_lenses: ["goal-fidelity", "context-history"],
+      configured_custom_lenses: [],
+      path_subset_match_basis:
+        "path_subset resolved uniquely inside the selected baseline surface anchors"
+    }
+  });
+});
+
+test("full-review narrowing helper allows built-in portability as run-local focus when the surface did not configure it", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
+  const baselinePath = join(tempDir, "baseline.json");
+
+  await writeFile(
+    baselinePath,
+    JSON.stringify(
+      {
+        baseline_version: 1,
+        updated_at: "2026-04-19",
+        surfaces: [
+          {
+            id: "runtime-authority",
+            name: "Runtime Authority",
+            primary_anchors: ["src/core/**"],
+            supporting_anchors: ["docs/runtime-state-model.md"],
+            configured_builtin_lenses: [
+              { lens_id: "goal-fidelity", priority: "high" },
+              { lens_id: "context-history", priority: "medium" }
+            ],
+            configured_custom_lenses: []
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-full-review-narrowing",
+    "--baseline-json",
+    baselinePath,
+    "--path-subset",
+    "src/core/**",
+    "--focus",
+    "portability"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    narrowing_valid: true,
+    narrowing: {
+      selected_surface_id: "runtime-authority",
+      selected_surface_name: "Runtime Authority",
+      path_subset: "src/core/**",
+      requested_focus: ["portability"],
+      configured_focus: [],
+      run_local_focus: ["portability"],
+      configured_builtin_lenses: ["goal-fidelity", "context-history"],
+      configured_custom_lenses: [],
+      path_subset_match_basis:
+        "path_subset resolved uniquely inside the selected baseline surface anchors"
+    }
+  });
+});
+
+test("full-review narrowing helper recognizes built-in portability focus when the narrowed surface configures it", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
+  const baselinePath = join(tempDir, "baseline.json");
+
+  await writeFile(
+    baselinePath,
+    JSON.stringify(
+      {
+        baseline_version: 1,
+        updated_at: "2026-04-18",
+        surfaces: [
+          {
+            id: "runtime-authority",
+            name: "Runtime Authority",
+            primary_anchors: ["src/core/**"],
+            supporting_anchors: ["docs/runtime-state-model.md"],
+            configured_builtin_lenses: [
+              { lens_id: "goal-fidelity", priority: "high" },
+              { lens_id: "portability", priority: "high" }
+            ],
+            configured_custom_lenses: []
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-full-review-narrowing",
+    "--baseline-json",
+    baselinePath,
+    "--path-subset",
+    "src/core/**",
+    "--focus",
+    "portability"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    narrowing_valid: true,
+    narrowing: {
+      selected_surface_id: "runtime-authority",
+      selected_surface_name: "Runtime Authority",
+      path_subset: "src/core/**",
+      requested_focus: ["portability"],
+      configured_focus: ["portability"],
+      run_local_focus: [],
+      configured_builtin_lenses: ["goal-fidelity", "portability"],
+      configured_custom_lenses: [],
+      path_subset_match_basis:
+        "path_subset resolved uniquely inside the selected baseline surface anchors"
+    }
+  });
+});
+
+test("full-review narrowing helper accepts a bare directory path subset inside one surface", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
+  const baselinePath = join(tempDir, "baseline.json");
+
+  await writeFile(
+    baselinePath,
+    JSON.stringify(
+      {
+        baseline_version: 1,
+        updated_at: "2026-04-18",
+        surfaces: [
+          {
+            id: "runtime-authority",
+            name: "Runtime Authority",
+            primary_anchors: ["src/core/**", "src/projections/**"],
+            supporting_anchors: ["docs/runtime-state-model.md"],
+            configured_builtin_lenses: [
+              { lens_id: "goal-fidelity", priority: "high" },
+              { lens_id: "context-history", priority: "medium" }
+            ],
+            configured_custom_lenses: []
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-full-review-narrowing",
+    "--baseline-json",
+    baselinePath,
+    "--path-subset",
+    "src/core",
+    "--focus",
+    "soc"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    narrowing_valid: true,
+    narrowing: {
+      selected_surface_id: "runtime-authority",
+      selected_surface_name: "Runtime Authority",
+      path_subset: "src/core",
+      requested_focus: ["soc"],
+      configured_focus: [],
+      run_local_focus: ["soc"],
+      configured_builtin_lenses: ["goal-fidelity", "context-history"],
+      configured_custom_lenses: [],
+      path_subset_match_basis:
+        "path_subset resolved uniquely inside the selected baseline surface anchors"
+    }
+  });
+});
+
+test("full-review narrowing helper rejects incompatible surface/path combinations", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
+  const baselinePath = join(tempDir, "baseline.json");
+
+  await writeFile(
+    baselinePath,
+    JSON.stringify(
+      {
+        baseline_version: 1,
+        updated_at: "2026-04-18",
+        surfaces: [
+          {
+            id: "runtime-authority",
+            name: "Runtime Authority",
+            primary_anchors: ["src/core/**"],
+            supporting_anchors: [],
+            configured_builtin_lenses: [{ lens_id: "goal-fidelity", priority: "high" }],
+            configured_custom_lenses: []
+          },
+          {
+            id: "cli-operator-surfaces",
+            name: "CLI Operator Surfaces",
+            primary_anchors: ["src/cli/**"],
+            supporting_anchors: [],
+            configured_builtin_lenses: [{ lens_id: "quality", priority: "high" }],
+            configured_custom_lenses: []
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-full-review-narrowing",
+    "--baseline-json",
+    baselinePath,
+    "--surface",
+    "cli-operator-surfaces",
+    "--path-subset",
+    "src/core/**",
+    "--focus",
+    "soc"
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    narrowing_valid: false,
+    errors: [
+      "path_subset 'src/core/**' does not fit inside the requested surface 'cli-operator-surfaces'"
+    ]
+  });
+});
+
+test("full-review narrowing helper rejects path subsets that overlap multiple surfaces", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
+  const baselinePath = join(tempDir, "baseline.json");
+
+  await writeFile(
+    baselinePath,
+    JSON.stringify(
+      {
+        baseline_version: 1,
+        updated_at: "2026-04-18",
+        surfaces: [
+          {
+            id: "runtime-authority",
+            name: "Runtime Authority",
+            primary_anchors: ["src/core/**"],
+            supporting_anchors: [],
+            configured_builtin_lenses: [{ lens_id: "goal-fidelity", priority: "high" }],
+            configured_custom_lenses: []
+          },
+          {
+            id: "shared-host-run-infra",
+            name: "Shared Host Run Infra",
+            primary_anchors: ["src/core/**"],
+            supporting_anchors: [],
+            configured_builtin_lenses: [{ lens_id: "quality", priority: "high" }],
+            configured_custom_lenses: []
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-full-review-narrowing",
+    "--baseline-json",
+    baselinePath,
+    "--path-subset",
+    "src/core/**"
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.json, {
+    mode: "full-discovery-review",
+    narrowing_valid: false,
+    errors: [
+      "path_subset 'src/core/**' overlaps multiple baseline surfaces and needs an explicit surface or baseline refresh"
+    ]
+  });
+});
+
 test("orchestrator trace helper validates lane result records before appending", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");

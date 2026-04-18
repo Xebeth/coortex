@@ -28,6 +28,10 @@ Do not use it as a general fix or implementation skill.
   instead of the default summary shape.
 - If the lane prompt provides configured lenses, use those lenses as the
   ordered review concerns for this lane.
+- If the lane prompt also provides run-local focus emphasis, treat that as an
+  extra bounded concern for this lane without mutating the configured lens
+  bundle for the run. That emphasis may be either a baseline-configured built-in
+  lens id used as an extra runtime focus or a runtime-only emphasis token.
 
 ## Built-in lenses
 
@@ -47,6 +51,9 @@ They should match the built-in lens ids configured by `review-baseline`.
   - public contract compatibility, error semantics, and caller impact
 - `performance`
   - hot-path or algorithmic risks that materially affect the lane scope
+- `portability`
+  - platform, filesystem, shell, path, and repo-layout assumptions that can
+    break the lane's behavior across environments or host setups
 - `context-history`
   - nearby sibling paths, git history, docs, and adjacent callers needed to
     judge whether the root cause is wider than the immediate diff
@@ -58,11 +65,14 @@ They should match the built-in lens ids configured by `review-baseline`.
 3. Apply the configured lenses inside the bounded lane scope. If no lenses
    are provided, default to `goal-fidelity`, `quality`, and
    `context-history`.
-4. Inspect the local sibling paths needed to judge whether the same root
+4. If the lane prompt includes run-local focus emphasis, apply it as a
+   plain-language emphasis inside the bounded lane scope after honoring the
+   configured lenses.
+5. Inspect the local sibling paths needed to judge whether the same root
    cause still exists in the lane scope.
-5. Run available diagnostics or lightweight verification only when the
+6. Run available diagnostics or lightweight verification only when the
    environment supports them and they matter to correctness for this lane.
-6. Return severity-rated findings with concrete file evidence.
+7. Return severity-rated findings with concrete file evidence.
 
 ## Lane types
 
@@ -94,6 +104,8 @@ The orchestrator should tell you which bounded lane type you are running.
 ## Lens behavior
 
 Use configured lenses as ordered review concerns, not as loose labels.
+Run-local focus emphasis is separate; it narrows or sharpens the lane inside
+that configured lens set without mutating the baseline.
 
 - `goal-fidelity`
   - verify the requested contract, closure gate, and review-handoff claims
@@ -110,9 +122,27 @@ Use configured lenses as ordered review concerns, not as loose labels.
   - inspect externally visible contract compatibility and caller impact
 - `performance`
   - inspect only material hot-path or algorithmic risks in scope
+- `portability`
+  - inspect Linux-only, POSIX-only, shell-specific, filesystem-specific,
+    symlink-only, cwd/root, and repo-layout assumptions that could break this
+    lane outside the current environment
 - `context-history`
   - inspect sibling paths, adjacent callers, docs, and relevant history needed
     to judge whether the root cause is wider than the immediate diff
+
+## Run-local focus emphasis
+
+Run-local focus emphasis may reuse a built-in lens id as extra runtime focus or
+use a runtime-only emphasis token after validating a narrowed run. In either
+case it stays separate from the baseline-configured lens bundle.
+
+- built-in lens ids such as `portability`
+  - when passed as run-local focus, apply the same built-in lens behavior as
+    extra emphasis without rewriting the configured surface lens list
+- `soc`
+  - increase scrutiny on separation-of-concerns risks such as mixed
+    responsibilities, ownership leakage, helper sprawl, duplicated orchestration
+    or business logic, and logic living outside its owning module
 
 ## Guardrails
 

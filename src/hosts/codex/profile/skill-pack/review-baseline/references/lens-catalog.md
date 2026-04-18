@@ -33,6 +33,11 @@ surface.
   - Check hot-path or algorithmic risks that materially affect the bounded
     review scope.
 
+- `portability`
+  - Check platform, shell, filesystem, path, worktree, and repo-layout
+    assumptions that could break behavior across supported environments or host
+    setups.
+
 - `context-history`
   - Check nearby sibling paths, docs, adjacent callers, and relevant history to
     judge whether the root cause is wider than the immediate diff.

@@ -13,22 +13,38 @@ Choose the prep path that matches the review mode.
    - otherwise an explicitly requested alternative baseline listed by the primary baseline
    - otherwise the primary baseline
 2. Load the selected baseline.
-3. Choose the review window:
+3. When the user asks for a run-local narrowing inside that baseline, start with the bundled helper:
+
+```bash
+# Serialize the selected baseline to JSON before invoking the helper.
+python scripts/return_review_state.py validate-full-review-narrowing \
+  --baseline-json <path> \
+  [--surface <inferred-surface>] \
+  [--path-subset <inferred-path-subset>] \
+  [--focus <inferred-focus>] ...
+```
+
+Treat the helper output as the deterministic starting point for whether the
+requested narrowing is a legal reduction of the selected baseline. The reviewer
+still owns the natural-language inference from user wording to the candidate
+surface/path/focus tuple.
+4. Choose the review window:
    - local changes
    - commit
    - commit range
    - branch
    - merge-base
-4. Gather changed files.
-5. Map changed files into baseline surfaces:
+5. Gather changed files.
+6. Map changed files into baseline surfaces:
    - use `primary_anchors` first
    - use `supporting_anchors` second
-6. Record:
+7. Record:
    - unmatched files
    - ambiguous matches
    - touched surfaces
-7. Assess boundedness of each touched surface slice.
-8. Merge baseline lens configuration with any user-requested focus lenses.
+8. Assess boundedness of each touched surface slice.
+9. Keep the baseline-configured lenses unchanged and carry any validated
+   run-local focus override as separate emphasis metadata for this run; the override may be a built-in lens id used as extra runtime focus or a runtime-only emphasis token.
 
 Boundedness assessment must use explicit split triggers, not only intuition.
 For each touched surface slice, record:
@@ -114,6 +130,8 @@ For full discovery review:
 - one or more touched surface slices fire multiple split triggers and still cannot be split into grounded lanes
 - touched surfaces have no usable configured lenses
 - current repo shape shows the baseline is stale or misclassified
+- a requested run-local narrowing does not resolve to exactly one compatible baseline surface
+- a requested run-local narrowing would cross surfaces, rewrite the baseline shape, or require runtime baseline merging
 
 For targeted return review:
 - the `review_handoff` is missing or unparseable

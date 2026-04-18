@@ -25,7 +25,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
    - `references/closure-gate.md`
    - `references/return-review.md`
    - `references/trace-artifact.md`
-   - `scripts/return_review_state.py` for deterministic targeted return-review state checks
+   - `scripts/return_review_state.py` for deterministic targeted return-review state checks and full-review narrowing validation
 2. Determine review mode:
    - full discovery review from the project baseline
    - targeted return review from `review_handoff + review_return_handoff`
@@ -36,6 +36,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
    - otherwise, load the baseline from the project's explicit configured path if one exists
    - otherwise, use `docs/review-baseline.yaml` when the project has a `docs/` directory, or `doc/review-baseline.yaml` when it has a `doc/` directory but no `docs/` directory
    - if the project has neither `docs/` nor `doc/` and no explicit baseline path is established, ask the user where the baseline lives before proceeding
+   - if the user asks for a run-local narrowing inside the selected baseline, infer a candidate surface/path-subset/focus tuple from the user's wording, serialize the selected baseline to JSON, and run the bundled narrowing helper before prep
    - run full-review prep
    - spawn coverage lanes, using bounded waves when required lane count exceeds current subagent capacity
    - group coverage findings into candidate defect families
@@ -61,6 +62,8 @@ In targeted return-review mode, stay family-local and review the completed fix a
 - In full discovery review, refuse if the baseline is missing, unparseable, stale, or too underspecified for grounded execution.
 - In full discovery review, use the primary baseline by default. Only switch to an alternative baseline when the user explicitly requests one or provides an explicit baseline path.
 - If an alternative baseline is selected, it must be standalone and parseable on its own. Do not merge it with the primary baseline at runtime.
+- In full discovery review, run-local narrowing may only reduce the selected baseline to one compatible surface/path subset plus optional focus emphasis. It must not invent new surfaces, rewrite anchors, or compose several baseline files.
+- When the user asks for a natural-language narrowing such as a module name or focus phrase, infer the candidate override tuple and run the bundled helper to validate it. Do not require the user to supply the structured tuple directly.
 - Do not fall back to temporary rediscovery.
 - Do not edit, patch, or repair the baseline in this skill. If prep finds baseline drift or stale mapping, stop and direct the user back to `review-baseline` to refresh it.
 - Do not write a separate review plan.
@@ -111,13 +114,18 @@ Prep must:
     - explicit path
     - primary baseline
     - explicitly requested alternative baseline
+  - when the user asks for run-local narrowing within the selected baseline:
+    - infer a candidate surface id/name, path subset, and focus override from the user's wording
+    - serialize the selected baseline to JSON and run `scripts/return_review_state.py validate-full-review-narrowing ...`
+    - use the helper output as the deterministic starting point for whether the narrowing is legal
   - choose review window: local changes, commit, commit range, branch, merge-base
   - gather changed files
   - map changed files to surfaces using primary anchors first and supporting anchors second
   - record unmatched or ambiguously matched files
   - decide whether touched surfaces are bounded enough
   - record which split triggers fired for each touched surface slice and any boundedness exceptions when a triggered slice is still kept intact
-  - merge baseline lens configuration with any user-requested review focus
+  - keep the baseline-configured lenses unchanged and carry any validated
+    run-local focus override as separate emphasis metadata for this run; the override may be a built-in lens id used as extra runtime focus or a runtime-only emphasis token
   - stop and refuse instead of modifying the baseline if prep reveals stale anchors, stale docs, or misclassified surfaces
 - for targeted return review:
   - validate that the `review_handoff` is present and parseable
@@ -140,6 +148,8 @@ Use the refusal rules from `references/prep-and-refusal.md`.
 - Run each coverage lane in a Codex `default` subagent and invoke `$coortex-review-lane` inside the lane prompt, scoped to that lane only.
 - If coverage lanes exceed current subagent capacity, queue them in bounded waves rather than collapsing one lane into coordinator-local review.
 - Give each lane the surface-specific configured lenses.
+- When prep validated run-local focus emphasis, pass it separately in the lane
+  prompt instead of mutating the configured lens list.
 - Split a touched surface only when a single lane would force spot-checking or mixed evidence strategies.
 - Require every coverage lane result to follow the coverage-lane output contract in `references/report-contract.md`.
 
