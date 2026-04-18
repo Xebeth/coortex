@@ -198,6 +198,10 @@ Rules for the refreshed downstream handoff:
   `verification-blocked-separate-blocker` unless the user explicitly asks to
   carry blocked families forward or the reviewer can provide a concrete
   `next_step` that makes the blocked family actionable for a later reevaluation
+- do not include dormant deferred families by default when they remain
+  `user-scope-excluded`, `touch_state: not-started`, and the current diff still
+  does not overlap their owning seam; keep them visible in the final review
+  output and ledger instead
 - do not include `unverified` families unless the completed lane evidence is
   still grounded enough to rebuild an actionable family entry
 - do not emit a verdict ledger in place of the refreshed handoff
