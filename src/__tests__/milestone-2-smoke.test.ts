@@ -109,6 +109,24 @@ test("milestone-2 smoke: happy-path execution persists result, status, and telem
   assert.match(resumed.brief.nextRequiredAction, new RegExp(`Start plan assignment ${setup.assignmentId}:`));
 });
 
+test("milestone-2 smoke: init installs the managed Codex review skill pack", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runExec should not be called during init-only smoke coverage");
+  });
+
+  const skillPackManifest = await readFile(
+    join(setup.projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"),
+    "utf8"
+  );
+  const reviewFixerSkill = await readFile(
+    join(setup.projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"),
+    "utf8"
+  );
+
+  assert.match(skillPackManifest, /"managedSkills": \[/);
+  assert.match(reviewFixerSkill, /Review Fixer/);
+});
+
 test("milestone-2 smoke: decision path persists a blocker through the real run path", async () => {
   const setup = await createSmokeSetup(async (input) => {
     await writeStructuredOutput(input.outputPath, {
