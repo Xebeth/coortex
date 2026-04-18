@@ -151,7 +151,13 @@ Generated files include:
 - `.coortex/adapters/codex/kernel.md`
 - `.coortex/adapters/codex/profile.json`
 - `.coortex/adapters/codex/skill-pack.json`
-- `.codex/config.toml` with a Coortex-managed `model_instructions_file` block for project-local Codex integration
+- `.codex/config.toml` with a Coortex-managed
+  `model_instructions_file` block and, when needed relative to the
+  existing project and global Codex config and without overriding
+  project-managed top-level `[agents]` settings, a local
+  `[agents].max_threads = 12` projection when inherited global
+  top-level agents config does not already provide that capacity for
+  project-local Codex integration
 - `.codex/skills/coortex-review`, `.codex/skills/coortex-review-lane`, `.codex/skills/review-baseline`, `.codex/skills/review-orchestrator`, and `.codex/skills/review-fixer` as the Coortex-managed Codex review skill pack
 
 ## Local usage

@@ -51,6 +51,11 @@ The default Codex profile must remain unchanged.
 The Coortex-specific Codex profile may manage:
 
 - `model_instructions_file`
+- a local top-level `[agents].max_threads = 12` projection only when
+  the project config does not already manage top-level `[agents]`
+  settings and the inherited global top-level Codex config does not
+  already provide at least that many worker threads for bounded
+  multi-lane review
 - the Coortex-managed review skill pack installed into project-local `.codex/skills`, including the user-facing bounded reviewer and the lane-review dependency skill used by the review workflow
 - Coortex-specific developer instructions if needed
 - Coortex-specific environment/config placeholders

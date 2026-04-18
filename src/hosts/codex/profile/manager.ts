@@ -1,4 +1,5 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import type { DoctorCheck, RuntimeArtifactStore } from "../../../adapters/contract.js";
@@ -6,6 +7,9 @@ import type { CodexConfigInstallation, CodexProfileConfig } from "./types.js";
 
 const MANAGED_BLOCK_START = "# BEGIN COORTEX CODEX PROFILE";
 const MANAGED_BLOCK_END = "# END COORTEX CODEX PROFILE";
+const MANAGED_AGENTS_BLOCK_START = "# BEGIN COORTEX CODEX AGENTS";
+const MANAGED_AGENTS_BLOCK_END = "# END COORTEX CODEX AGENTS";
+const REQUIRED_AGENT_THREADS = 12;
 
 export class CodexProfileManager {
   constructor(private readonly store: RuntimeArtifactStore) {}
@@ -16,6 +20,10 @@ export class CodexProfileManager {
 
   configPath(): string {
     return join(dirname(this.store.rootDir), ".codex", "config.toml");
+  }
+
+  globalConfigPath(): string {
+    return join(process.env.CODEX_HOME || join(homedir(), ".codex"), "config.toml");
   }
 
   buildProfileConfig(kernelPath: string): CodexProfileConfig {
@@ -36,9 +44,14 @@ export class CodexProfileManager {
 
   async install(kernelPath: string): Promise<CodexConfigInstallation> {
     const configPath = this.configPath();
-    const block = renderManagedBlock(kernelPath);
+    const block = renderManagedProfileBlock(kernelPath);
     const existing = await readTextIfPresent(configPath);
-    const next = mergeManagedBlock(configPath, existing, block);
+    const profileNext = mergeManagedProfileBlock(configPath, existing, block);
+    const globalConfig =
+      this.globalConfigPath() === configPath
+        ? undefined
+        : await readTextIfPresent(this.globalConfigPath());
+    const next = syncManagedAgentsBlock(profileNext, globalConfig);
 
     await mkdir(dirname(configPath), { recursive: true });
     await writeFile(configPath, next, "utf8");
@@ -105,7 +118,7 @@ function readString(value: Record<string, unknown>, key: string): string {
   return field;
 }
 
-function renderManagedBlock(kernelPath: string): string {
+function renderManagedProfileBlock(kernelPath: string): string {
   return [
     MANAGED_BLOCK_START,
     "# Coortex Codex reference adapter",
@@ -114,7 +127,17 @@ function renderManagedBlock(kernelPath: string): string {
   ].join("\n");
 }
 
-function mergeManagedBlock(configPath: string, existing: string | undefined, block: string): string {
+function renderManagedAgentsBlock(): string {
+  return [
+    MANAGED_AGENTS_BLOCK_START,
+    "# Coortex review lanes may exceed the Codex default worker limit",
+    "[agents]",
+    `max_threads = ${REQUIRED_AGENT_THREADS}`,
+    MANAGED_AGENTS_BLOCK_END
+  ].join("\n");
+}
+
+function mergeManagedProfileBlock(configPath: string, existing: string | undefined, block: string): string {
   if (!existing || existing.trim().length === 0) {
     return `${block}\n`;
   }
@@ -130,6 +153,37 @@ function mergeManagedBlock(configPath: string, existing: string | undefined, blo
     );
   }
   return `${existing.trimEnd()}\n\n${block}\n`;
+}
+
+function syncManagedAgentsBlock(existing: string, globalConfig: string | undefined): string {
+  const withoutManagedBlock = removeManagedAgentsBlock(existing).trimEnd();
+  const localAgentsConfig = readAgentsConfigSummary(withoutManagedBlock);
+  const globalAgentsConfig = readAgentsConfigSummary(globalConfig);
+
+  if (localAgentsConfig.hasConfig) {
+    return `${withoutManagedBlock}\n`;
+  }
+  if ((globalAgentsConfig.maxThreads ?? 0) >= REQUIRED_AGENT_THREADS) {
+    return `${withoutManagedBlock}\n`;
+  }
+
+  const block = renderManagedAgentsBlock();
+  return withoutManagedBlock.length === 0
+    ? `${block}\n`
+    : `${withoutManagedBlock}\n\n${block}\n`;
+}
+
+function removeManagedAgentsBlock(value: string): string {
+  if (!value.includes(MANAGED_AGENTS_BLOCK_START) || !value.includes(MANAGED_AGENTS_BLOCK_END)) {
+    return value;
+  }
+  return value.replace(
+    new RegExp(
+      `(?:\\n\\n)?${escapeRegExp(MANAGED_AGENTS_BLOCK_START)}[\\s\\S]*?${escapeRegExp(MANAGED_AGENTS_BLOCK_END)}(?:\\n)?`,
+      "g"
+    ),
+    ""
+  );
 }
 
 function hasTopLevelTomlKey(value: string, key: string): boolean {
@@ -160,6 +214,79 @@ function hasTopLevelTomlKey(value: string, key: string): boolean {
     }
   }
   return false;
+}
+
+function readAgentsConfigSummary(value: string | undefined): { hasConfig: boolean; maxThreads?: number } {
+  if (!value) {
+    return { hasConfig: false };
+  }
+
+  const lines = value.split("\n");
+  let currentTable: string | undefined;
+  let hasConfig = false;
+  let maxThreads: number | undefined;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) {
+      continue;
+    }
+
+    const tableMatch = /^\[(.+)\]$/.exec(line);
+    if (tableMatch) {
+      currentTable = tableMatch[1]!.trim();
+      if (currentTable === "agents") {
+        hasConfig = true;
+      }
+      continue;
+    }
+
+    const assignment = /^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/.exec(line);
+    if (!assignment) {
+      continue;
+    }
+
+    const lhs = assignment[1]!;
+    const rhs = assignment[2]!;
+
+    if (currentTable === "agents") {
+      hasConfig = true;
+      if (lhs === "max_threads") {
+        maxThreads = readIntegerLiteral(rhs) ?? maxThreads;
+      }
+      continue;
+    }
+
+    if (!currentTable && lhs === "agents") {
+      hasConfig = true;
+      maxThreads = readInlineTableMaxThreads(rhs) ?? maxThreads;
+      continue;
+    }
+    if (!currentTable && lhs.startsWith("agents.")) {
+      hasConfig = true;
+      if (lhs === "agents.max_threads") {
+        maxThreads = readIntegerLiteral(rhs) ?? maxThreads;
+      }
+      continue;
+    }
+  }
+
+  return maxThreads === undefined ? { hasConfig } : { hasConfig, maxThreads };
+}
+
+function readIntegerLiteral(value: string): number | undefined {
+  const match = /^(\d+)(?:\s+#.*)?$/.exec(value.trim());
+  if (!match) {
+    return undefined;
+  }
+  return Number.parseInt(match[1]!, 10);
+}
+
+function readInlineTableMaxThreads(value: string): number | undefined {
+  const match = /\bmax_threads\s*=\s*(\d+)/.exec(value);
+  if (!match) {
+    return undefined;
+  }
+  return Number.parseInt(match[1]!, 10);
 }
 
 function escapeTomlBasicString(value: string): string {

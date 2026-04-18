@@ -56,6 +56,18 @@ async function runCliCommand(
   });
 }
 
+async function createIsolatedCodexEnv(configText?: string): Promise<NodeJS.ProcessEnv> {
+  const codexHome = await mkdtemp(join(tmpdir(), "coortex-codex-home-"));
+  if (configText) {
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(join(codexHome, "config.toml"), configText, "utf8");
+  }
+  return {
+    ...process.env,
+    CODEX_HOME: codexHome
+  };
+}
+
 function workflowAttemptFromSnapshot(snapshot: {
   workflowProgress?: {
     workflowId: string;
@@ -909,7 +921,7 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   );
 
   const env = {
-    ...process.env,
+    ...(await createIsolatedCodexEnv()),
     COORTEX_CODEX_EXEC_FIXTURE: fixturePath
   };
 
@@ -960,6 +972,8 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
 
   const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
   assert.match(codexConfig, /model_instructions_file = "/);
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 12$/m);
   const skillPackManifest = JSON.parse(
     await readFile(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"), "utf8")
   ) as { managedSkills: string[] };
@@ -3614,7 +3628,8 @@ test("ctx init reports codex config conflicts by path without echoing file conte
 
   await assert.rejects(
     execFileAsync(process.execPath, [cliPath, "init"], {
-      cwd: projectRoot
+      cwd: projectRoot,
+      env: await createIsolatedCodexEnv()
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
@@ -3625,11 +3640,293 @@ test("ctx init reports codex config conflicts by path without echoing file conte
   );
 });
 
-test("ctx init replaces an existing Coortex-managed block while preserving surrounding TOML", async () => {
-  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-managed-replace-"));
+test("ctx init omits local agents threads when global config already provides them", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-global-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 16\n");
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
+  assert.match(codexConfig, /model_instructions_file = "/);
+  assert.doesNotMatch(codexConfig, /^\[agents\]$/m);
+  assert.doesNotMatch(codexConfig, /^max_threads = 12$/m);
+});
+
+test("ctx init adds local agents threads when global config is below the review minimum", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-local-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 8\n");
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
+  assert.match(codexConfig, /model_instructions_file = "/);
+  assert.match(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 12$/m);
+});
+
+test("ctx init ignores global profile agents threads for local capacity", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-global-profile-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const env = await createIsolatedCodexEnv("[profiles.review.agents]\nmax_threads = 16\n");
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
+  assert.match(codexConfig, /model_instructions_file = "/);
+  assert.match(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 12$/m);
+});
+
+test("ctx init ignores global inline profile agents threads for local capacity", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-global-profile-inline-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const env = await createIsolatedCodexEnv(
+    ['[profiles.review]', 'agents = { max_threads = 16 }'].join("\n")
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
+  assert.match(codexConfig, /model_instructions_file = "/);
+  assert.match(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 12$/m);
+});
+
+test("ctx init respects unmanaged project-local agents threads below the review minimum", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-project-local-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
   const codexDir = join(projectRoot, ".codex");
   const configPath = join(codexDir, "config.toml");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 16\n");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      "[agents]",
+      "max_threads = 8",
+      "",
+      "[tui]",
+      'status = "enabled"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(configPath, "utf8");
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 8$/m);
+  assert.match(codexConfig, /^\[tui\]$/m);
+  assert.match(codexConfig, /^status = "enabled"$/m);
+  assert.doesNotMatch(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+});
+
+test("ctx init respects unmanaged project-local agents tables without max_threads", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-project-table-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 8\n");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      "[agents]",
+      'strategy = "manual"',
+      "",
+      "[tui]",
+      'status = "enabled"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(configPath, "utf8");
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^strategy = "manual"$/m);
+  assert.match(codexConfig, /^\[tui\]$/m);
+  assert.match(codexConfig, /^status = "enabled"$/m);
+  assert.doesNotMatch(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.equal((codexConfig.match(/^\[agents\]$/gm) ?? []).length, 1);
+});
+
+test("ctx init still adds local agents threads beside project-local profile agents tables", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-project-profile-table-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 8\n");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      "[profiles.review.agents]",
+      'strategy = "manual"',
+      "",
+      "[tui]",
+      'status = "enabled"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(configPath, "utf8");
+  assert.match(codexConfig, /^\[profiles\.review\.agents\]$/m);
+  assert.match(codexConfig, /^strategy = "manual"$/m);
+  assert.match(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 12$/m);
+  assert.match(codexConfig, /^\[tui\]$/m);
+  assert.match(codexConfig, /^status = "enabled"$/m);
+});
+
+test("ctx init still adds local agents threads beside inline project-local profile agents", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-project-profile-inline-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 8\n");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      "[profiles.review]",
+      'agents = { strategy = "manual" }',
+      "",
+      "[tui]",
+      'status = "enabled"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(configPath, "utf8");
+  assert.match(codexConfig, /^\[profiles\.review\]$/m);
+  assert.match(codexConfig, /^agents = \{ strategy = "manual" \}$/m);
+  assert.match(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 12$/m);
+  assert.match(codexConfig, /^\[tui\]$/m);
+  assert.match(codexConfig, /^status = "enabled"$/m);
+});
+
+test("ctx init still adds local agents threads beside dotted project-local profile agents keys", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-project-profile-dotted-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 8\n");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      'profiles.review.agents.strategy = "manual"',
+      "",
+      "[tui]",
+      'status = "enabled"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(configPath, "utf8");
+  assert.match(codexConfig, /^profiles\.review\.agents\.strategy = "manual"$/m);
+  assert.match(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.match(codexConfig, /^\[agents\]$/m);
+  assert.match(codexConfig, /^max_threads = 12$/m);
+  assert.match(codexConfig, /^\[tui\]$/m);
+  assert.match(codexConfig, /^status = "enabled"$/m);
+});
+
+test("ctx init respects unmanaged project-local dotted agents keys", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-agents-project-dotted-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 8\n");
+
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(
+    configPath,
+    [
+      'agents.strategy = "manual"',
+      "",
+      "[tui]",
+      'status = "enabled"'
+    ].join("\n"),
+    "utf8"
+  );
+
+  const init = await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+  assert.match(init.stdout, /Initialized Coortex runtime/);
+
+  const codexConfig = await readFile(configPath, "utf8");
+  assert.match(codexConfig, /^agents\.strategy = "manual"$/m);
+  assert.match(codexConfig, /^\[tui\]$/m);
+  assert.match(codexConfig, /^status = "enabled"$/m);
+  assert.doesNotMatch(codexConfig, /# BEGIN COORTEX CODEX AGENTS/);
+  assert.doesNotMatch(codexConfig, /^\[agents\]$/m);
+});
+
+test("ctx init refreshes an existing Coortex-managed block while preserving surrounding TOML", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-managed-refresh-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const codexDir = join(projectRoot, ".codex");
+  const configPath = join(codexDir, "config.toml");
+  const env = await createIsolatedCodexEnv("[agents]\nmax_threads = 16\n");
 
   await mkdir(codexDir, { recursive: true });
   await writeFile(
@@ -3639,7 +3936,7 @@ test("ctx init replaces an existing Coortex-managed block while preserving surro
       "",
       "# BEGIN COORTEX CODEX PROFILE",
       "# Coortex Codex reference adapter",
-      'model_instructions_file = "/tmp/old-kernel.md"',
+      'model_instructions_file = "/tmp/stale-managed-kernel.md"',
       "# END COORTEX CODEX PROFILE",
       "",
       "[tui]",
@@ -3649,7 +3946,8 @@ test("ctx init replaces an existing Coortex-managed block while preserving surro
   );
 
   const init = await execFileAsync(process.execPath, [cliPath, "init"], {
-    cwd: projectRoot
+    cwd: projectRoot,
+    env
   });
   assert.match(init.stdout, /Initialized Coortex runtime/);
 
@@ -3661,7 +3959,7 @@ test("ctx init replaces an existing Coortex-managed block while preserving surro
     codexConfig,
     /model_instructions_file = ".*\.coortex\/adapters\/codex\/kernel\.md"/
   );
-  assert.doesNotMatch(codexConfig, /old-kernel\.md/);
+  assert.doesNotMatch(codexConfig, /stale-managed-kernel\.md/);
   assert.equal((codexConfig.match(/# BEGIN COORTEX CODEX PROFILE/g) ?? []).length, 1);
   assert.equal((codexConfig.match(/# END COORTEX CODEX PROFILE/g) ?? []).length, 1);
 });
