@@ -964,7 +964,12 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"),
     "utf8"
   );
+  const reviewLaneSkill = await readFile(
+    join(projectRoot, ".codex", "skills", "coortex-review-lane", "SKILL.md"),
+    "utf8"
+  );
   assert.match(reviewFixerSkill, /Review Fixer/);
+  assert.match(reviewLaneSkill, /Coortex Review Lane/);
 
   const envelope = await readFile(
     join(projectRoot, ".coortex", "runtime", "last-resume-envelope.json"),

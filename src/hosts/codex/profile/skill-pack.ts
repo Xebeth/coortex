@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { DoctorCheck, RuntimeArtifactStore } from "../../../adapters/contract.js";
 import type { CodexSkillPackInstallation } from "./types.js";
 
-const MANAGED_SKILLS = ["review-baseline", "review-fixer", "review-orchestrator"] as const;
+const MANAGED_SKILLS = ["coortex-review-lane", "review-baseline", "review-fixer", "review-orchestrator"] as const;
 
 export class CodexSkillPackManager {
   constructor(private readonly store: RuntimeArtifactStore) {}
