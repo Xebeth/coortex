@@ -9,6 +9,66 @@ import pathlib
 import re
 from typing import Any
 
+TRACE_PHASES = {
+    "trace_started",
+    "prep",
+    "lane_plan",
+    "lane_result",
+    "family_synthesis",
+    "refreshed_review_handoff",
+    "final_review",
+}
+
+TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
+    "trace_started": {},
+    "prep": {},
+    "lane_plan": {
+        "lane_id": "string",
+        "lane_type": "string",
+        "target": "string",
+        "scope_summary": "string",
+        "anchors_or_family_ids": "list",
+        "configured_lenses": "list",
+        "split_triggers_fired": "list",
+        "boundedness_exception": "present",
+    },
+    "lane_result": {
+        "lane_id": "string",
+        "lane_type": "string",
+        "target": "string",
+        "scope_summary": "string",
+        "files_read": "list",
+        "docs_read": "list",
+        "searches_run": "list",
+        "diagnostics_run": "list",
+        "commands_run": "list",
+        "candidate_family_decisions": "list",
+        "sibling_search_paths_attempted": "list",
+        "skipped_areas": "list",
+        "thin_areas": "list",
+        "stop_reason": "string",
+        "coverage_confidence": "string",
+    },
+    "family_synthesis": {
+        "family_id": "string",
+        "input_lanes": "list",
+        "family_verdict": "string",
+        "closure_status": "string",
+        "thin_areas": "list",
+        "still_actionable": "bool",
+    },
+    "refreshed_review_handoff": {
+        "family_ids_carried_forward": "list",
+        "reason": "string",
+    },
+    "final_review": {
+        "final_verdict": "string",
+        "review_shape_trace_summary": "present",
+        "unexplored_area_ledger_summary": "present",
+        "boundedness_exceptions_summary": "present",
+    },
+}
+
 def load_json_object(path: pathlib.Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -46,6 +106,71 @@ def parse_json_record(record_json: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise SystemExit("trace record must be a JSON object")
     return data
+
+
+def require_trace_field_type(
+    record: dict[str, Any],
+    field: str,
+    expected: str,
+    errors: list[str],
+    prefix: str,
+) -> None:
+    if field not in record:
+        errors.append(f"{prefix} missing {field}")
+        return
+
+    value = record[field]
+    if expected == "present":
+        return
+    if expected == "string":
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{prefix} field {field} must be a non-empty string")
+        return
+    if expected == "list":
+        if not isinstance(value, list):
+            errors.append(f"{prefix} field {field} must be a list")
+        return
+    if expected == "bool":
+        if not isinstance(value, bool):
+            errors.append(f"{prefix} field {field} must be a boolean")
+        return
+
+
+def validate_trace_record(record: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    prefix = "trace record"
+
+    common_fields = {
+        "run_id": "string",
+        "timestamp_utc": "string",
+        "skill": "string",
+        "mode": "string",
+        "phase": "string",
+        "review_target": "present",
+    }
+    for field, expected in common_fields.items():
+        require_trace_field_type(record, field, expected, errors, prefix)
+
+    phase = record.get("phase")
+    if not isinstance(phase, str) or phase not in TRACE_PHASES:
+        errors.append(f"{prefix} has invalid phase {phase!r}")
+        return errors
+
+    review_target = record.get("review_target")
+    if not isinstance(review_target, (dict, str)):
+        errors.append(f"{prefix} field review_target must be a mapping or string")
+
+    for field, expected in TRACE_PHASE_REQUIRED_FIELDS[phase].items():
+        require_trace_field_type(record, field, expected, errors, f"{prefix} phase {phase!r}")
+
+    lane_id = record.get("lane_id")
+    family_id = record.get("family_id")
+    if phase in {"lane_plan", "lane_result"} and family_id is not None and lane_id is None:
+        errors.append(f"{prefix} phase {phase!r} cannot include family_id without lane_id")
+    if phase == "family_synthesis" and lane_id is not None:
+        errors.append(f"{prefix} phase {phase!r} should not include lane_id")
+
+    return errors
 
 
 def read_jsonl(path: pathlib.Path) -> list[dict[str, Any]]:
@@ -133,10 +258,35 @@ def append_trace(args: argparse.Namespace) -> int:
         record = parse_json_record(pathlib.Path(args.record_file).read_text(encoding="utf-8"))
     else:
         record = parse_json_record(args.record_json)
+    errors = validate_trace_record(record)
+    if errors:
+        print(
+            json.dumps(
+                {
+                    "trace_file": str(trace_file),
+                    "appended": False,
+                    "status": "error",
+                    "errors": errors,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
     with trace_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
-    print(json.dumps({"trace_file": str(trace_file), "appended": True}, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "trace_file": str(trace_file),
+                "appended": True,
+                "status": "ok",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
@@ -445,6 +595,14 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
     raw_results = classification_data.get("deferred_family_classification")
     if not isinstance(raw_results, list):
         raise SystemExit("classification_json must contain deferred_family_classification list")
+    if classification_data.get("errors"):
+        raise SystemExit("classification_json contains deferred-family errors; fix them before building the carried handoff")
+
+    classification_index = {
+        str(result.get("family_id")): result
+        for result in raw_results
+        if isinstance(result, dict) and result.get("family_id")
+    }
 
     include_classifications = set(args.include_classification or ["carry-forward-without-lane"])
     selected_families: list[dict[str, Any]] = []
@@ -468,10 +626,12 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
             continue
         original = family_index.get(family_id)
         deferred = deferred_index.get(family_id)
-        if not original or not deferred:
+        classification = classification_index.get(family_id)
+        if not original or not deferred or not classification:
             continue
 
         carried = copy.deepcopy(original)
+        carried.pop("reviewer_next_step", None)
         carried["carry_forward_context"] = {
             "reason_kind": deferred.get("defer_reason_kind"),
             "touch_state": deferred.get("touch_state"),
@@ -481,6 +641,7 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
         }
         if deferred.get("status"):
             carried["closure_status"] = deferred["status"]
+        carried["open_reason_kind"] = normalize_carried_open_reason(carried, deferred, classification)
         selected_families.append(carried)
         carried_ids.append(family_id)
 
@@ -510,6 +671,30 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
             )
         )
     return 0
+
+
+def normalize_carried_open_reason(
+    carried: dict[str, Any],
+    deferred: dict[str, Any],
+    classification: dict[str, Any],
+) -> str:
+    reason_kind = str(deferred.get("defer_reason_kind") or "")
+    touch_state = str(deferred.get("touch_state") or "")
+    class_name = str(classification.get("classification") or "")
+
+    if reason_kind == "blocked-by-external-environment":
+        return "verification-separate-blocker"
+    if (
+        class_name == "requires-broader-cross-family-review"
+        or touch_state == "broader-cross-family-overlap"
+        or reason_kind == "blocked-by-broader-contract-change"
+    ):
+        return "broader-cross-family-contract"
+
+    original = carried.get("open_reason_kind")
+    if isinstance(original, str) and original:
+        return original
+    return "family-local-gap-remaining"
 
 
 def build_parser() -> argparse.ArgumentParser:

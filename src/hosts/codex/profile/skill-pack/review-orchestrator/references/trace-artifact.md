@@ -17,6 +17,7 @@ The helper owns:
 - coordinator file creation
 - lane filename construction
 - JSONL append mechanics
+- trace-record validation for known phase-boundary record types
 - repository family-ledger append/summary mechanics
 - current-run reopened-family summary mechanics
 
@@ -43,6 +44,7 @@ Inside that run directory:
 
 - Create the directory if it does not exist.
 - Append one JSON object per phase-boundary event.
+- Let `append-trace` validate the record shape before it is written.
 - Maintain a repository-level family ledger at:
   - `.coortex/review-trace/family-ledger.jsonl`
 - Do not write hidden reasoning or a full transcript.

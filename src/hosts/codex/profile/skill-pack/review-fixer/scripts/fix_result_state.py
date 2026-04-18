@@ -8,6 +8,58 @@ import pathlib
 import re
 from typing import Any
 
+TRACE_PHASES = {
+    "trace_started",
+    "intake",
+    "execution_plan",
+    "family_closeout",
+    "verification",
+    "review_return_handoff",
+    "final_fix",
+}
+
+TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
+    "trace_started": {},
+    "intake": {
+        "family_ids": "list",
+        "closure_gate_summaries": "list",
+        "candidate_write_sets": "list",
+    },
+    "execution_plan": {
+        "family_id": "string",
+        "owning_seam": "string",
+        "planned_write_set": "list",
+        "planned_test_set": "list",
+        "planned_doc_set": "list",
+        "execution_mode": "string",
+    },
+    "family_closeout": {
+        "family_id": "string",
+        "write_set": "list",
+        "tests_updated": "list",
+        "docs_updated": "list",
+        "files_read": "list",
+        "docs_read": "list",
+        "searches_run": "list",
+        "commands_run": "list",
+        "verification_run": "list",
+        "emergent_threads_followed": "list",
+        "emergent_threads_deferred": "list",
+        "closure_status": "string",
+        "residual_risks": "list",
+    },
+    "verification": {
+        "family_id": "string",
+        "verification_run": "list",
+        "broader_suite_status": "string",
+    },
+    "review_return_handoff": {},
+    "final_fix": {
+        "family_ids_handled": "list",
+        "final_statuses": "list",
+    },
+}
+
 CLOSURE_STATUSES = {
     "symptom-fixed-only",
     "family-partially-closed",
@@ -122,6 +174,63 @@ def parse_json_record(record_json: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise SystemExit("trace record must be a JSON object")
     return data
+
+
+def require_trace_field_type(
+    record: dict[str, Any],
+    field: str,
+    expected: str,
+    errors: list[str],
+    prefix: str,
+) -> None:
+    if field not in record:
+        errors.append(f"{prefix} missing {field}")
+        return
+
+    value = record[field]
+    if expected == "present":
+        return
+    if expected == "string":
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{prefix} field {field} must be a non-empty string")
+        return
+    if expected == "list":
+        if not isinstance(value, list):
+            errors.append(f"{prefix} field {field} must be a list")
+        return
+
+
+def validate_trace_record(record: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    prefix = "trace record"
+
+    common_fields = {
+        "run_id": "string",
+        "timestamp_utc": "string",
+        "skill": "string",
+        "mode": "string",
+        "phase": "string",
+        "review_target": "present",
+    }
+    for field, expected in common_fields.items():
+        require_trace_field_type(record, field, expected, errors, prefix)
+
+    phase = record.get("phase")
+    if not isinstance(phase, str) or phase not in TRACE_PHASES:
+        errors.append(f"{prefix} has invalid phase {phase!r}")
+        return errors
+
+    review_target = record.get("review_target")
+    if not isinstance(review_target, (dict, str)):
+        errors.append(f"{prefix} field review_target must be a mapping or string")
+
+    for field, expected in TRACE_PHASE_REQUIRED_FIELDS[phase].items():
+        require_trace_field_type(record, field, expected, errors, f"{prefix} phase {phase!r}")
+
+    if phase in {"execution_plan", "family_closeout", "verification"} and "family_id" not in record:
+        errors.append(f"{prefix} phase {phase!r} missing family_id")
+
+    return errors
 
 
 def require(entry: dict[str, Any], field: str, errors: list[str], prefix: str) -> Any:
@@ -402,10 +511,35 @@ def append_trace(args: argparse.Namespace) -> int:
         record = parse_json_record(pathlib.Path(args.record_file).read_text(encoding="utf-8"))
     else:
         record = parse_json_record(args.record_json)
+    errors = validate_trace_record(record)
+    if errors:
+        print(
+            json.dumps(
+                {
+                    "trace_file": str(trace_file),
+                    "appended": False,
+                    "status": "error",
+                    "errors": errors,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
     with trace_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
-    print(json.dumps({"trace_file": str(trace_file), "appended": True}, indent=2, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "trace_file": str(trace_file),
+                "appended": True,
+                "status": "ok",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return 0
 
 
