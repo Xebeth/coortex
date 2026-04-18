@@ -15,6 +15,7 @@ The helper owns:
 - coordinator file creation
 - lane filename construction
 - JSONL append mechanics
+- trace-record validation for known phase-boundary record types
 
 The model still owns the contents of each trace record.
 
@@ -39,6 +40,7 @@ Inside that run directory:
 
 - Create the directory if it does not exist.
 - Append one JSON object per phase-boundary event.
+- Let `append-trace` validate the record shape before it is written.
 - Do not write hidden reasoning or a full transcript.
 - Record observable repair activity only.
 - Keep trace data on disk by default. Do not surface trace paths or trace internals in normal output unless the user explicitly asks.

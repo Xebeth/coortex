@@ -153,7 +153,7 @@ Use the normal `review_handoff` contract shape from
 - any grounded deferred-thread exploration results
 
 When deferred families are only being carried forward without a new lane, use
-the bundled helper to assemble that skeleton deterministically:
+the bundled helper to assemble and normalize that skeleton deterministically:
 
 ```bash
 # Serialize the handoff blocks to JSON before invoking the helper.
@@ -210,6 +210,12 @@ Rules for the refreshed downstream handoff:
 - make the refreshed handoff absorb the subagent feedback so the next fixer run
   does not need to reverse-engineer the open seam from prose
 - do not drop a fixer-reported deferred family that still remains actionable; either carry it forward with structured context or explain why it was excluded
+- when a deferred family is carried forward without a new lane, let the helper
+  normalize `closure_status`, `open_reason_kind`, and `carry_forward_context`
+  instead of hand-assembling those fields in prose
+- do not copy fixer-side `reviewer_next_step` into the refreshed downstream
+  `review_handoff`; only preserve reviewer-authored fixer-facing `next_step`
+  from the original family entry or new return-review evidence
 - if return review shows the fixer reported a family as deferred even though the family seam was materially started, do not carry it forward as defer; rebuild it as an open family with an explicit `open_reason_kind` such as `unfinished-family-work`
 - if the family remains open because a blocker or environment constraint still
   exists, prefer a structured `next_step` over loose human prose so the next
