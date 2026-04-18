@@ -128,6 +128,13 @@ The telemetry schema must stay Coortex-owned even if the host surface is Codex-s
 For bounded-envelope fields such as `estimatedChars`, the adapter must
 count the actual prompt payload sent to Codex, including schema and
 prompt framing, not just the serialized envelope object.
+Project-local `.codex/config.toml` installation is not the same thing as
+isolating Codex user state. Live acceptance that invokes the real Codex
+binary must run with a temporary HOME/XDG user-state root so operator
+trust/config under `~/.codex` stays untouched, and the harness must
+teardown fixture repos plus isolated user-state trees without leaving
+new `coortex-live-*` paths under the OS temp root or live-harness/Codex
+descendant processes behind.
 
 ## Wrapped Session Boundary
 

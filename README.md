@@ -141,6 +141,12 @@ Repository tests enforce the Milestone 1 module map, guard key boundary rules, a
 - a restricted-mode live test that verifies truthful persisted state without bypass
 
 The durable runtime root is `.coortex/` in the current project.
+The live harness isolates Codex user-state inside per-fixture temporary
+HOME/XDG directories, snapshots the operator's real `~/.codex`
+configuration, OS temp-root `coortex-live-*` state, and
+live-harness/Codex process footprint before execution, and asserts
+teardown leaves no new global trust entries, fixture directories, or
+live-harness processes behind.
 
 Generated files include:
 
