@@ -30,8 +30,7 @@ Worker type:
 - use a `default` subagent for every coverage lane
 - spawn each coverage lane with `fork_context: false`
 - invoke `$coortex-review-lane` explicitly inside the lane prompt
-- keep the worker prompt lane-local
-- keep the lane prompt task-scoped and omit redundant meta-role disclaimers
+- keep the worker prompt lane-local and task-scoped
 - do not substitute `explorer` or `worker` for final review output
 
 Pass the configured surface lenses through unchanged. The lane skill owns the
@@ -55,19 +54,8 @@ If any split trigger fires but the surface is kept as one lane anyway:
 - explain why the slice is still grounded enough to review as one unit
 - surface that exception in the final review output
 
-Every coverage lane must report:
-- findings by severity
-- local candidate families
-- scope summary
-- material evidence actions
-- rationale summary
-- sibling-search scope
-- skipped areas
-- skip reasons
-- stop reason
-- coverage confidence
-- thin areas
-- local family status
+Every coverage lane must emit the coverage-lane contract from
+`references/report-contract.md`.
 
 ## Return-review lanes
 
@@ -86,8 +74,7 @@ Worker type:
 - use a `default` subagent for every return-review lane
 - spawn each return-review lane with `fork_context: false`
 - invoke `$coortex-review-lane` explicitly inside the lane prompt
-- keep the worker prompt family-local
-- keep the lane prompt task-scoped and omit redundant meta-role disclaimers
+- keep the worker prompt family-local and task-scoped
 - do not substitute `explorer` or `worker` for final review output
 
 Each return-review lane should compare:
@@ -100,12 +87,9 @@ Deferred families reported in `review_return_handoff` are a separate carry-forwa
 input, not an automatic lane.
 
 For lane prompting:
-- treat the `closure_gate` as the Stage 1 spec/compliance target
-- treat the supplied family-local diff as the authoritative review scope
-- do not broaden `git diff` or surrounding file reads outside that scope unless the patch clearly reopens the same family outside it
-- run diagnostics only on modified code/test files in scope; docs do not need diagnostics
-- override the default `$coortex-review-lane` summary format and emit the base family-local return-review schema exactly
-- check every closure-gate item directly and cite evidence for each one instead of only giving a family-level conclusion
+- pass the `closure_gate`, the family-local authoritative diff/scope, and the
+  exact family-local return-review schema from `references/return-review.md`
+- let `$coortex-review-lane` own the lane-local review method for that schema
 
 Scheduling:
 - if return-review lanes exceed current subagent capacity, run them in bounded waves
@@ -113,27 +97,8 @@ Scheduling:
 - do not collapse an unscheduled family into coordinator-local review work
 - do not spawn a lane for a deferred family unless prep classified it as `requires-family-local-check` or `requires-broader-cross-family-review`
 
-Each return-review lane must report:
-- claimed closure status
-- closure claim verdict:
-  - `confirmed`
-  - `rejected`
-  - `partially-confirmed`
-- closure gate checked:
-  - `gate_item`
-  - `item_verdict`
-    - `satisfied`
-    - `unsatisfied`
-    - `inconclusive`
-  - `evidence`
-- `new_findings` or `none found`
-- material evidence actions
-- rationale summary
-- skipped areas
-- skip reasons
-- stop reason
-- coverage confidence
-- thin areas
+Each return-review lane must emit the family-local return-review contract from
+`references/return-review.md`.
 
 If a return-review lane shows the family still remains open and actionable, the
 lane evidence should be rich enough for synthesis to rebuild a refreshed
@@ -155,7 +120,6 @@ Worker type:
 - spawn each deferred-thread exploration lane with `fork_context: false`
 - invoke `$coortex-review-lane` explicitly inside the lane prompt
 - keep the worker prompt tightly scoped to the deferred thread
-- keep the lane prompt task-scoped and omit redundant meta-role disclaimers
 - do not substitute `explorer` or `worker` for final review output
 
 Rules:
@@ -164,23 +128,8 @@ Rules:
 - instead, surface that thread as explicit follow-up review work
 - if deferred-thread exploration lanes exceed current subagent capacity, run them in bounded waves rather than substituting coordinator-local exploration
 
-Each deferred-thread exploration lane must report:
-- `source_family_id`
-- `thread_summary`
-- `probable_seam`
-- `thread_verdict`:
-  - `same-family-sibling-confirmed`
-  - `separate-family-confirmed`
-  - `not-grounded`
-- `evidence`
-- `new_findings` or `none found`
-- `material_evidence_actions`
-- `rationale_summary`
-- `skipped_areas`
-- `skip_reasons`
-- `stop_reason`
-- `coverage_confidence`
-- `thin_areas`
+Each deferred-thread exploration lane must emit the deferred-thread output
+contract from `references/return-review.md`.
 
 ## Family exploration lanes
 
@@ -193,36 +142,11 @@ Rules:
 - use a `default` subagent for every family-exploration lane
 - spawn each family-exploration lane with `fork_context: false`
 - invoke `$coortex-review-lane` explicitly inside the lane prompt
-- keep the worker prompt family-local
-- keep the lane prompt task-scoped and omit redundant meta-role disclaimers
+- keep the worker prompt family-local and task-scoped
 - do not substitute `explorer` or `worker` for final review output
 
-Exploration goals:
-- test the highest plausible root cause
-- search side paths
-- search sibling bugs
-- confirm or reject manifestations
-- determine closure status
-- explain what was not explored and why if the family remains open
-
-Each family-exploration lane must report:
-- `family_id`
-- `source_surfaces`
-- `highest_confidence_root_cause`
-- `manifestations_confirmed`
-- `manifestations_rejected`
-- `side_paths_checked`
-- `sibling_bugs_found`
-- `sibling_search_scope`
-- `severity_rollup`
-- `closure_status`
-- `material_evidence_actions`
-- `rationale_summary`
-- `skipped_areas`
-- `skip_reasons`
-- `stop_reason`
-- `coverage_confidence`
-- `thin_areas`
+Each family-exploration lane must emit the exploration-lane contract from
+`references/report-contract.md`.
 
 ## Coordinator
 

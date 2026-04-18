@@ -141,7 +141,7 @@ Use the refusal rules from `references/prep-and-refusal.md`.
 - If coverage lanes exceed current subagent capacity, queue them in bounded waves rather than collapsing one lane into coordinator-local review.
 - Give each lane the surface-specific configured lenses.
 - Split a touched surface only when a single lane would force spot-checking or mixed evidence strategies.
-- Require every coverage lane result to follow the coverage-lane output contract in `references/report-contract.md`, including the explicit self-check fields.
+- Require every coverage lane result to follow the coverage-lane output contract in `references/report-contract.md`.
 
 ## Return Review
 
@@ -161,13 +161,7 @@ Use the refusal rules from `references/prep-and-refusal.md`.
 - In this mode, treat `emergent_threads_deferred` as follow-up review prompts:
   - if a deferred thread is grounded enough to name a plausible seam or family-local boundary, run a targeted exploration lane for it
   - if a deferred thread is too broad or ambiguous to bound cleanly, surface it as follow-up review work instead of widening the current return review into broad rediscovery
-- In every return-review lane prompt:
-  - treat the family's `closure_gate` as the Stage 1 spec/compliance target
-  - treat the supplied family-local diff as the authoritative review scope
-  - do not broaden file reading or `git diff` outside that scope unless the patch clearly reopens the same family outside it
-  - run diagnostics only on modified code/test files in scope, not on docs
-  - return the family-local return-review output contract from `references/return-review.md` instead of the generic `$coortex-review-lane` summary format
-  - report gate-item evidence directly instead of only giving a family-level closure sentence
+- In every return-review lane prompt, pass the family-local closure gate, the authoritative diff/scope, and the exact family-local return-review schema from `references/return-review.md`.
 - If return-review lanes exceed current subagent capacity, queue them in bounded waves. Do not let the coordinator take over an unscheduled family lane's substantive review work.
 - In this mode, check whether the claimed closure status is actually supported by the patch.
 - In this mode, if a family remains open and actionable, gather enough family-local evidence to refresh the downstream handoff:
@@ -185,7 +179,7 @@ Use the refusal rules from `references/prep-and-refusal.md`.
 - Exploration is mandatory, not optional.
 - Run each family-exploration lane in a Codex `default` subagent and invoke `$coortex-review-lane` inside the lane prompt, scoped to that family only.
 - If family-exploration lanes exceed current subagent capacity, queue them in bounded waves rather than replacing missing lanes with coordinator-local review.
-- Use exploration to test the highest plausible root cause, search side paths and sibling bugs, determine closure status, and follow the exploration-lane contract in `references/report-contract.md`.
+- Pass the exact exploration-lane output schema from `references/report-contract.md` and keep the coordinator focused on family grouping, scheduling, and synthesis.
 
 ## Synthesis And Verdict
 
