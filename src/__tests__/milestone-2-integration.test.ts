@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { CodexCommandRunner } from "../hosts/codex/adapter/cli.js";
+import { buildCodexExecutionPrompt } from "../hosts/codex/adapter/prompt.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { getNativeRunId } from "../core/run-state.js";
 import type { HostRunRecord } from "../core/types.js";
@@ -15,6 +16,7 @@ import { RuntimeStore } from "../persistence/store.js";
 import {
   initRuntime,
   inspectRuntimeRun,
+  inspectRuntimeRunWithContext,
   loadReconciledProjectionWithDiagnostics,
   loadOperatorProjection,
   prepareResumeRuntime,
@@ -80,12 +82,15 @@ test("milestone-2 integration: trimming keeps the real run envelope bounded and 
   );
   const artifact = await readFile(artifactPath, "utf8");
   const startedTelemetry = findLastTelemetry(telemetry, "host.run.started");
+  const promptChars = buildCodexExecutionPrompt(run.envelope).length;
 
   assert.equal(run.envelope.trimApplied, true);
   assert.equal(run.envelope.recentResults[0]?.trimmed, true);
   assert.equal(run.envelope.recentResults[0]?.reference, ".coortex/artifacts/results/smoke-result-long.txt");
   assert.ok(run.envelope.estimatedChars <= 4_000);
+  assert.equal(run.envelope.estimatedChars, promptChars);
   assert.equal(artifact.trim(), ("trim-me ".repeat(250)).trim());
+  assert.equal(startedTelemetry?.metadata.envelopeChars, promptChars);
   assert.equal(startedTelemetry?.metadata.trimApplied, true);
   assert.equal(startedTelemetry?.metadata.trimmedFields, 1);
 });
@@ -140,6 +145,115 @@ test("milestone-2 integration: live host leases without runtime attachment truth
   assert.equal(projectionAfterResume.assignments.get(setup.assignmentId)?.state, "in_progress");
   assert.equal(inspected?.assignmentId, setup.assignmentId);
   assert.equal(inspected?.state, "running");
+});
+
+test("milestone-2 integration: malformed claim graphs fail closed across run, resume, recovery, and inspect", async () => {
+  const setup = await createSmokeSetup(async () => ({
+    exitCode: 0,
+    stdout: "",
+    stderr: ""
+  }));
+  const snapshot = await setup.store.loadSnapshot();
+  if (!snapshot) {
+    throw new Error("Expected a seeded runtime snapshot.");
+  }
+  const timestamp = nowIso();
+
+  await rm(join(setup.projectRoot, ".coortex", "runtime", "events.ndjson"));
+  await setup.store.writeJsonArtifact("runtime/snapshot.json", {
+    ...snapshot,
+    attachments: [],
+    claims: [
+      {
+        id: "broken-claim",
+        assignmentId: setup.assignmentId,
+        attachmentId: "missing-attachment",
+        state: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        provenance: {
+          kind: "resume",
+          source: "ctx.resume"
+        }
+      }
+    ]
+  });
+
+  await assert.rejects(
+    () => loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => prepareResumeRuntime(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => resumeRuntime(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => runRuntime(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => inspectRuntimeRunWithContext(setup.store, setup.adapter, setup.assignmentId),
+    /claim graph references missing attachments/
+  );
+});
+
+test("milestone-2 integration: malformed claim suffixes after the snapshot boundary fail closed", async () => {
+  const setup = await createSmokeSetup(async () => ({
+    exitCode: 0,
+    stdout: "",
+    stderr: ""
+  }));
+  const snapshot = await setup.store.loadSnapshot();
+  if (!snapshot) {
+    throw new Error("Expected a seeded runtime snapshot.");
+  }
+  const timestamp = nowIso();
+
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: snapshot.sessionId,
+    timestamp,
+    type: "claim.created",
+    payload: {
+      claim: {
+        id: randomUUID(),
+        assignmentId: setup.assignmentId,
+        attachmentId: "missing-attachment",
+        state: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        provenance: {
+          kind: "resume",
+          source: "ctx.resume"
+        }
+      }
+    }
+  });
+
+  await assert.rejects(
+    () => loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => prepareResumeRuntime(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => resumeRuntime(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => runRuntime(setup.store, setup.adapter),
+    /claim graph references missing attachments/
+  );
+  await assert.rejects(
+    () => inspectRuntimeRunWithContext(setup.store, setup.adapter, setup.assignmentId),
+    /claim graph references missing attachments/
+  );
 });
 
 test("milestone-2 integration: prepareResumeRuntime stays read-only against live lease blockers", async () => {
@@ -2868,7 +2982,28 @@ async function createSmokeSetupWithRunner(runner: {
       };
     },
     runExec: runner.runExec,
-    ...(runner.runResume ? { runResume: runner.runResume } : {})
+    ...(
+      runner.runResume
+        ? {
+            async startResume(input) {
+              const result = runner.runResume!({
+                ...input,
+                onEvent: async (event) => {
+                  await input.onEvent?.(event);
+                }
+              });
+              return {
+                result,
+                terminate: async () => undefined,
+                waitForExit: async () => {
+                  const execResult = await result;
+                  return { code: execResult.exitCode };
+                }
+              };
+            }
+          }
+        : {}
+    )
   });
   const initialized = await initRuntime(projectRoot, store, adapter);
   if (!initialized) {

@@ -284,29 +284,31 @@ test("codex adapter resumes a stored native session id through the wrapped resum
     async runExec() {
       throw new Error("runExec should not be used in wrapped resume coverage");
     },
-    async runResume(input) {
-      capturedSessionId = input.sessionId;
-      capturedPrompt = input.prompt ?? "";
-      await mkdir(dirname(input.outputPath), { recursive: true });
-      await writeFile(
-        input.outputPath,
-        JSON.stringify({
-          outcomeType: "result",
-          resultStatus: "partial",
-          resultSummary: "Wrapped resume captured partial progress.",
-          changedFiles: ["src/hosts/codex/adapter/index.ts"],
-          blockerSummary: "",
-          decisionOptions: [],
-          recommendedOption: ""
-        }),
-        "utf8"
-      );
-      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify({ type: "turn.completed", usage: { input_tokens: 7, output_tokens: 3 } }),
-        stderr: ""
-      };
+    async startResume(input) {
+      return createImmediateRunningHandle((async () => {
+        capturedSessionId = input.sessionId;
+        capturedPrompt = input.prompt ?? "";
+        await mkdir(dirname(input.outputPath), { recursive: true });
+        await writeFile(
+          input.outputPath,
+          JSON.stringify({
+            outcomeType: "result",
+            resultStatus: "partial",
+            resultSummary: "Wrapped resume captured partial progress.",
+            changedFiles: ["src/hosts/codex/adapter/index.ts"],
+            blockerSummary: "",
+            decisionOptions: [],
+            recommendedOption: ""
+          }),
+          "utf8"
+        );
+        await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({ type: "turn.completed", usage: { input_tokens: 7, output_tokens: 3 } }),
+          stderr: ""
+        };
+      })());
     }
   };
 
@@ -352,6 +354,40 @@ test("codex adapter resumes a stored native session id through the wrapped resum
     }
   });
   assert.equal(noResumeAdapter.getCapabilities().supportsNativeSessionResume, false);
+
+  const runResumeOnlyAdapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in runResume-only capability coverage");
+    },
+    async runResume() {
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+  assert.equal(runResumeOnlyAdapter.getCapabilities().supportsNativeSessionResume, false);
+  await assert.rejects(
+    runResumeOnlyAdapter.resumeSession(store, projection, envelope, {
+      id: randomUUID(),
+      adapter: "codex",
+      host: "codex",
+      state: "detached_resumable",
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      detachedAt: nowIso(),
+      nativeSessionId: "thread-resume-unsupported",
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    }),
+    /does not support wrapped session resume/
+  );
 });
 
 test("codex adapter captures decision outcomes through the wrapped resume runner", async () => {
@@ -388,30 +424,32 @@ test("codex adapter captures decision outcomes through the wrapped resume runner
     async runExec() {
       throw new Error("runExec should not be used in wrapped resume decision coverage");
     },
-    async runResume(input) {
-      await mkdir(dirname(input.outputPath), { recursive: true });
-      await writeFile(
-        input.outputPath,
-        JSON.stringify({
-          outcomeType: "decision",
-          resultStatus: "",
-          resultSummary: "",
-          changedFiles: [],
-          blockerSummary: "Need an operator decision before continuing resumed work.",
-          decisionOptions: [
-            { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
-            { id: "skip", label: "Skip", summary: "Skip the blocked step." }
-          ],
-          recommendedOption: "wait"
-        }),
-        "utf8"
-      );
-      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
-      return {
-        exitCode: 0,
-        stdout: "",
-        stderr: ""
-      };
+    async startResume(input) {
+      return createImmediateRunningHandle((async () => {
+        await mkdir(dirname(input.outputPath), { recursive: true });
+        await writeFile(
+          input.outputPath,
+          JSON.stringify({
+            outcomeType: "decision",
+            resultStatus: "",
+            resultSummary: "",
+            changedFiles: [],
+            blockerSummary: "Need an operator decision before continuing resumed work.",
+            decisionOptions: [
+              { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+              { id: "skip", label: "Skip", summary: "Skip the blocked step." }
+            ],
+            recommendedOption: "wait"
+          }),
+          "utf8"
+        );
+        await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: ""
+        };
+      })());
     }
   });
 
@@ -484,31 +522,33 @@ test("codex adapter falls back to streamed wrapped-resume agent output when the 
     async runExec() {
       throw new Error("runExec should not be used in resume transcript fallback coverage");
     },
-    async runResume(input) {
-      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
-      return {
-        exitCode: 0,
-        stdout: [
-          JSON.stringify({
-            type: "item.completed",
-            item: {
-              id: "item-resume-fallback",
-              type: "agent_message",
-              text: JSON.stringify({
-                outcomeType: "result",
-                resultStatus: "partial",
-                resultSummary: "Recovered wrapped resume output from the JSONL stream.",
-                changedFiles: ["src/hosts/codex/adapter/execution.ts"],
-                blockerSummary: "",
-                decisionOptions: [],
-                recommendedOption: ""
-              })
-            }
-          }),
-          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
-        ].join("\n"),
-        stderr: ""
-      };
+    async startResume(input) {
+      return createImmediateRunningHandle((async () => {
+        await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+        return {
+          exitCode: 0,
+          stdout: [
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "item-resume-fallback",
+                type: "agent_message",
+                text: JSON.stringify({
+                  outcomeType: "result",
+                  resultStatus: "partial",
+                  resultSummary: "Recovered wrapped resume output from the JSONL stream.",
+                  changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+                  blockerSummary: "",
+                  decisionOptions: [],
+                  recommendedOption: ""
+                })
+              }
+            }),
+            JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
+          ].join("\n"),
+          stderr: ""
+        };
+      })());
     }
   });
 
@@ -573,35 +613,37 @@ test("codex adapter rejects fenced wrapped-resume transcript fallback when the l
     async runExec() {
       throw new Error("runExec should not be used in resume transcript strictness coverage");
     },
-    async runResume(input) {
-      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
-      return {
-        exitCode: 0,
-        stdout: [
-          JSON.stringify({
-            type: "item.completed",
-            item: {
-              id: "item-resume-fenced",
-              type: "agent_message",
-              text: [
-                "```json",
-                JSON.stringify({
-                  outcomeType: "result",
-                  resultStatus: "partial",
-                  resultSummary: "This fenced transcript should be rejected.",
-                  changedFiles: ["src/hosts/codex/adapter/execution.ts"],
-                  blockerSummary: "",
-                  decisionOptions: [],
-                  recommendedOption: ""
-                }),
-                "```"
-              ].join("\n")
-            }
-          }),
-          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
-        ].join("\n"),
-        stderr: ""
-      };
+    async startResume(input) {
+      return createImmediateRunningHandle((async () => {
+        await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+        return {
+          exitCode: 0,
+          stdout: [
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "item-resume-fenced",
+                type: "agent_message",
+                text: [
+                  "```json",
+                  JSON.stringify({
+                    outcomeType: "result",
+                    resultStatus: "partial",
+                    resultSummary: "This fenced transcript should be rejected.",
+                    changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+                    blockerSummary: "",
+                    decisionOptions: [],
+                    recommendedOption: ""
+                  }),
+                  "```"
+                ].join("\n")
+              }
+            }),
+            JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
+          ].join("\n"),
+          stderr: ""
+        };
+      })());
     }
   });
 
@@ -662,27 +704,29 @@ test("codex adapter rejects wrapped resume when the event stream does not verify
     async runExec() {
       throw new Error("runExec should not be used in resume verification coverage");
     },
-    async runResume(input) {
-      await mkdir(dirname(input.outputPath), { recursive: true });
-      await writeFile(
-        input.outputPath,
-        JSON.stringify({
-          outcomeType: "result",
-          resultStatus: "partial",
-          resultSummary: "Foreign resume should be ignored.",
-          changedFiles: [],
-          blockerSummary: "",
-          decisionOptions: [],
-          recommendedOption: ""
-        }),
-        "utf8"
-      );
-      await input.onEvent?.({ type: "thread.resumed", thread_id: "thread-foreign-resume" });
-      return {
-        exitCode: 0,
-        stdout: "",
-        stderr: ""
-      };
+    async startResume(input) {
+      return createImmediateRunningHandle((async () => {
+        await mkdir(dirname(input.outputPath), { recursive: true });
+        await writeFile(
+          input.outputPath,
+          JSON.stringify({
+            outcomeType: "result",
+            resultStatus: "partial",
+            resultSummary: "Foreign resume should be ignored.",
+            changedFiles: [],
+            blockerSummary: "",
+            decisionOptions: [],
+            recommendedOption: ""
+          }),
+          "utf8"
+        );
+        await input.onEvent?.({ type: "thread.resumed", thread_id: "thread-foreign-resume" });
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: ""
+        };
+      })());
     }
   });
 
@@ -1823,11 +1867,11 @@ test("codex adapter writes running lease updates atomically", async () => {
   const projection = await store.rebuildProjection();
   const brief = buildRecoveryBrief(projection);
   const assignmentId = bootstrap.initialAssignmentId;
-  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  const originalWriteTextArtifactCas = store.writeTextArtifactCas.bind(store);
   let leaseWrites = 0;
   (store as RuntimeStore & {
-    writeJsonArtifact: RuntimeStore["writeJsonArtifact"];
-  }).writeJsonArtifact = async (artifactPath, value) => {
+    writeTextArtifactCas: RuntimeStore["writeTextArtifactCas"];
+  }).writeTextArtifactCas = async (artifactPath, expectedVersion, nextContent) => {
     if (artifactPath === `adapters/codex/runs/${assignmentId}.lease.json`) {
       leaseWrites += 1;
       if (leaseWrites === 2) {
@@ -1843,7 +1887,7 @@ test("codex adapter writes running lease updates atomically", async () => {
         assert.doesNotMatch(current, /\{\s*$/);
       }
     }
-    return originalWriteJsonArtifact(artifactPath, value);
+    return originalWriteTextArtifactCas(artifactPath, expectedVersion, nextContent);
   };
 
   let releaseRun!: () => void;
@@ -2123,6 +2167,18 @@ async function createMockRunningExec(
   });
   void result.catch(() => undefined);
 
+  return {
+    result,
+    terminate: async () => undefined,
+    waitForExit: async () => {
+      const execResult = await result;
+      return { code: execResult.exitCode };
+    }
+  };
+}
+
+function createImmediateRunningHandle<TResult extends { exitCode: number }>(result: Promise<TResult>) {
+  void result.catch(() => undefined);
   return {
     result,
     terminate: async () => undefined,

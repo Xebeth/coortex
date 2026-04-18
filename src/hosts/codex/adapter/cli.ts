@@ -102,7 +102,7 @@ export class DefaultCodexCommandRunner implements CodexCommandRunner {
         input.sessionId,
         ...(this.shouldDangerouslyBypass(input)
           ? ["--dangerously-bypass-approvals-and-sandbox"]
-          : ["--sandbox", "workspace-write"]),
+          : ["--full-auto"]),
         "-o",
         input.outputPath,
         ...(input.prompt && input.prompt.length > 0 ? [input.prompt] : [])

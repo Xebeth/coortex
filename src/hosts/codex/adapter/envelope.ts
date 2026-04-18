@@ -4,6 +4,7 @@ import type {
   TaskEnvelope,
   TrimmedField
 } from "../../../adapters/contract.js";
+import { measureCodexExecutionPromptChars } from "./prompt.js";
 
 export interface EnvelopeOptions {
   host: string;
@@ -215,9 +216,9 @@ function compactEnvelope(envelope: TaskEnvelope, maxChars: number): TaskEnvelope
 function withEstimatedChars(envelope: TaskEnvelope): TaskEnvelope {
   return {
     ...envelope,
-    estimatedChars: JSON.stringify({
+    estimatedChars: measureCodexExecutionPromptChars({
       ...envelope,
       estimatedChars: 0
-    }).length
+    })
   };
 }

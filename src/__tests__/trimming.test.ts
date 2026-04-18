@@ -78,7 +78,7 @@ test("task envelope trims oversized result summaries, writes artifacts, and stay
   const envelope = await buildTaskEnvelope(store, projection, brief, {
     host: "codex",
     adapter: "codex",
-    maxChars: 1_500,
+    maxChars: 3_000,
     resultSummaryLimit: 120
   });
 
@@ -88,7 +88,7 @@ test("task envelope trims oversized result summaries, writes artifacts, and stay
     envelope.recentResults[0]?.reference,
     ".coortex/artifacts/results/result-1.txt"
   );
-  assert.ok(envelope.estimatedChars <= 1_500);
+  assert.ok(envelope.estimatedChars <= 3_000);
 
   const artifact = await readFile(
     join(projectRoot, ".coortex", "artifacts", "results", "result-1.txt"),

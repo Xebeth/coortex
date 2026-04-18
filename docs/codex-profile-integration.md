@@ -125,6 +125,9 @@ This logic should live in adapter-facing envelope/trimming code, not in the core
 The Codex adapter should normalize host-native usage or session metadata into the Coortex telemetry model.
 
 The telemetry schema must stay Coortex-owned even if the host surface is Codex-specific.
+For bounded-envelope fields such as `estimatedChars`, the adapter must
+count the actual prompt payload sent to Codex, including schema and
+prompt framing, not just the serialized envelope object.
 
 ## Wrapped Session Boundary
 
@@ -143,9 +146,19 @@ For the current hardening slice:
 - the claim-or-adopt step for that reclaim boundary is atomic inside the
   adapter / host-run store seam, including the path that reuses an
   already-live eligible lease
+- when reclaim adopts an already-live eligible lease, the adopted run
+  must carry a fresh durable owner fence so later heartbeat,
+  completion, rollback, destructive terminal lease cleanup, and
+  degraded terminal-warning cleanup writes can prove the adopted owner
+  instead of trusting only the initial takeover CAS; terminal cleanup
+  must not drop back to an unfenced plain delete after the proof CAS
 - wrapped reclaim uses the structured `exec resume` path so successful
   resume records result/decision outcomes and completion telemetry
   through the same runtime-owned outcome pipeline as wrapped launch
+- a custom runner may advertise native wrapped resume support only when
+  it exposes a live `startResume()` handle with cancellation and wait
+  semantics; a fire-and-forget `runResume()` function is not sufficient
+  to claim reclaim support
 - wrapped reclaim reports three states at the adapter/runtime seam:
   `reclaimed`, `verified_then_failed`, and `unverified_failed`; the
   runtime must not collapse a verified same-session reclaim back into an
@@ -168,9 +181,11 @@ For the current hardening slice:
   the binding is already detached but missing that id, recovery
   backfills it from durable host metadata before wrapped reclaim is
   considered available
-- wrapped launch and wrapped reclaim use the same default sandbox /
-  approval mode selection at the Codex CLI boundary; reclaim must not
-  introduce a second unmodeled execution policy difference
+- wrapped launch and wrapped reclaim consume the same Coortex bypass
+  policy input, but their default Codex CLI modes are host-specific:
+  launch uses `codex exec --sandbox workspace-write`, while wrapped
+  resume uses the supported `codex exec resume --full-auto` path unless
+  bypass mode is enabled
 - the `-o` last-message file is the authoritative structured-output
   boundary; if Codex does not materialize that file, Coortex may fall
   back to the streamed `agent_message` JSONL item, but only when that

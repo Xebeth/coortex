@@ -53,7 +53,7 @@ Envelope telemetry is produced by the adapter-facing bounded-envelope builder.
 
 Examples:
 
-- envelope size estimate
+- actual prompt-payload size estimate
 - oversized-envelope detection
 - trim applied
 - recovery-brief size
@@ -119,7 +119,7 @@ The first milestone must record:
 
 - lifecycle events
 - session/task identifiers
-- envelope size
+- actual prompt-payload size after prompt framing and schema injection
 - trimming actions
 - recovery-related events
 - placeholders for usage/token fields

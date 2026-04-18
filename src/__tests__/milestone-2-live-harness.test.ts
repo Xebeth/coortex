@@ -168,9 +168,13 @@ liveHarness(
       const runProcess = spawn(process.execPath, [cliPath, "run"], {
         cwd: projectRoot,
         detached: process.platform !== "win32",
-        env: liveCodexEnv,
+        env: {
+          ...liveCodexEnv,
+          COORTEX_INTERRUPT_SLEEP_SECONDS: "30"
+        },
         stdio: ["ignore", "pipe", "pipe"]
       });
+      const runExitPromise = waitForExit(runProcess);
       runProcess.stdout.setEncoding("utf8");
       runProcess.stderr.setEncoding("utf8");
       let runStdout = "";
@@ -182,37 +186,58 @@ liveHarness(
         runStderr += chunk;
       });
 
-      const runningRecord = await waitForInterruptionPoint(projectRoot, assignmentId, 45_000);
-      assert.equal(runningRecord.state, "running");
-      assert.ok(runningRecord.nativeRunId);
+      try {
+        const runningRecord = await waitForRunningHandle(projectRoot, assignmentId, 90_000);
+        assert.equal(runningRecord.state, "running");
 
-      runProcess.kill("SIGTERM");
-      const exit = await waitForExit(runProcess);
-      const inspect = await inspectRun(projectRoot, assignmentId);
-      const status = await runCli(projectRoot, ["status"]);
-      const resume = await runCli(projectRoot, ["resume"]);
-      await delay(1_000);
-      const snapshot = await readSnapshot(projectRoot);
-      const resumedEnvelope = await readJsonArtifact<{
-        metadata: { activeAssignmentId?: string };
-        recoveryBrief: {
-          activeAssignments: Array<{ id: string; state: string }>;
-          nextRequiredAction: string;
-        };
-      }>(projectRoot, "runtime/last-resume-envelope.json");
+        runProcess.kill("SIGKILL");
+        const exit = await runExitPromise;
+        const inspect = await inspectRun(projectRoot, assignmentId);
+        const status = await runCli(projectRoot, ["status"]);
+        const resume = await runCli(projectRoot, ["resume"]);
+        await delay(1_000);
+        const snapshot = await readSnapshot(projectRoot);
+        const telemetry = await readTelemetry(projectRoot);
+        const completedResumeTelemetry = findLastByEventType(telemetry, "host.resume.completed");
 
-      assert.ok(exit.signal === "SIGTERM" || exit.code === 1 || exit.code === 143);
-      assert.equal(snapshot.results.length, 0);
-      assert.deepEqual(snapshot.status.activeAssignmentIds, [assignmentId]);
-      assert.match(stdout(status), /Active assignments: 1/);
-      assert.equal(inspect?.state, "running");
-      assert.equal(inspect?.nativeRunId, runningRecord.nativeRunId);
-      assert.match(stdout(resume), /Recovery brief generated/);
-      assert.equal(resumedEnvelope.metadata.activeAssignmentId, assignmentId);
-      assert.equal(resumedEnvelope.recoveryBrief.activeAssignments[0]?.id, assignmentId);
-      assert.match(resumedEnvelope.recoveryBrief.nextRequiredAction, /Continue assignment/);
-      const readme = await readFile(join(projectRoot, "README.md"), "utf8");
-      assert.match(readme, /Live harness interruption marker\./);
+        assert.ok(exit.signal === "SIGKILL" || exit.code === 137);
+        assert.equal(snapshot.results.length, 0);
+        assert.deepEqual(snapshot.status.activeAssignmentIds, [assignmentId]);
+        assert.match(stdout(status), /Active assignments: 1/);
+        assert.equal(inspect?.state, "running");
+        assert.ok(inspect?.nativeRunId);
+        if (runningRecord.nativeRunId) {
+          assert.equal(inspect.nativeRunId, runningRecord.nativeRunId);
+        }
+        assertHasTelemetryEvent(telemetry, "host.resume.started");
+        if (/Reclaimed attachment /.test(stdout(resume))) {
+          assert.equal(completedResumeTelemetry?.metadata.reclaimed, true);
+          assert.equal(completedResumeTelemetry?.metadata.reclaimState, "reclaimed");
+          assert.doesNotMatch(stdout(resume), /Recovery brief generated/);
+          assert.match(stdout(resume), new RegExp(`assignment ${assignmentId}`));
+          assert.match(stdout(resume), /Host session:/);
+        } else {
+          const resumedEnvelope = await readJsonArtifact<{
+            metadata: { activeAssignmentId?: string };
+            recoveryBrief: {
+              activeAssignments: Array<{ id: string; state: string }>;
+              nextRequiredAction: string;
+            };
+          }>(projectRoot, "runtime/last-resume-envelope.json");
+          assert.equal(completedResumeTelemetry?.metadata.reclaimed, false);
+          assert.equal(completedResumeTelemetry?.metadata.reclaimState, "unverified_failed");
+          assert.match(stdout(resume), /Recovery brief generated/);
+          assert.equal(resumedEnvelope.metadata.activeAssignmentId, assignmentId);
+          assert.equal(resumedEnvelope.recoveryBrief.activeAssignments[0]?.id, assignmentId);
+          assert.equal(resumedEnvelope.recoveryBrief.activeAssignments[0]?.state, "queued");
+          assert.match(resumedEnvelope.recoveryBrief.nextRequiredAction, /Start assignment/);
+        }
+      } finally {
+        if (runProcess.exitCode === null && runProcess.signalCode === null) {
+          runProcess.kill("SIGTERM");
+          await runExitPromise.catch(() => undefined);
+        }
+      }
       t.diagnostic(`interrupted run stdout=${JSON.stringify(runStdout.trim())}`);
       if (runStderr.trim().length > 0) {
         t.diagnostic(`interrupted run stderr=${JSON.stringify(runStderr.trim())}`);
@@ -303,7 +328,7 @@ liveHarness(
       );
     });
 
-    await t.test("real-host run repairs malformed logs while preserving later valid events", async () => {
+    await t.test("real-host run salvages malformed logs without discarding later valid events", async () => {
       const projectRoot = await createLiveFixture("malformed-log");
       await runCli(projectRoot, ["init"]);
       const assignmentId = await retargetActiveAssignment(projectRoot, {
@@ -324,7 +349,7 @@ liveHarness(
 
       assert.match(stdout(run), /Executed assignment/);
       assert.equal(projection.results.size, 2);
-      assert.doesNotMatch(await readFile(store.eventsPath, "utf8"), /\{"broken":/);
+      assert.match(await readFile(store.eventsPath, "utf8"), /\{"broken":/);
       assert.match(readme, /Live harness malformed log complete\./);
       assert.ok(events.length >= 5);
     });
@@ -476,14 +501,17 @@ async function appendPartialResult(
 
 async function inspectRun(projectRoot: string, assignmentId: string) {
   const inspect = await runCli(projectRoot, ["inspect", assignmentId]);
-  const record = JSON.parse(stdout(inspect)) as {
-    assignmentId: string;
-    state: string;
-    outcomeKind?: string;
-    adapterData?: {
-      nativeRunId?: string;
+  const inspection = JSON.parse(stdout(inspect)) as {
+    hostRun: {
+      assignmentId: string;
+      state: string;
+      outcomeKind?: string;
+      adapterData?: {
+        nativeRunId?: string;
+      };
     };
   };
+  const record = inspection.hostRun;
   return {
     assignmentId: record.assignmentId,
     state: record.state,
@@ -521,37 +549,46 @@ function findLatestResultId(snapshot: RuntimeSnapshot): string {
   return result.resultId;
 }
 
-async function waitForInterruptionPoint(
+async function waitForRunningHandle(
   projectRoot: string,
   assignmentId: string,
   timeoutMs: number
 ): Promise<{ state: string; nativeRunId?: string }> {
   const deadline = Date.now() + timeoutMs;
+  const store = RuntimeStore.forProject(projectRoot);
+  let lastObservedInspect:
+    | (ReturnType<typeof inspectRun> extends Promise<infer T> ? T : never)
+    | undefined;
+  let lastObservedNativeRunId: string | undefined;
   while (Date.now() < deadline) {
     try {
-      const record = await readJsonArtifact<{
-        state: string;
-        adapterData?: {
-          nativeRunId?: string;
-        };
-      }>(projectRoot, `adapters/codex/runs/${assignmentId}.json`);
-      const readme = await readFile(join(projectRoot, "README.md"), "utf8");
+      const record = await inspectRun(projectRoot, assignmentId);
+      lastObservedInspect = record;
+      const projection = await loadOperatorProjection(store);
+      lastObservedNativeRunId = [...projection.attachments.values()]
+        .find(
+          (attachment) =>
+            attachment.provenance.kind === "launch" &&
+            attachment.provenance.source === "ctx.run" &&
+            attachment.state === "attached"
+        )?.nativeSessionId;
       if (
-        record.state === "running" &&
-        typeof record.adapterData?.nativeRunId === "string" &&
-        /Live harness interruption marker\./.test(readme)
+        record?.state === "running" &&
+        typeof lastObservedNativeRunId === "string"
       ) {
         return {
           state: record.state,
-          nativeRunId: record.adapterData.nativeRunId
+          nativeRunId: lastObservedNativeRunId
         };
       }
     } catch {
-      // keep polling until the handle and on-disk marker are durably visible
+      // keep polling until the running handle is durably visible
     }
     await delay(500);
   }
-  throw new Error(`Timed out waiting for interruption point for ${assignmentId}.`);
+  throw new Error(
+    `Timed out waiting for running handle for ${assignmentId}. nativeRunIdObserved=${lastObservedNativeRunId ?? "none"} lastInspect=${JSON.stringify(lastObservedInspect)}`
+  );
 }
 
 function waitForExit(

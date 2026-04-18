@@ -15,6 +15,28 @@ export interface CodexStructuredOutcome {
 }
 
 export function buildCodexExecutionPrompt(envelope: TaskEnvelope): string {
+  return renderCodexExecutionPrompt(envelope);
+}
+
+export function measureCodexExecutionPromptChars(envelope: TaskEnvelope): number {
+  let estimatedChars = envelope.estimatedChars;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const nextEstimate = renderCodexExecutionPrompt({
+      ...envelope,
+      estimatedChars
+    }).length;
+    if (nextEstimate === estimatedChars) {
+      return nextEstimate;
+    }
+    estimatedChars = nextEstimate;
+  }
+  return renderCodexExecutionPrompt({
+    ...envelope,
+    estimatedChars
+  }).length;
+}
+
+function renderCodexExecutionPrompt(envelope: TaskEnvelope): string {
   const schema = codexExecutionOutputSchema();
   return [
     "You are executing a Coortex assignment through the Codex host adapter.",
@@ -27,10 +49,10 @@ export function buildCodexExecutionPrompt(envelope: TaskEnvelope): string {
     "Use concise durable summaries.",
     "",
     "Structured output schema:",
-    JSON.stringify(schema, null, 2),
+    JSON.stringify(schema),
     "",
     "Bounded envelope:",
-    JSON.stringify(envelope, null, 2)
+    JSON.stringify(envelope)
   ].join("\n");
 }
 

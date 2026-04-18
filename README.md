@@ -187,7 +187,14 @@ when available, the matching runtime-owned attachment context under
 runtime context, not a second source of attachment authority or a
 reconciliation command.
 
-`ctx resume` first targets the single authoritative attached or detached-but-resumable attachment that still carries a stored native session id. During a verified wrapped reclaim the runtime marks that attachment attached, then returns it to `detached_resumable` when the wrapped resume process exits without a terminal runtime outcome. If no such reclaimable attachment exists, it refreshes the derived recovery envelope from current runtime state instead.
+`ctx resume` first targets the single authoritative attached or
+detached-but-resumable attachment that still carries a stored native
+session id. During a verified wrapped reclaim the runtime marks that
+attachment attached, then returns it to `detached_resumable` when the
+wrapped resume process exits without a terminal runtime outcome. If no
+such reclaimable attachment exists, or reclaim cannot be verified, it
+refreshes the derived recovery envelope from current runtime state
+instead.
 
 Attachment and claim provenance follow the same rule: launch-created
 authority records `launch`, live wrapped reclaim records `resume`, and
@@ -240,7 +247,11 @@ Enable Codex bypass mode for explicit live success-path validation by setting:
 COORTEX_CODEX_DANGEROUS_BYPASS=1
 ```
 
-When enabled, Coortex persists the Codex runtime setting and uses `--dangerously-bypass-approvals-and-sandbox` for Codex-backed runs. The default remains sandboxed execution.
+When enabled, Coortex persists the Codex runtime setting and uses
+`--dangerously-bypass-approvals-and-sandbox` for Codex-backed runs and
+resumes. Without bypass, wrapped launch uses Codex's sandboxed
+`workspace-write` mode, while wrapped resume uses the supported
+`codex exec resume --full-auto` default.
 
 ## License
 MIT

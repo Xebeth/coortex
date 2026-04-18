@@ -89,8 +89,7 @@ export class CodexAdapter implements HostAdapter {
   }
 
   getCapabilities(): AdapterCapabilities {
-    const supportsNativeSessionResume =
-      typeof this.runner.runResume === "function" || typeof this.runner.startResume === "function";
+    const supportsNativeSessionResume = typeof this.runner.startResume === "function";
     return {
       supportsProfiles: true,
       supportsHooks: false,
@@ -145,18 +144,7 @@ export class CodexAdapter implements HostAdapter {
   private async startResumeHandle(
     input: CodexResumeInput
   ): Promise<HostRunHandle<CodexExecResult>> {
-    if (this.runner.startResume) {
-      return this.runner.startResume(input);
-    }
-    const resumeExecution = this.runner.runResume!(input);
-    return {
-      result: resumeExecution,
-      terminate: async () => undefined,
-      waitForExit: async () => {
-        const execution = await resumeExecution;
-        return { code: execution.exitCode };
-      }
-    };
+    return this.runner.startResume!(input);
   }
 
   async initialize(store: RuntimeArtifactStore, _projection: RuntimeProjection): Promise<void> {
@@ -245,7 +233,8 @@ export class CodexAdapter implements HostAdapter {
         assignmentId,
         startedAt,
         completedAt,
-        getNativeRunId(runningRecord)
+        getNativeRunId(runningRecord),
+        runningRecord.runInstanceId
       );
       const warning = await runStore.persistWarning(runRecord);
       return {
@@ -321,7 +310,7 @@ export class CodexAdapter implements HostAdapter {
     if (!attachment.nativeSessionId) {
       throw new Error(`Attachment ${attachment.id} is missing a stored native Codex session id.`);
     }
-    if (!this.runner.runResume && !this.runner.startResume) {
+    if (!this.runner.startResume) {
       throw new Error("The configured Codex runner does not support wrapped session resume.");
     }
 
