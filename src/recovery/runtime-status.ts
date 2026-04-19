@@ -1,4 +1,5 @@
 import type { RuntimeProjection } from "../core/types.js";
+import { findLatestAssignmentDecision } from "../projections/assignment-outcome-queries.js";
 
 interface DecisionOutcomeShape {
   kind: "decision";
@@ -101,10 +102,7 @@ function nextDecisionCurrentObjective(
     }
     return projection.status.currentObjective;
   }
-  const latestDecision = [...projection.decisions.values()]
-    .filter((decision) => decision.assignmentId === assignmentId)
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .at(-1);
+  const latestDecision = findLatestAssignmentDecision(projection, assignmentId);
   if (!latestDecision) {
     return blockerSummary;
   }

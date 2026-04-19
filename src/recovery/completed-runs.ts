@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  buildCompletedRunRecord,
+  buildCompletedHostExecutionOutcomeFromDecisionCapture,
+  buildCompletedHostExecutionOutcomeFromResultCapture,
+  matchesCompletedRunDecision,
+  matchesCompletedRunResult
+} from "../adapters/host-run-records.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord, RuntimeProjection } from "../core/types.js";
+import {
+  findLatestAssignmentDecision,
+  findLatestTerminalAssignmentResult
+} from "../projections/assignment-outcome-queries.js";
 import { applyRuntimeEventsToProjection } from "../projections/runtime-projection.js";
 import { isRuntimeAuthorityIntegrityError } from "../projections/attachment-claim-queries.js";
 import { nowIso } from "../utils/time.js";
@@ -19,66 +30,24 @@ export function buildCompletedRunRecordFromRuntimeOutcome(
 ): HostRunRecord | undefined {
   const assignmentId = record.assignmentId;
   const startedAt = record.startedAt;
-  const decision = [...projection.decisions.values()]
-    .filter((candidate) => candidate.assignmentId === assignmentId)
-    .filter((candidate) => candidate.createdAt >= startedAt)
-    .at(-1);
-  const result = [...projection.results.values()]
-    .filter(
-      (candidate) =>
-        candidate.assignmentId === assignmentId &&
-        candidate.createdAt >= startedAt &&
-        (candidate.status === "completed" || candidate.status === "failed")
-    )
-    .at(-1);
+  const decision = findLatestAssignmentDecision(projection, assignmentId, {
+    createdAtOnOrAfter: startedAt
+  });
+  const result = findLatestTerminalAssignmentResult(projection, assignmentId, {
+    createdAtOnOrAfter: startedAt
+  });
 
   if (!decision && !result) {
     return undefined;
   }
 
   if (result && (!decision || result.createdAt >= decision.createdAt)) {
-    return {
-      assignmentId,
-      state: "completed",
-      startedAt,
-      completedAt: result.createdAt,
-      outcomeKind: "result",
-      resultStatus: result.status,
-      summary: result.summary,
-      terminalOutcome: {
-        kind: "result",
-        result: {
-          resultId: result.resultId,
-          producerId: result.producerId,
-          status: result.status,
-          summary: result.summary,
-          changedFiles: [...result.changedFiles],
-          createdAt: result.createdAt
-        }
-      }
-    };
+    const execution = buildCompletedHostExecutionOutcomeFromResultCapture(result);
+    return buildCompletedRunRecord(execution, assignmentId, startedAt, result.createdAt);
   }
 
-  return {
-    assignmentId,
-    state: "completed",
-    startedAt,
-    completedAt: decision!.createdAt,
-    outcomeKind: "decision",
-    summary: decision!.blockerSummary,
-    terminalOutcome: {
-      kind: "decision",
-      decision: {
-        decisionId: decision!.decisionId,
-        requesterId: decision!.requesterId,
-        blockerSummary: decision!.blockerSummary,
-        options: decision!.options.map((option) => ({ ...option })),
-        recommendedOption: decision!.recommendedOption,
-        state: decision!.state,
-        createdAt: decision!.createdAt
-      }
-    }
-  };
+  const execution = buildCompletedHostExecutionOutcomeFromDecisionCapture(decision!);
+  return buildCompletedRunRecord(execution, assignmentId, startedAt, decision!.createdAt);
 }
 
 export function buildCompletedRunReconciliation(
@@ -227,19 +196,9 @@ function hasRecoveredCompletedOutcomeEvent(
   if (terminalOutcome.kind === "decision") {
     return findRecoveredCompletedDecision(projection, record) !== undefined;
   }
-  return [...projection.results.values()].some((result) => {
-    if (record.terminalOutcome?.kind !== "result") {
-      return false;
-    }
-    return (
-      result.assignmentId === record.assignmentId &&
-      (record.terminalOutcome.result.resultId
-        ? result.resultId === record.terminalOutcome.result.resultId
-        : result.status === record.terminalOutcome.result.status &&
-          result.summary === record.terminalOutcome.result.summary &&
-          result.createdAt === record.terminalOutcome.result.createdAt)
-    );
-  });
+  return [...projection.results.values()].some((result) =>
+    matchesCompletedRunResult(record, result)
+  );
 }
 
 function findRecoveredCompletedDecisionEvent(
@@ -252,7 +211,7 @@ function findRecoveredCompletedDecisionEvent(
   }
   return events
     .filter((event): event is Extract<RuntimeEvent, { type: "decision.created" }> => event.type === "decision.created")
-    .find((event) => matchesRecoveredCompletedDecision(record, event.payload.decision))?.payload.decision;
+    .find((event) => matchesCompletedRunDecision(record, event.payload.decision))?.payload.decision;
 }
 
 function findRecoveredCompletedOutcomeEventIndexFromEvents(
@@ -270,12 +229,7 @@ function findRecoveredCompletedOutcomeEventIndexFromEvents(
       if (event.payload.decision.assignmentId !== record.assignmentId) {
         return false;
       }
-      return record.terminalOutcome?.kind === "decision" &&
-        (record.terminalOutcome.decision.decisionId
-          ? event.payload.decision.decisionId === record.terminalOutcome.decision.decisionId
-          : event.payload.decision.blockerSummary === record.terminalOutcome.decision.blockerSummary &&
-              event.payload.decision.recommendedOption === record.terminalOutcome.decision.recommendedOption &&
-              event.payload.decision.createdAt === record.terminalOutcome.decision.createdAt);
+      return matchesCompletedRunDecision(record, event.payload.decision);
     });
     return decisionIndex === -1 ? undefined : decisionIndex;
   }
@@ -286,12 +240,7 @@ function findRecoveredCompletedOutcomeEventIndexFromEvents(
     if (event.payload.result.assignmentId !== record.assignmentId) {
       return false;
     }
-    return record.terminalOutcome?.kind === "result" &&
-      (record.terminalOutcome.result.resultId
-        ? event.payload.result.resultId === record.terminalOutcome.result.resultId
-        : event.payload.result.status === record.terminalOutcome.result.status &&
-            event.payload.result.summary === record.terminalOutcome.result.summary &&
-            event.payload.result.createdAt === record.terminalOutcome.result.createdAt);
+    return matchesCompletedRunResult(record, event.payload.result);
   });
   return resultIndex === -1 ? undefined : resultIndex;
 }
@@ -305,26 +254,8 @@ function findRecoveredCompletedDecision(
     return undefined;
   }
   return [...projection.decisions.values()].find((decision) => {
-    return matchesRecoveredCompletedDecision(record, decision);
+    return matchesCompletedRunDecision(record, decision);
   });
-}
-
-function matchesRecoveredCompletedDecision(
-  record: HostRunRecord,
-  decision: Pick<DecisionPacket, "assignmentId" | "decisionId" | "blockerSummary" | "recommendedOption" | "createdAt">
-): boolean {
-  const terminalOutcome = record.terminalOutcome;
-  if (!terminalOutcome || terminalOutcome.kind !== "decision") {
-    return false;
-  }
-  if (decision.assignmentId !== record.assignmentId) {
-    return false;
-  }
-  return terminalOutcome.decision.decisionId
-    ? decision.decisionId === terminalOutcome.decision.decisionId
-    : decision.blockerSummary === terminalOutcome.decision.blockerSummary &&
-        decision.recommendedOption === terminalOutcome.decision.recommendedOption &&
-        decision.createdAt === terminalOutcome.decision.createdAt;
 }
 
 function selectRecoveredCompletedDecisionReplayEvents(
@@ -342,7 +273,7 @@ function selectRecoveredCompletedDecisionReplayEvents(
   const replayableDecisionCreates = replayableEvents.filter(
     (event): event is Extract<RuntimeEvent, { type: "decision.created" }> =>
       event.type === "decision.created" &&
-      matchesRecoveredCompletedDecision(record, event.payload.decision)
+      matchesCompletedRunDecision(record, event.payload.decision)
   );
   const knownDecisionIds = new Set(
     [
@@ -359,7 +290,7 @@ function selectRecoveredCompletedDecisionReplayEvents(
       | Extract<RuntimeEvent, { type: "decision.created" }>
       | Extract<RuntimeEvent, { type: "decision.resolved" }> =>
       (event.type === "decision.created" &&
-        matchesRecoveredCompletedDecision(record, event.payload.decision)) ||
+        matchesCompletedRunDecision(record, event.payload.decision)) ||
       (event.type === "decision.resolved" && knownDecisionIds.has(event.payload.decisionId))
   );
 }

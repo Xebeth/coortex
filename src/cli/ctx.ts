@@ -5,6 +5,7 @@ import type { HostAdapter } from "../adapters/contract.js";
 import { isWrappedResumeCapableAttachment } from "../core/types.js";
 import { getNativeRunId } from "../core/run-state.js";
 import { listActiveClaimBindings } from "../projections/attachment-claim-queries.js";
+import { listOpenDecisions } from "../projections/assignment-outcome-queries.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { RuntimeConfig } from "../config/types.js";
@@ -135,7 +136,7 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
-  const openDecisions = [...projection.decisions.values()].filter((decision) => decision.state === "open");
+  const openDecisions = listOpenDecisions(projection);
   const attachments = [...projection.attachments.values()].sort((left, right) =>
     left.createdAt.localeCompare(right.createdAt)
   );

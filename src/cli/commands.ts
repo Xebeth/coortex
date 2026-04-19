@@ -8,6 +8,12 @@ import type {
   HostSessionResumeResult,
   TaskEnvelope
 } from "../adapters/contract.js";
+import {
+  buildCompletedHostExecutionOutcomeFromDecisionCapture,
+  buildCompletedHostExecutionOutcomeFromResultCapture,
+  matchesDecisionIdentity,
+  matchesResultIdentity
+} from "../adapters/host-run-records.js";
 import { isActiveHostRunLeaseError } from "../adapters/host-run-store.js";
 import type {
   Assignment,
@@ -24,6 +30,10 @@ import {
   selectSingleAuthoritativeAttachmentClaim,
   selectSingleResumableAttachmentClaim
 } from "../projections/attachment-claim-queries.js";
+import {
+  findLatestOpenAssignmentDecision,
+  findLatestTerminalAssignmentResult
+} from "../projections/assignment-outcome-queries.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
@@ -911,41 +921,9 @@ function synthesizeRecoveredExecutionFromReconciliation(
         projectionAfterReconciliation,
         recoveredDecision.assignment
       ),
-      execution: {
-        outcome: {
-          kind: "decision",
-          capture: {
-            assignmentId: recoveredDecision.assignment.id,
-            requesterId: recoveredDecision.decision.requesterId,
-            blockerSummary: recoveredDecision.decision.blockerSummary,
-            options: recoveredDecision.decision.options.map((option) => ({ ...option })),
-            recommendedOption: recoveredDecision.decision.recommendedOption,
-            state: recoveredDecision.decision.state,
-            createdAt: recoveredDecision.decision.createdAt,
-            decisionId: recoveredDecision.decision.decisionId
-          }
-        },
-        run: {
-          assignmentId: recoveredDecision.assignment.id,
-          state: "completed",
-          startedAt: recoveredDecision.decision.createdAt,
-          completedAt: recoveredDecision.decision.createdAt,
-          outcomeKind: "decision",
-          summary: recoveredDecision.decision.blockerSummary,
-          terminalOutcome: {
-            kind: "decision",
-            decision: {
-              decisionId: recoveredDecision.decision.decisionId,
-              requesterId: recoveredDecision.decision.requesterId,
-              blockerSummary: recoveredDecision.decision.blockerSummary,
-              options: recoveredDecision.decision.options.map((option) => ({ ...option })),
-              recommendedOption: recoveredDecision.decision.recommendedOption,
-              state: recoveredDecision.decision.state,
-              createdAt: recoveredDecision.decision.createdAt
-            }
-          }
-        }
-      }
+      execution: buildCompletedHostExecutionOutcomeFromDecisionCapture(
+        recoveredDecision.decision
+      )
     };
   }
 
@@ -968,40 +946,9 @@ function synthesizeRecoveredExecutionFromReconciliation(
       projectionAfterReconciliation,
       recoveredResult.assignment
     ),
-    execution: {
-      outcome: {
-        kind: "result",
-        capture: {
-          assignmentId: recoveredResult.assignment.id,
-          producerId: recoveredResult.result.producerId,
-          status: recoveredResult.result.status,
-          summary: recoveredResult.result.summary,
-          changedFiles: [...recoveredResult.result.changedFiles],
-          createdAt: recoveredResult.result.createdAt,
-          resultId: recoveredResult.result.resultId
-        }
-      },
-      run: {
-        assignmentId: recoveredResult.assignment.id,
-        state: "completed",
-        startedAt: recoveredResult.result.createdAt,
-        completedAt: recoveredResult.result.createdAt,
-        outcomeKind: "result",
-        resultStatus: recoveredResult.result.status,
-        summary: recoveredResult.result.summary,
-        terminalOutcome: {
-          kind: "result",
-          result: {
-            resultId: recoveredResult.result.resultId,
-            producerId: recoveredResult.result.producerId,
-            status: recoveredResult.result.status,
-            summary: recoveredResult.result.summary,
-            changedFiles: [...recoveredResult.result.changedFiles],
-            createdAt: recoveredResult.result.createdAt
-          }
-        }
-      }
-    }
+    execution: buildCompletedHostExecutionOutcomeFromResultCapture(
+      recoveredResult.result
+    )
   };
 }
 
@@ -1017,7 +964,10 @@ function findRecoveredDecisionCandidate(
     if (!assignment || assignment.state !== "blocked") {
       continue;
     }
-    const decision = findLatestOpenDecision(projectionAfterReconciliation, assignment.id);
+    const decision = findLatestOpenAssignmentDecision(
+      projectionAfterReconciliation,
+      assignment.id
+    );
     if (!decision) {
       continue;
     }
@@ -1053,7 +1003,10 @@ function findRecoveredResultCandidate(
     if (assignment.state !== "completed" && assignment.state !== "failed") {
       continue;
     }
-    const result = findLatestTerminalResult(projectionAfterReconciliation, assignment.id);
+    const result = findLatestTerminalAssignmentResult(
+      projectionAfterReconciliation,
+      assignment.id
+    );
     if (!result) {
       continue;
     }
@@ -1105,44 +1058,12 @@ function buildRecoveredExecutionEnvelope(
   };
 }
 
-function findLatestOpenDecision(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
-): DecisionPacket | undefined {
-  return [...projection.decisions.values()]
-    .filter((decision) => decision.assignmentId === assignmentId && decision.state === "open")
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .at(-1);
-}
-
-function findLatestTerminalResult(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
-): ResultPacket | undefined {
-  return [...projection.results.values()]
-    .filter(
-      (result) =>
-        result.assignmentId === assignmentId &&
-        (result.status === "completed" || result.status === "failed")
-    )
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .at(-1);
-}
-
 function hasMatchingDecision(
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   decision: DecisionPacket
 ): boolean {
   return [...projection.decisions.values()].some((candidate) =>
-    candidate.assignmentId === decision.assignmentId &&
-    (
-      candidate.decisionId === decision.decisionId ||
-      (
-        candidate.blockerSummary === decision.blockerSummary &&
-        candidate.recommendedOption === decision.recommendedOption &&
-        candidate.createdAt === decision.createdAt
-      )
-    )
+    matchesDecisionIdentity(decision, candidate)
   );
 }
 
@@ -1151,14 +1072,6 @@ function hasMatchingResult(
   result: ResultPacket
 ): boolean {
   return [...projection.results.values()].some((candidate) =>
-    candidate.assignmentId === result.assignmentId &&
-    (
-      candidate.resultId === result.resultId ||
-      (
-        candidate.status === result.status &&
-        candidate.summary === result.summary &&
-        candidate.createdAt === result.createdAt
-      )
-    )
+    matchesResultIdentity(result, candidate)
   );
 }

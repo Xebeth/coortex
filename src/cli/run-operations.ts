@@ -4,12 +4,13 @@ import type {
   HostAdapter,
   HostExecutionOutcome
 } from "../adapters/contract.js";
+import { synthesizeHostExecutionOutcomeFromCompletedRecord } from "../adapters/host-run-records.js";
 import type { RuntimeEvent } from "../core/events.js";
-import type { HostRunRecord } from "../core/types.js";
 import {
   listAuthoritativeAttachmentClaims,
   listResumableAttachmentClaims
 } from "../projections/attachment-claim-queries.js";
+import { findLatestOpenAssignmentDecision } from "../projections/assignment-outcome-queries.js";
 import { selectRunnableProjection } from "../recovery/host-runs.js";
 import { loadReconciledProjectionWithDiagnostics } from "./run-reconciliation.js";
 import { nowIso } from "../utils/time.js";
@@ -110,55 +111,6 @@ export async function persistWrappedExecutionOutcome(
   };
 }
 
-function synthesizeRecoveredExecution(
-  record: HostRunRecord | undefined
-): HostExecutionOutcome | undefined {
-  if (!record || !isRecoverableCompletedRunRecord(record) || !record.terminalOutcome) {
-    return undefined;
-  }
-  if (record.terminalOutcome.kind === "decision") {
-    return {
-      outcome: {
-        kind: "decision",
-        capture: {
-          assignmentId: record.assignmentId,
-          requesterId: record.terminalOutcome.decision.requesterId,
-          blockerSummary: record.terminalOutcome.decision.blockerSummary,
-          options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
-          recommendedOption: record.terminalOutcome.decision.recommendedOption,
-          state: record.terminalOutcome.decision.state,
-          createdAt: record.terminalOutcome.decision.createdAt,
-          ...(record.terminalOutcome.decision.decisionId
-            ? { decisionId: record.terminalOutcome.decision.decisionId }
-            : {})
-        }
-      },
-      run: record
-    };
-  }
-  return {
-    outcome: {
-      kind: "result",
-      capture: {
-        assignmentId: record.assignmentId,
-        producerId: record.terminalOutcome.result.producerId,
-        status: record.terminalOutcome.result.status,
-        summary: record.terminalOutcome.result.summary,
-        changedFiles: [...record.terminalOutcome.result.changedFiles],
-        createdAt: record.terminalOutcome.result.createdAt,
-        ...(record.terminalOutcome.result.resultId
-          ? { resultId: record.terminalOutcome.result.resultId }
-          : {})
-      }
-    },
-    run: record
-  };
-}
-
-function isRecoverableCompletedRunRecord(record: { state: string; terminalOutcome?: unknown }): boolean {
-  return record.state === "completed" && Boolean(record.terminalOutcome);
-}
-
 export async function cleanupWrappedResumeLeaseArtifacts(
   store: RuntimeStore,
   adapter: HostAdapter,
@@ -193,7 +145,9 @@ export async function recoverCompletedWrappedExecution(
   warningPrefix: string,
   stoppedAt?: string
 ): Promise<WrappedExecutionRecoveryResult> {
-  const recoveredExecution = synthesizeRecoveredExecution(await adapter.inspectRun(store, assignmentId));
+  const recoveredExecution = synthesizeHostExecutionOutcomeFromCompletedRecord(
+    await adapter.inspectRun(store, assignmentId)
+  );
   if (recoveredExecution) {
     const recovered = await loadReconciledProjectionWithDiagnostics(store, adapter);
     const projectionAfter = await AttachmentLifecycleService.finalizeAttachmentAuthority(
@@ -337,23 +291,24 @@ export function getRunnableAssignment(
   }
 
   for (const activeAssignment of activeAssignments) {
-    const unresolvedDecisions = [...projection.decisions.values()].filter(
-      (decision) => decision.assignmentId === activeAssignment.id && decision.state === "open"
+    const unresolvedDecision = findLatestOpenAssignmentDecision(
+      projection,
+      activeAssignment.id
     );
-    if (activeAssignment.state === "blocked" || unresolvedDecisions.length > 0) {
+    if (activeAssignment.state === "blocked" || unresolvedDecision) {
       continue;
     }
     return activeAssignment;
   }
 
   const blockedAssignment = activeAssignments[0]!;
-  const unresolvedDecisions = [...projection.decisions.values()].filter(
-    (decision) => decision.assignmentId === blockedAssignment.id && decision.state === "open"
+  const unresolvedDecision = findLatestOpenAssignmentDecision(
+    projection,
+    blockedAssignment.id
   );
-  const suffix =
-    unresolvedDecisions.length > 0
-      ? ` Resolve decision ${unresolvedDecisions[0]!.decisionId} first.`
-      : "";
+  const suffix = unresolvedDecision
+    ? ` Resolve decision ${unresolvedDecision.decisionId} first.`
+    : "";
   throw new Error(`Assignment ${blockedAssignment.id} is blocked and cannot be run.${suffix}`);
 }
 

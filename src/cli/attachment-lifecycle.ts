@@ -37,6 +37,36 @@ function buildAuthorityProvenance(
   }
 }
 
+function buildClaimProvenancePatch(
+  provenanceKind: RuntimeAuthorityProvenance["kind"],
+  updatedAt?: string
+): Partial<AssignmentClaim> {
+  return {
+    ...(updatedAt ? { updatedAt } : {}),
+    provenance: buildAuthorityProvenance(provenanceKind)
+  };
+}
+
+function buildDetachedResumableAttachmentPatch(
+  timestamp: string,
+  repair?: {
+    provenanceKind?: RuntimeAuthorityProvenance["kind"];
+    nativeSessionId?: string;
+    adapterMetadata?: Record<string, unknown>;
+  }
+): Partial<RuntimeAttachment> {
+  return {
+    state: "detached_resumable",
+    updatedAt: timestamp,
+    detachedAt: timestamp,
+    ...(repair?.provenanceKind
+      ? { provenance: buildAuthorityProvenance(repair.provenanceKind) }
+      : {}),
+    ...(repair?.nativeSessionId ? { nativeSessionId: repair.nativeSessionId } : {}),
+    ...(repair?.adapterMetadata ? { adapterMetadata: repair.adapterMetadata } : {})
+  };
+}
+
 function sanitizeAttachmentAdapterMetadata(
   adapterData?: Record<string, unknown>
 ): Record<string, unknown> | undefined {
@@ -151,9 +181,7 @@ async function updateAttachmentState(
         type: "claim.updated",
         payload: {
           claimId: activeBinding.claim.id,
-          patch: {
-            provenance: buildAuthorityProvenance(activation.kind)
-          }
+          patch: buildClaimProvenancePatch(activation.kind)
         }
       });
     }
@@ -189,6 +217,15 @@ function buildRecoveredAuthorityRepairEvents(
     return [];
   }
 
+  const patch = buildTerminalAttachmentClaimPatch(
+    repair.kind === "release" ? "released" : "orphaned",
+    {
+      attachment: repair.attachmentReason,
+      claim: repair.claimReason
+    },
+    timestamp
+  );
+
   return [
     {
       eventId: randomUUID(),
@@ -197,20 +234,7 @@ function buildRecoveredAuthorityRepairEvents(
       type: "attachment.updated",
       payload: {
         attachmentId: activeBinding.attachment.id,
-        patch:
-          repair.kind === "release"
-            ? {
-                state: "released",
-                updatedAt: timestamp,
-                releasedAt: timestamp,
-                releasedReason: repair.attachmentReason
-              }
-            : {
-                state: "orphaned",
-                updatedAt: timestamp,
-                orphanedAt: timestamp,
-                orphanedReason: repair.attachmentReason
-              }
+        patch: patch.attachment
       }
     },
     {
@@ -220,20 +244,7 @@ function buildRecoveredAuthorityRepairEvents(
       type: "claim.updated",
       payload: {
         claimId: activeBinding.claim.id,
-        patch:
-          repair.kind === "release"
-            ? {
-                state: "released",
-                updatedAt: timestamp,
-                releasedAt: timestamp,
-                releasedReason: repair.claimReason
-              }
-            : {
-                state: "orphaned",
-                updatedAt: timestamp,
-                orphanedAt: timestamp,
-                orphanedReason: repair.claimReason
-              }
+        patch: patch.claim
       }
     }
   ];
@@ -413,15 +424,7 @@ export const AttachmentLifecycleService = {
         type: "attachment.updated",
         payload: {
           attachmentId,
-          patch: {
-            state: "detached_resumable",
-            updatedAt: detachedAt,
-            detachedAt,
-            ...(repair?.nativeSessionId ? { nativeSessionId: repair.nativeSessionId } : {}),
-            ...(repair?.provenanceKind
-              ? { provenance: buildAuthorityProvenance(repair.provenanceKind) }
-              : {})
-          }
+          patch: buildDetachedResumableAttachmentPatch(detachedAt, repair)
         }
       }
     ];
@@ -433,9 +436,7 @@ export const AttachmentLifecycleService = {
         type: "claim.updated",
         payload: {
           claimId: repair.claimId,
-          patch: {
-            provenance: buildAuthorityProvenance(repair.provenanceKind)
-          }
+          patch: buildClaimProvenancePatch(repair.provenanceKind)
         }
       });
     }
@@ -799,9 +800,7 @@ export const AttachmentLifecycleService = {
         type: "claim.updated",
         payload: {
           claimId: activeBinding.claim.id,
-          patch: {
-            provenance: buildAuthorityProvenance(repair.provenanceKind)
-          }
+          patch: buildClaimProvenancePatch(repair.provenanceKind)
         }
       });
       return events;
@@ -830,14 +829,7 @@ export const AttachmentLifecycleService = {
         type: "attachment.updated",
         payload: {
           attachmentId: activeBinding.attachment.id,
-          patch: {
-            state: "detached_resumable",
-            updatedAt: timestamp,
-            detachedAt: timestamp,
-            provenance: buildAuthorityProvenance(repair.provenanceKind),
-            ...(repair.nativeSessionId ? { nativeSessionId: repair.nativeSessionId } : {}),
-            ...(repair.adapterMetadata ? { adapterMetadata: repair.adapterMetadata } : {})
-          }
+          patch: buildDetachedResumableAttachmentPatch(timestamp, repair)
         }
       },
       {
@@ -847,9 +839,7 @@ export const AttachmentLifecycleService = {
         type: "claim.updated",
         payload: {
           claimId: activeBinding.claim.id,
-          patch: {
-            provenance: buildAuthorityProvenance(repair.provenanceKind)
-          }
+          patch: buildClaimProvenancePatch(repair.provenanceKind)
         }
       }
     ];
@@ -967,6 +957,7 @@ export const AttachmentLifecycleService = {
     adapterData: Record<string, unknown> | undefined,
     options?: ProjectionWriteOptions
   ): Promise<RuntimeProjection> {
+    const timestamp = nowIso();
     const adapterMetadata = sanitizeAttachmentAdapterMetadata(adapterData);
     return AttachmentLifecycleService.transitionAttachmentClaim(
       store,
@@ -974,18 +965,12 @@ export const AttachmentLifecycleService = {
       attachmentId,
       claimId,
       {
-        attachment: {
-          state: "detached_resumable",
-          updatedAt: nowIso(),
-          detachedAt: nowIso(),
-          provenance: buildAuthorityProvenance("recovery"),
+        attachment: buildDetachedResumableAttachmentPatch(timestamp, {
+          provenanceKind: "recovery",
           nativeSessionId,
           ...(adapterMetadata ? { adapterMetadata } : {})
-        },
-        claim: {
-          updatedAt: nowIso(),
-          provenance: buildAuthorityProvenance("recovery")
-        }
+        }),
+        claim: buildClaimProvenancePatch("recovery", timestamp)
       },
       options
     );

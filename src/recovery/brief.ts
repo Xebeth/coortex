@@ -6,6 +6,10 @@ import {
   assertAttachmentClaimGraphIntegrity,
   selectSingleResumableAttachmentClaim
 } from "../projections/attachment-claim-queries.js";
+import {
+  listOpenDecisions,
+  listRecentResults
+} from "../projections/assignment-outcome-queries.js";
 
 export interface RecoveryBriefOptions {
   allowAttachmentResumeAction?: boolean;
@@ -19,10 +23,7 @@ export function buildRecoveryBrief(
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
-  const recentResults = [...projection.results.values()]
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-    .slice(0, 3)
-    .map((result) => ({
+  const recentResults = listRecentResults(projection).map((result) => ({
       resultId: result.resultId,
       assignmentId: result.assignmentId,
       status: result.status,
@@ -30,8 +31,7 @@ export function buildRecoveryBrief(
       changedFiles: result.changedFiles,
       createdAt: result.createdAt
     }));
-  const unresolvedDecisions = [...projection.decisions.values()]
-    .filter((decision) => decision.state === "open")
+  const unresolvedDecisions = listOpenDecisions(projection)
     .map((decision) => ({
       decisionId: decision.decisionId,
       assignmentId: decision.assignmentId,
