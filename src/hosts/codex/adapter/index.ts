@@ -58,12 +58,10 @@ import {
   codexExecutionOutputSchema
 } from "./prompt.js";
 import {
-  parseExecJsonl,
-} from "./run-records.js";
-import {
   buildFailedOutcome,
   deriveExecutionOutcome,
   fileExists,
+  parseExecJsonl,
   readPositiveIntEnv,
   summarizeExecutionError
 } from "./execution.js";
