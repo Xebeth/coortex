@@ -18,6 +18,16 @@ import { deriveWorkflowSummary } from "../workflows/index.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 
+function hostRunPersistDiagnostics(
+  assignmentId: string,
+  cleanupError: Error
+): CommandDiagnostic[] {
+  return diagnosticsFromWarning(
+    `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
+    "host-run-persist-failed"
+  );
+}
+
 export async function loadReconciledProjectionWithDiagnostics(
   store: RuntimeStore,
   adapter: HostAdapter
@@ -230,12 +240,7 @@ export async function reconcileActiveRuns(
           await store.writeSnapshot(toSnapshot(effectiveProjection));
           const cleanupError = await reconcileStaleRunWithLeaseVerification(store, adapter, record);
           if (cleanupError) {
-            diagnostics.push(
-              ...diagnosticsFromWarning(
-                `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-                "host-run-persist-failed"
-              )
-            );
+            diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
           }
           continue;
         }
@@ -257,12 +262,7 @@ export async function reconcileActiveRuns(
             reconciliation.staleRecord
           );
           if (cleanupError) {
-            diagnostics.push(
-              ...diagnosticsFromWarning(
-                `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-                "host-run-persist-failed"
-              )
-            );
+            diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
           }
           continue;
         }
@@ -309,12 +309,7 @@ export async function reconcileActiveRuns(
           reconciliation.staleRecord
         );
         if (cleanupError) {
-          diagnostics.push(
-            ...diagnosticsFromWarning(
-              `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-              "host-run-persist-failed"
-            )
-          );
+          diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
         }
         continue;
       }
@@ -375,12 +370,7 @@ export async function reconcileActiveRuns(
         reconciliation.staleRecord
       );
       if (cleanupError) {
-        diagnostics.push(
-          ...diagnosticsFromWarning(
-            `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-            "host-run-persist-failed"
-          )
-        );
+        diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
       }
       continue;
     }
@@ -464,12 +454,7 @@ export async function reconcileActiveRuns(
       reconciliation.staleRecord
     );
     if (cleanupError) {
-      diagnostics.push(
-        ...diagnosticsFromWarning(
-          `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-          "host-run-persist-failed"
-        )
-      );
+      diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
     }
   }
 
@@ -607,12 +592,7 @@ async function reconcileCompletedRunRecord(
     selectCompletedRunCleanupRecord(record, options.cleanupRecord)
   );
   if (cleanupError) {
-    diagnostics.push(
-      ...diagnosticsFromWarning(
-        `Host run reconciliation artifacts could not be updated for assignment ${record.assignmentId}. ${cleanupError.message}`,
-        "host-run-persist-failed"
-      )
-    );
+    diagnostics.push(...hostRunPersistDiagnostics(record.assignmentId, cleanupError));
   }
 
   return {
@@ -876,12 +856,7 @@ async function reconcileOutOfProjectionStaleRun(
     reconciliation.staleRecord
   );
   if (cleanupError) {
-    diagnostics.push(
-      ...diagnosticsFromWarning(
-        `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-        "host-run-persist-failed"
-      )
-    );
+    diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
   }
 }
 
