@@ -204,15 +204,13 @@ export async function runRuntime(
         projectionBefore,
         recoveredAssignment.id
       );
-      return {
+      return buildRecoveredRunRuntimeResult({
         projectionBefore,
-        projectionAfter: projectionBefore,
         assignment: recoveredAssignment,
         envelope: recoveredEnvelope,
         execution: recoveredExecution,
-        recoveredOutcome: true,
         diagnostics
-      };
+      });
     }
   }
   let assignment: ReturnType<typeof getRunnableAssignment>;
@@ -228,15 +226,13 @@ export async function runRuntime(
     if (!recoveredOutcome) {
       throw error;
     }
-    return {
+    return buildRecoveredRunRuntimeResult({
       projectionBefore,
-      projectionAfter: projectionBefore,
       assignment: recoveredOutcome.assignment,
       envelope: recoveredOutcome.envelope,
       execution: recoveredOutcome.execution,
-      recoveredOutcome: true,
       diagnostics
-    };
+    });
   }
   const claimedRun = await adapter.claimRunLease(store, projectionBefore, assignment.id);
   let executionStarted = false;
@@ -402,5 +398,23 @@ async function recoverPersistedRunAfterEventFailure(
       ),
       ...recovered.diagnostics
     ]
+  };
+}
+
+function buildRecoveredRunRuntimeResult(input: {
+  projectionBefore: Awaited<ReturnType<typeof loadOperatorProjection>>;
+  assignment: ReturnType<typeof getRunnableAssignment>;
+  envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>;
+  execution: Awaited<ReturnType<HostAdapter["executeAssignment"]>>;
+  diagnostics: CommandDiagnostic[];
+}): RunRuntimeResult {
+  return {
+    projectionBefore: input.projectionBefore,
+    projectionAfter: input.projectionBefore,
+    assignment: input.assignment,
+    envelope: input.envelope,
+    execution: input.execution,
+    recoveredOutcome: true,
+    diagnostics: input.diagnostics
   };
 }
