@@ -257,10 +257,7 @@ export async function reconcileActiveRuns(
         ) {
           changed = true;
           await store.writeSnapshot(toSnapshot(effectiveProjection));
-          const cleanupError = await reconcileStaleRunWithLeaseVerification(store, adapter, record);
-          if (cleanupError) {
-            diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
-          }
+          await cleanupReconciledRunArtifacts(store, adapter, assignmentId, record, diagnostics);
           continue;
         }
 
@@ -275,14 +272,13 @@ export async function reconcileActiveRuns(
           }
           await store.writeSnapshot(toSnapshot(effectiveProjection));
           diagnostics.push(reconciliation.diagnostic);
-          const cleanupError = await reconcileStaleRunWithLeaseVerification(
+          await cleanupReconciledRunArtifacts(
             store,
             adapter,
-            reconciliation.staleRecord
+            assignmentId,
+            reconciliation.staleRecord,
+            diagnostics
           );
-          if (cleanupError) {
-            diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
-          }
           continue;
         }
 
@@ -319,14 +315,13 @@ export async function reconcileActiveRuns(
           assignmentId,
           reconciliation.telemetryMetadata
         ));
-        const cleanupError = await reconcileStaleRunWithLeaseVerification(
+        await cleanupReconciledRunArtifacts(
           store,
           adapter,
-          reconciliation.staleRecord
+          assignmentId,
+          reconciliation.staleRecord,
+          diagnostics
         );
-        if (cleanupError) {
-          diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
-        }
         continue;
       }
 
@@ -380,14 +375,13 @@ export async function reconcileActiveRuns(
     ) {
       changed = true;
       await store.writeSnapshot(toSnapshot(effectiveProjection));
-      const cleanupError = await reconcileStaleRunWithLeaseVerification(
+      await cleanupReconciledRunArtifacts(
         store,
         adapter,
-        reconciliation.staleRecord
+        assignmentId,
+        reconciliation.staleRecord,
+        diagnostics
       );
-      if (cleanupError) {
-        diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
-      }
       continue;
     }
 
@@ -409,14 +403,13 @@ export async function reconcileActiveRuns(
           reconciliation.telemetryMetadata
         ));
       }
-      const cleanupError = await reconcileStaleRunWithLeaseVerification(
+      await cleanupReconciledRunArtifacts(
         store,
         adapter,
-        reconciliation.staleRecord
+        assignmentId,
+        reconciliation.staleRecord,
+        diagnostics
       );
-      if (cleanupError) {
-        diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
-      }
       continue;
     }
 
@@ -453,14 +446,13 @@ export async function reconcileActiveRuns(
       assignmentId,
       reconciliation.telemetryMetadata
     ));
-    const cleanupError = await reconcileStaleRunWithLeaseVerification(
+    await cleanupReconciledRunArtifacts(
       store,
       adapter,
-      reconciliation.staleRecord
+      assignmentId,
+      reconciliation.staleRecord,
+      diagnostics
     );
-    if (cleanupError) {
-      diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
-    }
   }
 
   const record = await adapter.inspectRun(store);
@@ -591,14 +583,13 @@ async function reconcileCompletedRunRecord(
     await store.writeSnapshot(toSnapshot(effectiveProjection));
   }
 
-  const cleanupError = await reconcileStaleRunWithLeaseVerification(
+  await cleanupReconciledRunArtifacts(
     store,
     adapter,
-    selectCompletedRunCleanupRecord(record, options.cleanupRecord)
+    record.assignmentId,
+    selectCompletedRunCleanupRecord(record, options.cleanupRecord),
+    diagnostics
   );
-  if (cleanupError) {
-    diagnostics.push(...hostRunPersistDiagnostics(record.assignmentId, cleanupError));
-  }
 
   return {
     projection: effectiveProjection,
@@ -626,6 +617,19 @@ async function persistReconciledProjection(
     projection: syncResult.projection,
     diagnostics: diagnosticsFromWarning(syncResult.warning, "event-log-repaired")
   };
+}
+
+async function cleanupReconciledRunArtifacts(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId: string,
+  record: HostRunRecord,
+  diagnostics: CommandDiagnostic[]
+): Promise<void> {
+  const cleanupError = await reconcileStaleRunWithLeaseVerification(store, adapter, record);
+  if (cleanupError) {
+    diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
+  }
 }
 
 async function reconcileStaleRunWithLeaseVerification(
@@ -872,14 +876,13 @@ async function reconcileOutOfProjectionStaleRun(
     reconciliation.telemetryMetadata
   ));
 
-  const cleanupError = await reconcileStaleRunWithLeaseVerification(
+  await cleanupReconciledRunArtifacts(
     store,
     adapter,
-    reconciliation.staleRecord
+    assignmentId,
+    reconciliation.staleRecord,
+    diagnostics
   );
-  if (cleanupError) {
-    diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
-  }
 }
 
 function selectPendingStaleRecoveryEvents(
