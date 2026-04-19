@@ -5,7 +5,6 @@ import type { HostAdapter } from "../adapters/contract.js";
 import { getNativeRunId } from "../core/run-state.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
-import type { RuntimeConfig } from "../config/types.js";
 import { deriveWorkflowSummary } from "../workflows/index.js";
 import {
   initRuntime,
@@ -23,7 +22,7 @@ async function main(): Promise<void> {
   const [command, assignmentIdArg] = process.argv.slice(2);
   const projectRoot = process.cwd();
   const store = RuntimeStore.forProject(projectRoot);
-  const adapter = await createAdapter(store, command);
+  const adapter = await createAdapter(command);
 
   switch (command) {
     case "init":
@@ -50,20 +49,15 @@ async function main(): Promise<void> {
   }
 }
 
-async function createAdapter(
-  store: RuntimeStore,
-  command?: string
-): Promise<HostAdapter> {
+async function createAdapter(command?: string): Promise<HostAdapter> {
   if (command === "init") {
     return new CodexAdapter();
   }
 
-  const config = await store.loadConfig();
-  return createAdapterFromConfig(config);
+  return createAdapterFromConfig();
 }
 
-function createAdapterFromConfig(config?: RuntimeConfig): HostAdapter {
-  void config;
+function createAdapterFromConfig(): HostAdapter {
   const envBypass = process.env.COORTEX_CODEX_DANGEROUS_BYPASS === "1";
   return new CodexAdapter(
     undefined,
