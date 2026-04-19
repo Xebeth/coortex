@@ -76,8 +76,7 @@ export class HostRunStore {
   async release(assignmentId: string): Promise<void> {
     await this.store.deleteArtifact(this.artifacts.runLeasePath(assignmentId));
     await this.store.deleteArtifact(this.artifacts.runRecordPath(assignmentId));
-    const lastRun = await this.readLastRunPointer();
-    if (lastRun?.assignmentId === assignmentId && lastRun.state === "running") {
+    if (await this.hasRunningLastRunPointer(assignmentId)) {
       await this.store.deleteArtifact(this.artifacts.lastRunPath());
     }
   }
@@ -154,8 +153,7 @@ export class HostRunStore {
     if (recordError) {
       cleanupErrors.push(recordError.message);
     }
-    const lastRun = await this.readLastRunPointer();
-    if (lastRun?.assignmentId === assignmentId && lastRun.state === "running") {
+    if (await this.hasRunningLastRunPointer(assignmentId)) {
       const lastRunError = await this.tryDeleteArtifact(
         this.artifacts.lastRunPath(),
         `${this.adapterId} run record`
@@ -263,6 +261,11 @@ export class HostRunStore {
         return undefined;
       }
     }
+  }
+
+  private async hasRunningLastRunPointer(assignmentId: string): Promise<boolean> {
+    const lastRun = await this.readLastRunPointer();
+    return lastRun?.assignmentId === assignmentId && lastRun.state === "running";
   }
 }
 
