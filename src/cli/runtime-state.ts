@@ -115,22 +115,21 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
       recordHasLease.set(record.assignmentId, await adapter.hasRunLease(store, record.assignmentId));
     })
   );
-  const currentRecord = initialCurrentAssignmentId
-    ? inspectedRuns.find((record) => record.assignmentId === initialCurrentAssignmentId)
-        ?? await adapter.inspectRun(store, initialCurrentAssignmentId)
-    : undefined;
-  if (currentRecord && !recordHasLease.has(currentRecord.assignmentId)) {
-    recordHasLease.set(
-      currentRecord.assignmentId,
-      await adapter.hasRunLease(store, currentRecord.assignmentId)
-    );
-  }
   const inspectedWorkflowRuns = dedupeRunRecords(
-    [...inspectedRuns, ...(currentRecord ? [currentRecord] : [])]
+    inspectedRuns
   );
   const inspectedWorkflowRunsByAssignmentId = new Map(
     inspectedWorkflowRuns.map((record) => [record.assignmentId, record] as const)
   );
+  const currentRecord = initialCurrentAssignmentId
+    ? await resolveWorkflowRunRecord(
+        store,
+        adapter,
+        initialCurrentAssignmentId,
+        inspectedWorkflowRunsByAssignmentId,
+        recordHasLease
+      )
+    : undefined;
 
   const initialConvergence = await convergeWorkflowProjection(
     store,
