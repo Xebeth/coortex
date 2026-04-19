@@ -56,10 +56,6 @@ export async function synthesizeRecoveredExecutionFromReconciliation(
     };
   }
 
-  if (projectionAfterReconciliation.status.activeAssignmentIds.length > 0) {
-    return undefined;
-  }
-
   const recoveredResult = findRecoveredResultCandidate(
     projectionBeforeReconciliation,
     projectionAfterReconciliation

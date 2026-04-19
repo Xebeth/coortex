@@ -592,6 +592,53 @@ test("milestone-2 integration: loadWorkflowAwareProjection returns the converged
   );
 });
 
+test("milestone-2 integration: run surfaces a runtime-only recovered result before executing the next workflow assignment", async () => {
+  let runnerInvocations = 0;
+  const setup = await createSmokeSetup(async () => {
+    runnerInvocations += 1;
+    throw new Error("runner should not execute when the runtime delta already recovered a result");
+  });
+  const planSummary = "Recovered runtime-only plan result before transition persistence finished.";
+  const interruptedEvents = await appendWorkflowProgressionWithOmissions(setup.store, {
+    artifact: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "plan",
+      moduleAttempt: 1,
+      assignmentId: setup.assignmentId,
+      createdAt: "2026-04-18T09:05:00.000Z",
+      payload: {
+        planSummary: "Plan ready for review.",
+        implementationSteps: ["Surface the recovered plan result before the review assignment runs."],
+        reviewEvidenceSummary: "Recovered runtime-only result should outrank the new queued review assignment."
+      }
+    },
+    resultId: "runtime-only-recovered-plan-result",
+    summary: planSummary,
+    createdAt: "2026-04-18T09:05:00.000Z",
+    progressionAt: "2026-04-18T09:05:01.000Z",
+    omitEventTypes: ["workflow.transition.applied"]
+  });
+  const reviewAssignmentId = interruptedEvents.find(
+    (event): event is Extract<RuntimeEvent, { type: "assignment.created" }> =>
+      event.type === "assignment.created"
+  )?.payload.assignment.id;
+  assert.ok(reviewAssignmentId, "expected interrupted advance to pre-create a review assignment");
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(runnerInvocations, 0);
+  assert.equal(run.recoveredOutcome, true);
+  assert.equal(run.assignment.id, setup.assignmentId);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.resultId, "runtime-only-recovered-plan-result");
+  assert.equal(run.execution.outcome.capture.summary, planSummary);
+  assert.equal(run.projectionBefore.workflowProgress?.currentModuleId, "review");
+  assert.equal(run.projectionBefore.workflowProgress?.currentAssignmentId, reviewAssignmentId);
+  assert.equal(run.envelope.workflow?.currentModuleId, "review");
+  assert.equal(run.envelope.workflow?.currentAssignmentId, reviewAssignmentId);
+});
+
 test("milestone-2 integration: interrupted advance recovers a completed run on the newly current assignment in the same load", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in interrupted advance completed-recovery smoke test");

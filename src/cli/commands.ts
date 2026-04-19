@@ -218,26 +218,26 @@ export async function runRuntime(
       });
     }
   }
+  const recoveredFromReconciliation = await synthesizeRecoveredExecutionFromReconciliation(
+    store,
+    adapter,
+    projectionBeforeResult.projection,
+    projectionBefore
+  );
+  if (recoveredFromReconciliation) {
+    return buildRecoveredRunRuntimeResult({
+      projectionBefore,
+      assignment: recoveredFromReconciliation.assignment,
+      envelope: recoveredFromReconciliation.envelope,
+      execution: recoveredFromReconciliation.execution,
+      diagnostics
+    });
+  }
   let assignment: ReturnType<typeof getRunnableAssignment>;
   try {
     assignment = getRunnableAssignment(projectionBefore);
   } catch (error) {
-    const recoveredOutcome = await synthesizeRecoveredExecutionFromReconciliation(
-      store,
-      adapter,
-      projectionBeforeResult.projection,
-      projectionBefore
-    );
-    if (!recoveredOutcome) {
-      throw error;
-    }
-    return buildRecoveredRunRuntimeResult({
-      projectionBefore,
-      assignment: recoveredOutcome.assignment,
-      envelope: recoveredOutcome.envelope,
-      execution: recoveredOutcome.execution,
-      diagnostics
-    });
+    throw error;
   }
   const claimedRun = await adapter.claimRunLease(store, projectionBefore, assignment.id);
   let executionStarted = false;
