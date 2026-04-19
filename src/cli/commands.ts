@@ -35,6 +35,7 @@ import {
 } from "./recovered-outcomes.js";
 import {
   buildAndPersistWorkflowEnvelope,
+  buildEnvelopeTelemetryMetadata,
   buildRecoveredExecutionEnvelope,
   buildWorkflowAwareEnvelope
 } from "./workflow-envelope.js";
@@ -334,20 +335,6 @@ function assertNoActiveWorkflowLease(activeLeases: string[]): void {
   if (assignmentId) {
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
-}
-
-function buildEnvelopeTelemetryMetadata(
-  envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>
-): {
-  envelopeChars: number;
-  trimApplied: boolean;
-  trimmedFields: number;
-} {
-  return {
-    envelopeChars: envelope.estimatedChars,
-    trimApplied: envelope.trimApplied,
-    trimmedFields: envelope.trimmedFields.length
-  };
 }
 
 function buildRecoveredRunRuntimeResult(input: {

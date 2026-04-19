@@ -28,6 +28,18 @@ export async function buildAndPersistWorkflowEnvelope(
   return envelope;
 }
 
+export function buildEnvelopeTelemetryMetadata(envelope: TaskEnvelope): {
+  envelopeChars: number;
+  trimApplied: boolean;
+  trimmedFields: number;
+} {
+  return {
+    envelopeChars: envelope.estimatedChars,
+    trimApplied: envelope.trimApplied,
+    trimmedFields: envelope.trimmedFields.length
+  };
+}
+
 export async function buildRecoveredExecutionEnvelope(
   store: RuntimeStore,
   adapter: HostAdapter,
