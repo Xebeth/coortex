@@ -5,6 +5,7 @@ import type { ResultPacket } from "../../../core/types.js";
 import { validateCodexStructuredOutcome, type CodexStructuredOutcome } from "./prompt.js";
 
 type CodexExecutionWithoutArtifacts = Pick<HostExecutionOutcome, "outcome">;
+type CodexExecutionResult = { exitCode: number; stdout: string; stderr: string };
 
 export async function deriveExecutionOutcome(
   assignmentId: string,
@@ -73,7 +74,49 @@ export function readPositiveIntEnv(name: string, fallback: number): number {
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
 
-export function parseExecJsonl(stdout: string): {
+export async function deriveCodexExecutionCompletion(
+  assignmentId: string,
+  completedAt: string,
+  execution: CodexExecutionResult,
+  outputPath: string
+): Promise<{
+  outcome: Pick<HostExecutionOutcome, "outcome">;
+  nativeRunId?: string;
+  usage?: HostTelemetryCapture["usage"];
+}> {
+  const transcript = parseExecJsonl(execution.stdout);
+  const outcome = await deriveExecutionOutcome(
+    assignmentId,
+    completedAt,
+    execution,
+    outputPath,
+    transcript.errorMessage,
+    transcript.lastAgentMessage
+  );
+  return {
+    outcome,
+    ...(transcript.threadId ? { nativeRunId: transcript.threadId } : {}),
+    ...(transcript.usage ? { usage: transcript.usage } : {})
+  };
+}
+
+export function readThreadEventId(event: Record<string, unknown>): string | undefined {
+  return typeof event.thread_id === "string" && event.thread_id.length > 0
+    ? event.thread_id
+    : undefined;
+}
+
+export function readStartedThreadId(event: Record<string, unknown>): string | undefined {
+  return event.type === "thread.started" ? readThreadEventId(event) : undefined;
+}
+
+export function readThreadLifecycleEventId(event: Record<string, unknown>): string | undefined {
+  return typeof event.type === "string" && event.type.startsWith("thread.")
+    ? readThreadEventId(event)
+    : undefined;
+}
+
+function parseExecJsonl(stdout: string): {
   threadId?: string;
   errorMessage?: string;
   usage?: HostTelemetryCapture["usage"];
@@ -91,8 +134,9 @@ export function parseExecJsonl(stdout: string): {
     }
     try {
       const event = JSON.parse(trimmed) as Record<string, unknown>;
-      if (event.type === "thread.started" && typeof event.thread_id === "string") {
-        threadId = event.thread_id;
+      const startedThreadId = readStartedThreadId(event);
+      if (startedThreadId) {
+        threadId = startedThreadId;
       }
       if (event.type === "error" && typeof event.message === "string") {
         errorMessage = event.message;

@@ -61,10 +61,11 @@ import {
 } from "./prompt.js";
 import {
   buildFailedOutcome,
-  deriveExecutionOutcome,
+  deriveCodexExecutionCompletion,
   fileExists,
-  parseExecJsonl,
   readPositiveIntEnv,
+  readStartedThreadId,
+  readThreadLifecycleEventId,
   summarizeExecutionError
 } from "./execution.js";
 
@@ -278,10 +279,7 @@ export class CodexAdapter implements HostAdapter {
           outputPath,
           ...this.bypassPolicyInput(),
           onEvent: async (event) => {
-            const hostRunId =
-              event.type === "thread.started" && typeof event.thread_id === "string"
-                ? event.thread_id
-                : undefined;
+            const hostRunId = readStartedThreadId(event);
             if (hostRunId) {
               await onNativeRunId(hostRunId);
             }
@@ -380,7 +378,7 @@ export class CodexAdapter implements HostAdapter {
           prompt: buildCodexExecutionPrompt(envelope),
           outputPath,
           onEvent: async (event: Record<string, unknown>) => {
-            const sessionId = readResumeSessionId(event);
+            const sessionId = readThreadLifecycleEventId(event);
             if (!sessionId) {
               return;
             }
@@ -509,32 +507,6 @@ function readEnvelopeAssignmentId(envelope: TaskEnvelope): string {
   return assignmentId;
 }
 
-async function deriveCodexExecutionCompletion(
-  assignmentId: string,
-  completedAt: string,
-  execution: CodexExecResult,
-  outputPath: string
-): Promise<{
-  outcome: Pick<HostExecutionOutcome, "outcome">;
-  nativeRunId?: string;
-  usage?: HostTelemetryCapture["usage"];
-}> {
-  const transcript = parseExecJsonl(execution.stdout);
-  const outcome = await deriveExecutionOutcome(
-    assignmentId,
-    completedAt,
-    execution,
-    outputPath,
-    transcript.errorMessage,
-    transcript.lastAgentMessage
-  );
-  return {
-    outcome,
-    ...(transcript.threadId ? { nativeRunId: transcript.threadId } : {}),
-    ...(transcript.usage ? { usage: transcript.usage } : {})
-  };
-}
-
 function summarizeResumeVerificationFailure(
   requestedSessionId: string,
   observedSessionId: string | undefined,
@@ -547,14 +519,4 @@ function summarizeResumeVerificationFailure(
       : `Codex resume exited successfully but did not confirm the requested session ${requestedSessionId}.`;
   }
   return `Codex resume resumed session ${observedSessionId} instead of requested session ${requestedSessionId}.`;
-}
-
-function readResumeSessionId(event: Record<string, unknown>): string | undefined {
-  if (typeof event.thread_id !== "string" || event.thread_id.length === 0) {
-    return undefined;
-  }
-  if (typeof event.type !== "string" || !event.type.startsWith("thread.")) {
-    return undefined;
-  }
-  return event.thread_id;
 }

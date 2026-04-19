@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { readStartedThreadId, readThreadEventId } from "./execution.js";
+
 export interface CodexExecInput {
   cwd: string;
   prompt: string;
@@ -320,16 +322,6 @@ async function startFixture(
     }
   };
   return running;
-}
-
-function readStartedThreadId(event: Record<string, unknown>): string | undefined {
-  return event.type === "thread.started" ? readThreadEventId(event) : undefined;
-}
-
-function readThreadEventId(event: Record<string, unknown>): string | undefined {
-  return typeof event.thread_id === "string" && event.thread_id.length > 0
-    ? event.thread_id
-    : undefined;
 }
 
 async function emitJsonEvents(
