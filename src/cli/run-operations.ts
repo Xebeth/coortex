@@ -25,7 +25,7 @@ import {
   type ProjectionWriteOptions
 } from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
-import { buildNextRuntimeStatus } from "./runtime-status.js";
+import { buildNextRuntimeStatus } from "../recovery/runtime-status.js";
 import { diagnosticsFromWarning, loadOperatorProjection } from "./runtime-state.js";
 
 export interface WrappedExecutionRecoveryResult {

@@ -27,6 +27,11 @@ export interface ProjectionSyncResult {
   warning?: string;
 }
 
+export interface ProjectionHydrationResult {
+  projection: RuntimeProjection;
+  hydrated: boolean;
+}
+
 export interface ProjectionRecoveryStore {
   readonly rootDir: string;
   readonly eventsPath: string;
@@ -34,7 +39,14 @@ export interface ProjectionRecoveryStore {
   loadConfig(): Promise<RuntimeConfig | undefined>;
   loadSnapshot(): Promise<RuntimeSnapshot | undefined>;
   writeSnapshot(snapshot: RuntimeSnapshot): Promise<void>;
+  writeProjectionSnapshot(
+    projection: RuntimeProjection,
+    options?: {
+      boundaryEventId?: string | undefined;
+    }
+  ): Promise<RuntimeProjection>;
   loadEventLines(): Promise<string[]>;
+  appendEvents(events: RuntimeEvent[]): Promise<void>;
   rewriteEventLog(events: RuntimeEvent[]): Promise<void>;
   withEventsLock<T>(action: () => Promise<T>): Promise<T>;
   withSnapshotLock<T>(action: () => Promise<T>): Promise<T>;
@@ -221,6 +233,111 @@ export class ProjectionRecoveryService {
     return projection;
   }
 
+  hydrateProjectionFromReplayableEvents(
+    projection: RuntimeProjection,
+    replayableEvents?: RuntimeEvent[],
+    snapshotBoundaryEventId?: string
+  ): ProjectionHydrationResult {
+    const hydrationEvents = snapshotBoundaryEventId
+      ? selectReplayableSuffixEvents(replayableEvents, snapshotBoundaryEventId)
+      : replayableEvents;
+    if (!hydrationEvents || hydrationEvents.length === 0) {
+      return {
+        projection,
+        hydrated: false
+      };
+    }
+
+    let hydratedProjection = projection;
+    let hydrated = false;
+    for (const event of hydrationEvents) {
+      try {
+        hydratedProjection = applyRuntimeEventsToProjection(hydratedProjection, [event]);
+        hydrated = true;
+      } catch (error) {
+        if (isRuntimeAuthorityIntegrityError(error)) {
+          throw error;
+        }
+        continue;
+      }
+    }
+    return {
+      projection: hydrated ? hydratedProjection : projection,
+      hydrated
+    };
+  }
+
+  hydrateMissingAssignmentFromReplayableEvents(
+    projection: RuntimeProjection,
+    assignmentId: string,
+    replayableEvents?: RuntimeEvent[],
+    snapshotBoundaryEventId?: string
+  ): ProjectionHydrationResult {
+    if (!replayableEvents || replayableEvents.length === 0) {
+      return {
+        projection,
+        hydrated: false
+      };
+    }
+
+    const assignmentEvent = snapshotBoundaryEventId
+      ? selectReplayableSuffixEvents(replayableEvents, snapshotBoundaryEventId)?.find(
+          (event): event is Extract<RuntimeEvent, { type: "assignment.created" }> =>
+            event.type === "assignment.created" && event.payload.assignment.id === assignmentId
+        )
+      : undefined;
+    if (!assignmentEvent) {
+      return {
+        projection,
+        hydrated: false
+      };
+    }
+
+    try {
+      return {
+        projection: applyRuntimeEventsToProjection(projection, [assignmentEvent]),
+        hydrated: true
+      };
+    } catch (error) {
+      if (isRuntimeAuthorityIntegrityError(error)) {
+        throw error;
+      }
+      return {
+        projection,
+        hydrated: false
+      };
+    }
+  }
+
+  async syncProjectionSnapshot(options: { snapshotFallback: boolean }): Promise<ProjectionSyncResult> {
+    if (options.snapshotFallback) {
+      return {
+        projection: await this.mutateSnapshotFallbackProjection((latestProjection) => latestProjection)
+      };
+    }
+    return this.syncSnapshotFromEventsWithRecovery();
+  }
+
+  async applyRecoveryProjectionEvents(
+    projection: RuntimeProjection,
+    events: RuntimeEvent[],
+    options: { snapshotFallback: boolean }
+  ): Promise<ProjectionSyncResult> {
+    if (events.length === 0) {
+      return this.syncProjectionSnapshot(options);
+    }
+    if (!options.snapshotFallback) {
+      await this.store.appendEvents(events);
+      return this.syncSnapshotFromEventsWithRecovery();
+    }
+
+    return {
+      projection: await this.mutateSnapshotFallbackProjection((latestProjection) =>
+        applyRuntimeEventsToProjection(latestProjection, events)
+      )
+    };
+  }
+
   private async repairEventLogLocked(): Promise<string | undefined> {
     const { events, warning } = await this.loadReplayableEvents();
     if (!warning) {
@@ -263,20 +380,56 @@ export class ProjectionRecoveryService {
   private parseRuntimeEvent(line: string, index: number): RuntimeEvent {
     return parseJson<RuntimeEvent>(line, `runtime event ${index + 1} from ${this.store.eventsPath}`);
   }
+
+  private async mutateSnapshotFallbackProjection(
+    mutate: (projection: RuntimeProjection) => RuntimeProjection | Promise<RuntimeProjection>
+  ): Promise<RuntimeProjection> {
+    return this.store.withEventsLock(async () =>
+      this.store.withSnapshotLock(async () => {
+        const latestSnapshot = await this.store.loadSnapshot();
+        if (!latestSnapshot) {
+          throw new Error("Snapshot-fallback reconciliation requires a durable snapshot.");
+        }
+        const replayableEvents = (await this.loadReplayableEvents()).events;
+        const hydrated = this.hydrateProjectionFromReplayableEvents(
+          fromSnapshot(latestSnapshot),
+          replayableEvents,
+          latestSnapshot.lastEventId
+        );
+        const nextProjection = await mutate(hydrated.projection);
+        return this.store.writeProjectionSnapshot(nextProjection, {
+          boundaryEventId: latestSnapshot.lastEventId
+        });
+      })
+    );
+  }
+}
+
+export function selectReplayableSuffixEvents(
+  replayableEvents: RuntimeEvent[] | undefined,
+  snapshotBoundaryEventId: string
+): RuntimeEvent[] | undefined {
+  if (!replayableEvents || replayableEvents.length === 0) {
+    return undefined;
+  }
+  const boundaryIndex = replayableEvents.findIndex((event) => event.eventId === snapshotBoundaryEventId);
+  if (boundaryIndex === -1) {
+    return undefined;
+  }
+  return replayableEvents.slice(boundaryIndex + 1);
 }
 
 function replayEventsAfterSnapshot(
   snapshot: RuntimeSnapshot,
   events: RuntimeEvent[]
 ): RuntimeProjection | undefined {
-  if (!snapshot.lastEventId) {
+  const suffixEvents = snapshot.lastEventId
+    ? selectReplayableSuffixEvents(events, snapshot.lastEventId)
+    : undefined;
+  if (!suffixEvents) {
     return undefined;
   }
-  const snapshotIndex = events.findIndex((event) => event.eventId === snapshot.lastEventId);
-  if (snapshotIndex === -1) {
-    return undefined;
-  }
-  return applyRuntimeEventsToProjection(fromSnapshot(snapshot), events.slice(snapshotIndex + 1));
+  return applyRuntimeEventsToProjection(fromSnapshot(snapshot), suffixEvents);
 }
 
 function snapshotFingerprint(snapshot: RuntimeSnapshot | undefined): string {
