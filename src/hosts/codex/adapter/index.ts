@@ -18,6 +18,8 @@ import type {
 import {
   buildCompletedRunRecord,
   createRunningRunRecord,
+  normalizeHostDecisionCapture,
+  normalizeHostResultCapture,
   withRunNativeId
 } from "../../../adapters/host-run-records.js";
 import { materializeInspectableRunRecord } from "../../../adapters/host-run-inspection.js";
@@ -468,28 +470,11 @@ export class CodexAdapter implements HostAdapter {
   }
 
   normalizeResult(capture: HostResultCapture): ResultPacket {
-    return {
-      resultId: capture.resultId ?? randomUUID(),
-      assignmentId: capture.assignmentId,
-      producerId: capture.producerId,
-      status: capture.status,
-      summary: capture.summary,
-      changedFiles: [...capture.changedFiles],
-      createdAt: capture.createdAt ?? nowIso()
-    };
+    return normalizeHostResultCapture(capture, nowIso());
   }
 
   normalizeDecision(capture: HostDecisionCapture): DecisionPacket {
-    return {
-      decisionId: capture.decisionId ?? randomUUID(),
-      assignmentId: capture.assignmentId,
-      requesterId: capture.requesterId,
-      blockerSummary: capture.blockerSummary,
-      options: capture.options.map((option) => ({ ...option })),
-      recommendedOption: capture.recommendedOption,
-      state: capture.state ?? "open",
-      createdAt: capture.createdAt ?? nowIso()
-    };
+    return normalizeHostDecisionCapture(capture, nowIso());
   }
 
   normalizeTelemetry(capture: HostTelemetryCapture): Omit<

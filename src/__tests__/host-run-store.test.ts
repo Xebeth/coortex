@@ -1714,6 +1714,60 @@ test("host run store surfaces lease cleanup failure during claim rollback", asyn
   );
 });
 
+test("host run store surfaces last-run pointer cleanup failure during claim rollback", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  const originalDeleteArtifact = store.deleteArtifact.bind(store);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-rollback-last-run-cleanup",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2026-04-11T10:00:30.000Z"
+  };
+
+  await store.writeJsonArtifact(artifacts.lastRunPath(), runningRecord);
+
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (relativePath === artifacts.lastRunPath()) {
+      throw new Error("simulated last-run write failure");
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+  store.deleteArtifact = async (relativePath) => {
+    if (relativePath === artifacts.lastRunPath()) {
+      throw new Error("simulated last-run cleanup failure");
+    }
+    return originalDeleteArtifact(relativePath);
+  };
+
+  await assert.rejects(
+    runStore.claim(runningRecord),
+    /last-run pointer cleanup failed: simulated last-run cleanup failure/
+  );
+
+  assert.equal(
+    await store.readTextArtifact(
+      artifacts.runLeasePath("assignment-rollback-last-run-cleanup"),
+      "lease"
+    ),
+    undefined
+  );
+  assert.equal(
+    await store.readJsonArtifact(
+      artifacts.runRecordPath("assignment-rollback-last-run-cleanup"),
+      "record"
+    ),
+    undefined
+  );
+});
+
 test("host run store clears the lease when final non-running persistence degrades to a warning", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {

@@ -83,6 +83,36 @@ test("codex adapter normalizes host result, decision, and telemetry captures", (
   });
 });
 
+test("codex adapter mints stable ids for host captures when absent", () => {
+  const adapter = new CodexAdapter();
+
+  const result = adapter.normalizeResult({
+    assignmentId: "assignment-missing-result-id",
+    producerId: "codex",
+    status: "completed",
+    summary: "Finished without an explicit host result id.",
+    changedFiles: ["src/hosts/codex/adapter/index.ts"]
+  });
+  const decision = adapter.normalizeDecision({
+    assignmentId: "assignment-missing-decision-id",
+    requesterId: "codex",
+    blockerSummary: "Need a fallback decision id.",
+    options: [{ id: "wait", label: "Wait", summary: "Pause for operator input." }],
+    recommendedOption: "wait"
+  });
+
+  assert.equal(typeof result.resultId, "string");
+  assert.ok(result.resultId.length > 0);
+  assert.equal(typeof result.createdAt, "string");
+  assert.ok(result.createdAt.length > 0);
+
+  assert.equal(typeof decision.decisionId, "string");
+  assert.ok(decision.decisionId.length > 0);
+  assert.equal(typeof decision.createdAt, "string");
+  assert.ok(decision.createdAt.length > 0);
+  assert.equal(decision.state, "open");
+});
+
 test("codex adapter executes a bounded run and persists minimal reconnect metadata", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-run-"));
   const store = RuntimeStore.forProject(projectRoot);

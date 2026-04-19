@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { HostExecutionOutcome } from "./contract.js";
-import type { HostRunRecord } from "../core/types.js";
+import type {
+  HostDecisionCapture,
+  HostExecutionOutcome,
+  HostResultCapture
+} from "./contract.js";
+import type { DecisionPacket, HostRunRecord, ResultPacket } from "../core/types.js";
+import { nowIso } from "../utils/time.js";
 
 export function buildCompletedRunRecord(
   outcome: Pick<HostExecutionOutcome, "outcome">,
@@ -85,6 +90,61 @@ export function withRunNativeId(record: HostRunRecord, nativeRunId: string): Hos
     adapterData: {
       ...(record.adapterData ?? {}),
       nativeRunId
+    }
+  };
+}
+
+export function normalizeHostResultCapture(
+  capture: HostResultCapture,
+  fallbackCreatedAt = nowIso()
+): ResultPacket {
+  return {
+    resultId: capture.resultId ?? randomUUID(),
+    assignmentId: capture.assignmentId,
+    producerId: capture.producerId,
+    status: capture.status,
+    summary: capture.summary,
+    changedFiles: [...capture.changedFiles],
+    createdAt: capture.createdAt ?? fallbackCreatedAt
+  };
+}
+
+export function normalizeHostDecisionCapture(
+  capture: HostDecisionCapture,
+  fallbackCreatedAt = nowIso()
+): DecisionPacket {
+  return {
+    decisionId: capture.decisionId ?? randomUUID(),
+    assignmentId: capture.assignmentId,
+    requesterId: capture.requesterId,
+    blockerSummary: capture.blockerSummary,
+    options: capture.options.map((option) => ({ ...option })),
+    recommendedOption: capture.recommendedOption,
+    state: capture.state ?? "open",
+    createdAt: capture.createdAt ?? fallbackCreatedAt
+  };
+}
+
+export function ensureStableHostExecutionOutcomeIds(
+  outcome: Pick<HostExecutionOutcome, "outcome">,
+  fallbackCreatedAt = nowIso()
+): Pick<HostExecutionOutcome, "outcome"> {
+  if (outcome.outcome.kind === "decision") {
+    return {
+      outcome: {
+        kind: "decision",
+        capture: normalizeHostDecisionCapture(
+          outcome.outcome.capture,
+          fallbackCreatedAt
+        )
+      }
+    };
+  }
+
+  return {
+    outcome: {
+      kind: "result",
+      capture: normalizeHostResultCapture(outcome.outcome.capture, fallbackCreatedAt)
     }
   };
 }

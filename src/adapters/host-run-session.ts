@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type {
   HostExecutionOutcome,
   HostSessionIdentity,
@@ -8,7 +6,10 @@ import type {
 } from "./contract.js";
 import type { HostRunRecord } from "../core/types.js";
 import { nowIso } from "../utils/time.js";
-import { buildCompletedRunRecord } from "./host-run-records.js";
+import {
+  buildCompletedRunRecord,
+  ensureStableHostExecutionOutcomeIds
+} from "./host-run-records.js";
 import { HostRunStore } from "./host-run-store.js";
 import {
   HostRunSessionCoordinator,
@@ -108,7 +109,10 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     onExecutionCompleted: async (execution) => {
       const completedAt = nowIso();
       const completed = await input.deriveCompleted(execution, coordinator.nativeRunId());
-      const outcome = ensureStableOutcomeIds(completed.outcome);
+      const outcome = ensureStableHostExecutionOutcomeIds(
+        completed.outcome,
+        completedAt
+      );
       const nativeRunId = completed.nativeRunId ?? coordinator.nativeRunId();
       const runRecord = buildCompletedRunRecord(
         outcome,
@@ -214,7 +218,10 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
         };
       }
 
-      const outcome = ensureStableOutcomeIds(completed.outcome);
+      const outcome = ensureStableHostExecutionOutcomeIds(
+        completed.outcome,
+        stoppedAt
+      );
       const runRecord = buildCompletedRunRecord(
         outcome,
         input.assignmentId,
@@ -257,12 +264,13 @@ async function buildFailedRunOutcome<TExecution extends { exitCode: number }>(
   exitCode: number
 ): Promise<HostExecutionOutcome> {
   const completedAt = nowIso();
-  const outcome = ensureStableOutcomeIds(
+  const outcome = ensureStableHostExecutionOutcomeIds(
     input.buildFailedOutcome(
       input.assignmentId,
       completedAt,
       input.summarizeExecutionFailure(error)
-    )
+    ),
+    completedAt
   );
   const nativeRunId = coordinator.nativeRunId();
   const runRecord = buildCompletedRunRecord(
@@ -311,30 +319,5 @@ function buildFailedResumeResult<TExecution extends { exitCode: number }>(
     exitCode,
     stoppedAt,
     ...(warning ? { warning } : {})
-  };
-}
-
-function ensureStableOutcomeIds(
-  outcome: Pick<HostExecutionOutcome, "outcome">
-): Pick<HostExecutionOutcome, "outcome"> {
-  if (outcome.outcome.kind === "decision") {
-    return {
-      outcome: {
-        kind: "decision",
-        capture: {
-          ...outcome.outcome.capture,
-          decisionId: outcome.outcome.capture.decisionId ?? randomUUID()
-        }
-      }
-    };
-  }
-  return {
-    outcome: {
-      kind: "result",
-      capture: {
-        ...outcome.outcome.capture,
-        resultId: outcome.outcome.capture.resultId ?? randomUUID()
-      }
-    }
   };
 }

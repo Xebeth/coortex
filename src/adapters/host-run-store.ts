@@ -238,7 +238,7 @@ export class HostRunStore {
       return undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return new Error(`${this.adapterId} run record cleanup failed: ${message}`);
+      return new Error(`${this.adapterId} last-run pointer cleanup failed: ${message}`);
     }
   }
 
@@ -358,7 +358,7 @@ export class HostRunStore {
       }
 
       const currentRunRecord = await this.repository.readRunRecord(record.assignmentId);
-      ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+      ensureTerminalWriteBoundary(
         record.assignmentId,
         "completed run persistence",
         record,
@@ -367,7 +367,7 @@ export class HostRunStore {
 
       const lastRun = await this.repository.readLastRunPointer();
       if (lastRun.state === "valid" && lastRun.record.assignmentId === record.assignmentId) {
-        ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+        ensureTerminalWriteBoundary(
           record.assignmentId,
           "completed last-run persistence",
           record,
@@ -413,13 +413,22 @@ export class HostRunStore {
     }
 
     const currentRunRecord = await this.repository.readRunRecord(record.assignmentId);
-    ensureMatchingRunOwnerFence(record.assignmentId, "completed run persistence", ownerFence, currentRunRecord);
+    ensureTerminalWriteBoundary(
+      record.assignmentId,
+      "completed run persistence",
+      record,
+      currentRunRecord
+    );
 
     const lastRun = await this.repository.readLastRunPointer();
     if (lastRun.state === "valid" && lastRun.record.assignmentId === record.assignmentId) {
-      ensureMatchingRunOwnerFence(record.assignmentId, "completed last-run persistence", ownerFence, lastRun.record);
+      ensureTerminalWriteBoundary(
+        record.assignmentId,
+        "completed last-run persistence",
+        record,
+        lastRun.record
+      );
     }
-
   }
 }
 
@@ -465,6 +474,25 @@ function ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
   if (currentFence || currentRecord.adapterData?.coortexReclaimLease === true) {
     throw new HostRunOwnershipFenceError(assignmentId, operation);
   }
+}
+
+function ensureTerminalWriteBoundary(
+  assignmentId: string,
+  operation: string,
+  expectedRecord: Pick<HostRunRecord, "runInstanceId" | "adapterData">,
+  currentRecord: Pick<HostRunRecord, "runInstanceId" | "adapterData"> | undefined
+): void {
+  const expectedFence = getRunOwnerFence(expectedRecord);
+  if (expectedFence) {
+    ensureMatchingRunOwnerFence(assignmentId, operation, expectedFence, currentRecord);
+    return;
+  }
+  ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+    assignmentId,
+    operation,
+    expectedRecord,
+    currentRecord
+  );
 }
 
 function getRunOwnerFence(
