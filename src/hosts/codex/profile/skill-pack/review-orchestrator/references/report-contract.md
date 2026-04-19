@@ -82,6 +82,9 @@ Rules:
   - `candidate_root_cause`
   - `manifestations`
   - `family_status`
+  - when grounded enough from the lane evidence, also include:
+    - `likely_owning_seam`
+    - `secondary_seams`
 - `omission_entries` should be an explicit structured list. Use `[]` when no material omission remains.
 - For each omission entry include:
   - `omission_id`
@@ -109,6 +112,8 @@ Required fields:
 - `family_id`
 - `source_surfaces`
 - `highest-confidence root cause`
+- `likely owning seam`
+- `secondary seams`
 - `manifestations confirmed`
 - `manifestations rejected`
 - `side paths checked`
@@ -134,6 +139,11 @@ Closure status values:
 
 Rules:
 - Use the same self-check discipline as coverage lanes.
+- `likely owning seam` should name the most plausible owning module or boundary
+  for the family, not merely the nearest changed file.
+- `secondary seams` should list materially involved adjacent seams when the
+  family clearly crosses more than one owning boundary. Use `none` when no
+  grounded secondary seam was found.
 - `material_evidence_actions` should make the exploration lane's search behavior inspectable: key files/docs read, search pivots used, candidate manifestations rejected, and sibling paths checked.
 - `thin_areas` must be explicit for exploration lanes too. Use `none` when nothing material was left unexplored inside the family lane.
 - `omission_entries` must be explicit for exploration lanes too. Use `[]` when nothing material remains actionable from skipped/thin coverage inside the family lane.
@@ -145,6 +155,13 @@ Include:
 - files reviewed or review window summary
 - totals by severity
 - final defect families
+- hot seams summary derived from the final families:
+  - per hot seam:
+    - seam
+    - family ids
+    - family count
+    - highest severity
+    - why the seam is hot
 - structured `review_handoff` for downstream fix workflows
 - per-family `closure_gate` inside the `review_handoff`
 - when doing targeted return review, per-family closure-claim verdicts from targeted return-review synthesis comparing the `review_return_handoff` and actual fix diff against the `closure_gate` embedded in the `review_handoff`
@@ -172,6 +189,12 @@ Include:
 
 Rules:
 - Do not drop lane self-check output during synthesis.
+- Keep families as the canonical problem-tracking unit. Use seams as an
+  ownership and follow-up grouping, not as a replacement for family identity.
+- Aggregate the final families by likely owning seam and surface a concise hot
+  seam summary for the operator. Use that seam rollup to suggest follow-up seam
+  reviews when multiple families converge on the same owner or one high-severity
+  family makes a seam worth isolating.
 - The human-facing review summary and the structured `review_handoff` must describe the same families. Do not emit divergent root-cause groupings between them.
 - The `closure_gate` must align with the same family grouping and root-cause conclusions as the review summary and `review_handoff`.
 - In targeted return-review mode, explicitly state whether the fixer's claimed closure status was confirmed, rejected, partially confirmed, or left unverified.

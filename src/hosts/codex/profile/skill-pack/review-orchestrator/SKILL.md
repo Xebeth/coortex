@@ -198,6 +198,9 @@ Use the refusal rules from `references/prep-and-refusal.md`.
 - Spawn one family-exploration lane per candidate family.
 - Exploration is mandatory, not optional.
 - Run each family-exploration lane in a Codex `default` subagent and invoke `$coortex-review-lane` inside the lane prompt, scoped to that family only.
+- Require each family-exploration lane to ground the likely owning seam and any
+  materially involved secondary seams for that family, not just the broad
+  baseline surfaces.
 - If family-exploration lanes exceed current subagent capacity, queue them in bounded waves rather than replacing missing lanes with coordinator-local review.
 - Pass the exact exploration-lane output schema from `references/report-contract.md` and keep the coordinator focused on family grouping, scheduling, and synthesis.
 
@@ -206,7 +209,14 @@ Use the refusal rules from `references/prep-and-refusal.md`.
 - Merge coverage and exploration outputs by root cause.
 - Deduplicate manifestations across surfaces.
 - Roll severity up to the family and review level.
+- Aggregate the final families by likely owning seam after family synthesis.
+- Surface a concise hot-seam summary for the operator:
+  - use seams to answer where concentrated follow-up review or cleanup should land
+  - keep families as the canonical problem-tracking and closure unit
+- Treat seams as ownership grouping, not as a replacement for families.
 - Emit a structured `review_handoff` block for downstream fix workflows using `references/review-handoff.md`.
+- Include the seam summary in that handoff when the likely owning seams are
+  grounded enough to aggregate.
 - Emit a per-family `closure_gate` inside that handoff using `references/closure-gate.md`.
 - In targeted return-review mode, compare the original `review_handoff`, including each family's embedded `closure_gate`, against the `review_return_handoff` and the actual fix diff, then confirm, partially confirm, reject, or mark unverified the fixer's claimed closure status.
 - In targeted return-review mode, surface the gate check itself. For each family, show which `closure_gate` items were satisfied, unsatisfied, or inconclusive and cite evidence.

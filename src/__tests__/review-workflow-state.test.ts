@@ -340,6 +340,7 @@ test("build-carried-handoff normalizes broader cross-family defer context withou
   const carriedHandoff = JSON.parse(await readFile(carriedPath, "utf8")) as {
     review_handoff: {
       families: Array<Record<string, unknown>>;
+      seam_summary: unknown;
     };
   };
 
@@ -351,6 +352,33 @@ test("build-carried-handoff normalizes broader cross-family defer context withou
   assert.equal(family.family_id, "F11");
   assert.equal(family.closure_status, "family-still-open");
   assert.equal(family.open_reason_kind, "broader-cross-family-contract");
+  assert.deepEqual(carriedHandoff.review_handoff.seam_summary, {
+    hot_seams: [
+      {
+        seam: "src/cli/run-reconciliation.ts",
+        family_ids: ["F11"],
+        family_count: 1,
+        highest_severity: "HIGH",
+        source_surfaces: ["run-reconciliation"],
+        secondary_seam_mentions: [],
+        hot: true,
+        hot_reason: "a high-severity family points at this likely owning seam"
+      }
+    ],
+    all_seams: [
+      {
+        seam: "src/cli/run-reconciliation.ts",
+        family_ids: ["F11"],
+        family_count: 1,
+        highest_severity: "HIGH",
+        source_surfaces: ["run-reconciliation"],
+        secondary_seam_mentions: [],
+        hot: true,
+        hot_reason: "a high-severity family points at this likely owning seam"
+      }
+    ],
+    families_without_owning_seam: []
+  });
   assert.deepEqual(family.carry_forward_context, {
     reason_kind: "blocked-by-broader-contract-change",
     touch_state: "broader-cross-family-overlap",
@@ -368,6 +396,111 @@ test("build-carried-handoff normalizes broader cross-family defer context withou
     reevaluate_when: ["the next fixer slice starts for this family"]
   });
   assert.ok(!("reviewer_next_step" in family));
+});
+
+test("summarize-seams aggregates families by likely owning seam and preserves adjacent seam hints", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-seam-summary-"));
+  const reviewHandoffPath = join(tempDir, "review-handoff.json");
+
+  await writeFile(
+    reviewHandoffPath,
+    JSON.stringify(
+      {
+        review_handoff: {
+          review_target: {
+            mode: "branch",
+            scope_summary: "test"
+          },
+          families: [
+            {
+              family_id: "F01",
+              severity: "HIGH",
+              source_surfaces: ["cli-lifecycle-reconciliation"],
+              review_hints: {
+                likely_owning_seam: "src/cli/run-reconciliation.ts",
+                secondary_seams: [
+                  "src/recovery/brief.ts",
+                  "src/cli/run-reconciliation.ts"
+                ]
+              }
+            },
+            {
+              family_id: "F02",
+              severity: "MEDIUM",
+              source_surfaces: ["cli-operator-surfaces"],
+              review_hints: {
+                likely_owning_seam: "src/cli/run-reconciliation.ts"
+              }
+            },
+            {
+              family_id: "F03",
+              severity: "LOW",
+              source_surfaces: ["codex-reference-adapter"],
+              review_hints: {
+                likely_owning_seam: "src/hosts/codex/adapter/envelope.ts",
+                secondary_seams: ["src/hosts/codex/adapter/prompt.ts"]
+              }
+            },
+            {
+              family_id: "F04",
+              severity: "LOW",
+              source_surfaces: ["runtime-authority"]
+            }
+          ]
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "summarize-seams",
+    "--review-handoff",
+    reviewHandoffPath
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    seam_summary: {
+      hot_seams: [
+        {
+          seam: "src/cli/run-reconciliation.ts",
+          family_ids: ["F01", "F02"],
+          family_count: 2,
+          highest_severity: "HIGH",
+          source_surfaces: ["cli-lifecycle-reconciliation", "cli-operator-surfaces"],
+          secondary_seam_mentions: ["src/recovery/brief.ts"],
+          hot: true,
+          hot_reason: "multiple families converge on the same likely owning seam"
+        }
+      ],
+      all_seams: [
+        {
+          seam: "src/cli/run-reconciliation.ts",
+          family_ids: ["F01", "F02"],
+          family_count: 2,
+          highest_severity: "HIGH",
+          source_surfaces: ["cli-lifecycle-reconciliation", "cli-operator-surfaces"],
+          secondary_seam_mentions: ["src/recovery/brief.ts"],
+          hot: true,
+          hot_reason: "multiple families converge on the same likely owning seam"
+        },
+        {
+          seam: "src/hosts/codex/adapter/envelope.ts",
+          family_ids: ["F03"],
+          family_count: 1,
+          highest_severity: "LOW",
+          source_surfaces: ["codex-reference-adapter"],
+          secondary_seam_mentions: ["src/hosts/codex/adapter/prompt.ts"],
+          hot: false,
+          hot_reason: "none"
+        }
+      ],
+      families_without_owning_seam: ["F04"]
+    }
+  });
 });
 
 test("full-review baseline helper prefers a working .coortex baseline over docs fallback", async () => {

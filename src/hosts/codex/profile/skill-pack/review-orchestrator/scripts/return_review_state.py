@@ -120,6 +120,13 @@ KNOWN_FOLLOWUP_DECISIONS = {
     "declined-follow-up",
 }
 
+SEVERITY_RANK = {
+    "CRITICAL": 4,
+    "HIGH": 3,
+    "MEDIUM": 2,
+    "LOW": 1,
+}
+
 def load_json_object(path: pathlib.Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -362,6 +369,97 @@ def changed_files_from_args(args: argparse.Namespace) -> set[str]:
             if line:
                 changed.add(line)
     return changed
+
+
+def family_seam_hints(family: dict[str, Any]) -> tuple[str | None, list[str]]:
+    review_hints = family.get("review_hints")
+    if not isinstance(review_hints, dict):
+        return None, []
+    likely_owning_seam = review_hints.get("likely_owning_seam")
+    likely = str(likely_owning_seam).strip() if isinstance(likely_owning_seam, str) else ""
+    secondary = [
+        seam
+        for seam in normalize_string_list(review_hints.get("secondary_seams"))
+        if seam and seam != likely
+    ]
+    return (likely or None), secondary
+
+
+def summarize_seams_for_families(families: list[dict[str, Any]]) -> dict[str, Any]:
+    seam_index: dict[str, dict[str, Any]] = {}
+    families_without_owning_seam: list[str] = []
+
+    for family in families:
+        if not isinstance(family, dict):
+            continue
+        family_id = str(family.get("family_id") or "").strip()
+        if not family_id:
+            continue
+        likely_owning_seam, secondary_seams = family_seam_hints(family)
+        if not likely_owning_seam:
+            families_without_owning_seam.append(family_id)
+            continue
+
+        entry = seam_index.setdefault(
+            likely_owning_seam,
+            {
+                "seam": likely_owning_seam,
+                "family_ids": [],
+                "family_count": 0,
+                "highest_severity": "LOW",
+                "source_surfaces": set(),
+                "secondary_seam_mentions": set(),
+            },
+        )
+        entry["family_ids"].append(family_id)
+        entry["family_count"] += 1
+
+        severity = str(family.get("severity") or "LOW").upper()
+        current = str(entry["highest_severity"])
+        if SEVERITY_RANK.get(severity, 0) > SEVERITY_RANK.get(current, 0):
+            entry["highest_severity"] = severity
+
+        for surface in normalize_string_list(family.get("source_surfaces")):
+            entry["source_surfaces"].add(surface)
+        for seam in secondary_seams:
+            entry["secondary_seam_mentions"].add(seam)
+
+    def build_entry(raw: dict[str, Any]) -> dict[str, Any]:
+        family_count = int(raw["family_count"])
+        highest_severity = str(raw["highest_severity"])
+        hot = family_count >= 2 or highest_severity in {"CRITICAL", "HIGH"}
+        if family_count >= 2:
+            hot_reason = "multiple families converge on the same likely owning seam"
+        elif highest_severity in {"CRITICAL", "HIGH"}:
+            hot_reason = "a high-severity family points at this likely owning seam"
+        else:
+            hot_reason = "none"
+        return {
+            "seam": raw["seam"],
+            "family_ids": sorted(set(raw["family_ids"])),
+            "family_count": family_count,
+            "highest_severity": highest_severity,
+            "source_surfaces": sorted(raw["source_surfaces"]),
+            "secondary_seam_mentions": sorted(raw["secondary_seam_mentions"]),
+            "hot": hot,
+            "hot_reason": hot_reason,
+        }
+
+    summarized = [build_entry(entry) for entry in seam_index.values()]
+    summarized.sort(
+        key=lambda entry: (
+            not entry["hot"],
+            -entry["family_count"],
+            -SEVERITY_RANK.get(str(entry["highest_severity"]), 0),
+            str(entry["seam"]),
+        )
+    )
+
+    return {
+        "hot_seams": [entry for entry in summarized if entry["hot"]],
+        "all_seams": summarized,
+        "families_without_owning_seam": sorted(set(families_without_owning_seam)),
+    }
 
 
 def init_trace(args: argparse.Namespace) -> int:
@@ -801,6 +899,7 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
         "review_handoff": {
             "review_target": review_data.get("review_target"),
             "families": selected_families,
+            "seam_summary": summarize_seams_for_families(selected_families),
         }
     }
 
@@ -822,6 +921,23 @@ def build_carried_handoff(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
+    return 0
+
+
+def summarize_seams(args: argparse.Namespace) -> int:
+    review_data = unwrap_root(load_json_object(pathlib.Path(args.review_handoff)), "review_handoff")
+    families = review_data.get("families")
+    if not isinstance(families, list):
+        raise SystemExit("review_handoff.families must be a list")
+
+    valid_families = [family for family in families if isinstance(family, dict)]
+    output = {"seam_summary": summarize_seams_for_families(valid_families)}
+
+    rendered = json.dumps(output, indent=2, sort_keys=False)
+    if args.output:
+        pathlib.Path(args.output).write_text(f"{rendered}\n", encoding="utf-8")
+    else:
+        print(rendered)
     return 0
 
 
@@ -1318,6 +1434,14 @@ def build_parser() -> argparse.ArgumentParser:
     carried.add_argument("--output")
     carried.add_argument("--summary", action="store_true")
     carried.set_defaults(func=build_carried_handoff)
+
+    summarize = subparsers.add_parser(
+        "summarize-seams",
+        help="Aggregate review_handoff families by likely owning seam and flag hot seams for targeted follow-up review.",
+    )
+    summarize.add_argument("--review-handoff", required=True)
+    summarize.add_argument("--output")
+    summarize.set_defaults(func=summarize_seams)
 
     baseline = subparsers.add_parser(
         "resolve-full-review-baseline",

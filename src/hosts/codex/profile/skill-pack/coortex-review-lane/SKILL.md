@@ -87,6 +87,8 @@ The orchestrator should tell you which bounded lane type you are running.
   - inspect one candidate defect family
   - test the strongest plausible root cause, nearby side paths, and sibling
     manifestations inside the bounded family seam
+  - ground the likely owning seam and any materially involved secondary seams
+    when the prompt schema asks for them
   - return the family-exploration schema when the prompt supplies it
 - return-review lane
   - treat the family's `closure_gate` as Stage 1

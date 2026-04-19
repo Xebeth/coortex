@@ -16,6 +16,34 @@ review_handoff:
   review_target:
     mode: branch
     scope_summary: "branch delta against origin/main"
+  seam_summary:
+    hot_seams:
+      - seam: src/hosts/codex/adapter/execution.ts
+        family_ids:
+          - F-001
+        family_count: 1
+        highest_severity: MEDIUM
+        source_surfaces:
+          - host-adapter-execution
+          - host-adapter-prompting
+        secondary_seam_mentions:
+          - src/hosts/codex/adapter/prompt.ts
+        hot: false
+        hot_reason: none
+    all_seams:
+      - seam: src/hosts/codex/adapter/execution.ts
+        family_ids:
+          - F-001
+        family_count: 1
+        highest_severity: MEDIUM
+        source_surfaces:
+          - host-adapter-execution
+          - host-adapter-prompting
+        secondary_seam_mentions:
+          - src/hosts/codex/adapter/prompt.ts
+        hot: false
+        hot_reason: none
+    families_without_owning_seam: []
   families:
     - family_id: F-001
       severity: MEDIUM
@@ -46,6 +74,8 @@ review_handoff:
         - unrelated host adapters not inspected
       review_hints:
         likely_owning_seam: src/hosts/codex/adapter/execution.ts
+        secondary_seams:
+          - src/hosts/codex/adapter/prompt.ts
         candidate_write_set:
           - src/hosts/codex/adapter/execution.ts
           - src/hosts/codex/adapter/prompt.ts
@@ -91,6 +121,9 @@ Top level:
 - `review_target`
 - `families`
 
+Optional top level:
+- `seam_summary`
+
 Per family:
 - `family_id`
 - `severity`
@@ -112,10 +145,16 @@ Per family:
 
 Per `review_hints` block:
 - `likely_owning_seam`
+- `secondary_seams` when a family clearly crosses an adjacent seam
 - `candidate_write_set`
 - `candidate_test_set`
 - `candidate_doc_set`
 - `parallelizable`
+
+Per optional `seam_summary` block:
+- `hot_seams`
+- `all_seams`
+- `families_without_owning_seam`
 
 Per `closure_gate` block:
 - `remediation_item`
@@ -141,8 +180,20 @@ Per optional `carry_forward_context` block:
 ## Rules
 
 - `review_hints` are downstream hints, not authoritative implementation instructions.
+- `seam_summary` is a seam-level follow-up aid, not a replacement for the
+  family list. Families remain the canonical closure and fixer-tracking unit.
+- `seam_summary.hot_seams` should only elevate seams that are worth targeted
+  seam review because multiple families converge there or one high-severity
+  family makes the seam worth isolating.
+- `seam_summary.all_seams` should summarize the families by likely owning seam
+  so later seam-focused review can start from an explicit ownership map.
+- `seam_summary.families_without_owning_seam` should list any family ids where
+  the review could not name a grounded owning seam yet.
 - Do not invent write-set hints that are unsupported by the evidence.
 - `likely_owning_seam` should point to the most plausible owning module or boundary, not just the nearest changed file.
+- `secondary_seams` should list materially involved adjacent seams when the
+  family clearly crosses a boundary. Do not dump every nearby file into this
+  list; use `none` or omit the field when no grounded secondary seam exists.
 - `candidate_write_set` should include the likely owning implementation files plus any directly implicated supporting files.
 - `candidate_test_set` and `candidate_doc_set` should list the tests and docs most likely to require updates if the family is fixed correctly.
 - `parallelizable` should be `false` whenever the family appears to share files, invariants, or ownership with another family in the same review result.
