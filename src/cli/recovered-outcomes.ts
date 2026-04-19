@@ -10,6 +10,9 @@ import type {
   ResultPacket
 } from "../core/types.js";
 import { RuntimeStore } from "../persistence/store.js";
+import type { CommandDiagnostic } from "./types.js";
+import { diagnosticsFromWarning } from "./diagnostics.js";
+import { loadWorkflowAwareProjectionWithDiagnostics } from "./runtime-state.js";
 import { buildRecoveredExecutionEnvelope } from "./workflow-envelope.js";
 
 type LoadedProjection = Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
@@ -115,6 +118,38 @@ export function synthesizeRecoveredExecution(
       }
     },
     run: record
+  };
+}
+
+export async function recoverPersistedExecutionFromDurableRun(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId: string,
+  error: unknown
+): Promise<{
+  projection: LoadedProjection;
+  execution: HostExecutionOutcome;
+  diagnostics: CommandDiagnostic[];
+} | undefined> {
+  const execution = synthesizeRecoveredExecution(
+    await adapter.inspectRun(store, assignmentId)
+  );
+  if (!execution) {
+    return undefined;
+  }
+  const recovered = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  return {
+    projection: recovered.projection,
+    execution,
+    diagnostics: [
+      ...diagnosticsFromWarning(
+        `Runtime event persistence was interrupted after the host run completed durably. Recovered from durable host run metadata. ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "host-run-persist-failed"
+      ),
+      ...recovered.diagnostics
+    ]
   };
 }
 

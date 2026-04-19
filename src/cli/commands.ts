@@ -29,6 +29,7 @@ import {
 } from "./run-operations.js";
 import { loadInspectRuntimeContext } from "./inspect-context.js";
 import {
+  recoverPersistedExecutionFromDurableRun,
   synthesizeRecoveredExecution,
   synthesizeRecoveredExecutionFromReconciliation
 } from "./recovered-outcomes.js";
@@ -287,7 +288,7 @@ export async function runRuntime(
     if (!executionStarted) {
       await adapter.releaseRunLease(store, assignment.id);
     } else if (launchedProjection && envelope) {
-      const recovered = await recoverPersistedRunAfterEventFailure(
+      const recovered = await recoverPersistedExecutionFromDurableRun(
         store,
         adapter,
         assignment.id,
@@ -346,38 +347,6 @@ function buildEnvelopeTelemetryMetadata(
     envelopeChars: envelope.estimatedChars,
     trimApplied: envelope.trimApplied,
     trimmedFields: envelope.trimmedFields.length
-  };
-}
-
-async function recoverPersistedRunAfterEventFailure(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  assignmentId: string,
-  error: unknown
-): Promise<{
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
-  execution: NonNullable<ReturnType<typeof synthesizeRecoveredExecution>>;
-  diagnostics: CommandDiagnostic[];
-} | undefined> {
-  const execution = synthesizeRecoveredExecution(
-    await adapter.inspectRun(store, assignmentId)
-  );
-  if (!execution) {
-    return undefined;
-  }
-  const recovered = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
-  return {
-    projection: recovered.projection,
-    execution,
-    diagnostics: [
-      ...diagnosticsFromWarning(
-        `Runtime event persistence was interrupted after the host run completed durably. Recovered from durable host run metadata. ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-        "host-run-persist-failed"
-      ),
-      ...recovered.diagnostics
-    ]
   };
 }
 
