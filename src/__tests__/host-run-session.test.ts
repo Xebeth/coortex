@@ -307,6 +307,99 @@ test("host-run session terminates a spawned launch when session identity handlin
   }
 });
 
+test("host-run resume terminates a spawned reclaim when session identity handling fails before the handle returns", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-resume-startup-failure";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const requestedSessionId = "native-resume-startup-failure-1";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, requestedSessionId);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  let terminateSignals: Array<"graceful" | "force" | undefined> = [];
+  let waitForExitCalls = 0;
+  let rejectResult!: (error: Error) => void;
+  const result = new Promise<{ exitCode: number }>((_, reject) => {
+    rejectResult = reject;
+  });
+  void result.catch(() => undefined);
+  const running: HostRunHandle<{ exitCode: number }> = {
+    result,
+    terminate: async (signal) => {
+      terminateSignals.push(signal);
+      queueMicrotask(() => {
+        rejectResult(new Error("terminated after resume startup callback failure"));
+      });
+    },
+    waitForExit: async () => {
+      waitForExitCalls += 1;
+      return { code: 1 };
+    }
+  };
+  const activeRuns: Array<HostRunHandle<{ exitCode: number }> | undefined> = [];
+
+  try {
+    const resumeResult = await executeHostResumeSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-resume-startup-failure",
+      requestedSessionId,
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async ({ onSessionIdentity }) => {
+        await onSessionIdentity({
+          nativeSessionId: requestedSessionId,
+          metadata: {
+            resumeEventType: "thread.event"
+          }
+        });
+        return running;
+      },
+      deriveCompleted: async () => {
+        throw new Error("resume should not reach completion after startup callback failure");
+      },
+      getObservedSessionId: () => requestedSessionId,
+      getVerifiedSessionId: () => requestedSessionId,
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      summarizeVerificationFailure: () => undefined,
+      onSessionIdentity: async () => {
+        throw new Error("simulated resume session identity failure");
+      },
+      setActiveRun: (run) => {
+        activeRuns.push(run);
+      },
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.equal(resumeResult.reclaimed, false);
+    assert.equal(resumeResult.reclaimState, "verified_then_failed");
+    assert.equal(resumeResult.sessionVerified, true);
+    assert.equal(resumeResult.verifiedSessionId, requestedSessionId);
+    assert.match(resumeResult.warning ?? "", /startup handling failed during session identity handling/i);
+    assert.match(resumeResult.warning ?? "", /simulated resume session identity failure/i);
+    assert.deepEqual(terminateSignals, ["graceful"]);
+    assert.equal(waitForExitCalls, 1);
+    assert.equal(activeRuns[0], running);
+    assert.equal(activeRuns.at(-1), undefined);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
 test("host-run session matrix keeps completed state authoritative after a queued heartbeat callback", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -868,6 +961,81 @@ test("host-run session does not surface launch identity when metadata persistenc
   }
 });
 
+test("host-run resume preserves shared proof fields after reclaimed success", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-resume-reclaimed-success";
+  const requestedSessionId = "native-resume-success-1";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, requestedSessionId);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  try {
+    const result = await executeHostResumeSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-resume-reclaimed-success",
+      requestedSessionId,
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async () => ({
+        result: Promise.resolve({ exitCode: 0 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      }),
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      summarizeVerificationFailure: () => undefined,
+      deriveCompleted: async () => ({
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Resume completed successfully.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        }
+      }),
+      getObservedSessionId: () => requestedSessionId,
+      getVerifiedSessionId: () => requestedSessionId,
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.equal(result.reclaimed, true);
+    assert.equal(result.reclaimState, "reclaimed");
+    assert.equal(result.requestedSessionId, requestedSessionId);
+    assert.equal(result.observedSessionId, requestedSessionId);
+    assert.equal(result.verifiedSessionId, requestedSessionId);
+    assert.equal(result.sessionVerified, true);
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.outcome.kind, "result");
+    assert.equal(result.run.adapterData?.nativeRunId, requestedSessionId);
+    assert.equal(result.telemetry?.eventType, "host.resume.completed");
+    assert.equal(result.warning, undefined);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
 test("host-run resume preserves verified reclaim proof after post-exit failure", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -921,6 +1089,68 @@ test("host-run resume preserves verified reclaim proof after post-exit failure",
     assert.equal(result.sessionVerified, true);
     assert.equal(result.exitCode, 17);
     assert.match(result.warning ?? "", /simulated resume post-exit failure/);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test("host-run resume keeps a foreign verified session id unverified on post-exit failure", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-resume-foreign-verified-failure";
+  const requestedSessionId = "native-resume-requested-1";
+  const foreignVerifiedSessionId = "native-resume-foreign-verified-1";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, requestedSessionId);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  try {
+    const result = await executeHostResumeSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-resume-foreign-verified-failure",
+      requestedSessionId,
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async () => ({
+        result: Promise.resolve({ exitCode: 23 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 23 })
+      }),
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      summarizeVerificationFailure: () => "resume verification stayed foreign",
+      deriveCompleted: async () => {
+        throw new Error("simulated resume post-exit failure with foreign verified session");
+      },
+      getObservedSessionId: () => foreignVerifiedSessionId,
+      getVerifiedSessionId: () => foreignVerifiedSessionId,
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.equal(result.reclaimed, false);
+    assert.equal(result.reclaimState, "unverified_failed");
+    assert.equal(result.sessionVerified, false);
+    assert.equal(result.observedSessionId, foreignVerifiedSessionId);
+    assert.equal(result.verifiedSessionId, foreignVerifiedSessionId);
+    assert.match(
+      result.warning ?? "",
+      /simulated resume post-exit failure with foreign verified session/
+    );
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;

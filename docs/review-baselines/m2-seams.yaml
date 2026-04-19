@@ -317,6 +317,8 @@ surfaces:
   - src/adapters/host-run-store.ts
   supporting_anchors:
   - src/__tests__/adapter-contract.test.ts
+  - src/__tests__/host-run-inspection.test.ts
+  - src/__tests__/host-run-records.test.ts
   - src/__tests__/host-run-session.test.ts
   - src/__tests__/host-run-store.test.ts
   contract_docs:
@@ -338,9 +340,9 @@ surfaces:
     reason: Lease, inspection, and session infrastructure are part of interruption
       and recovery correctness.
   - lens_id: duplication
-    priority: medium
-    reason: Launch and resume session loops can easily drift when similar mechanics
-      are reassembled locally.
+    priority: high
+    reason: Recent follow-on refactors show this seam still accumulates duplicated
+      shaping and cleanup paths when shared owners are not reused consistently.
   configured_custom_lenses:
   - id: shared-artifact-role-discipline
     name: Artifact Role Discipline

@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeArtifactStore } from "./contract.js";
-import { materializeInspectableRunRecord } from "./host-run-inspection.js";
+import {
+  materializeInspectableRunRecord,
+  materializeInspectableRunRecords
+} from "./host-run-inspection.js";
 import {
   HostRunLeaseRepository,
   type HostRunArtifactInspection,
@@ -117,24 +120,33 @@ export class HostRunStore {
   }
 
   async release(assignmentId: string): Promise<void> {
-    await this.repository.deleteLease(assignmentId);
-    await this.repository.deleteRunRecord(assignmentId);
-    const lastRun = await this.repository.readLastRunPointer();
-    if (shouldDeleteRunningLastRunPointer(lastRun, assignmentId)) {
-      await this.repository.deleteLastRunPointer();
-    }
+    await this.cleanupLeaseArtifacts(assignmentId, {
+      deleteRunRecord: true
+    });
   }
 
   async clearLease(assignmentId: string): Promise<void> {
-    await this.repository.deleteLease(assignmentId);
-    const lastRun = await this.repository.readLastRunPointer();
-    if (shouldDeleteRunningLastRunPointer(lastRun, assignmentId)) {
-      await this.repository.deleteLastRunPointer();
-    }
+    await this.cleanupLeaseArtifacts(assignmentId);
   }
 
   async hasLease(assignmentId: string): Promise<boolean> {
     return this.repository.hasLease(assignmentId);
+  }
+
+  private async cleanupLeaseArtifacts(
+    assignmentId: string,
+    options?: {
+      deleteRunRecord?: boolean;
+    }
+  ): Promise<void> {
+    await this.repository.deleteLease(assignmentId);
+    if (options?.deleteRunRecord) {
+      await this.repository.deleteRunRecord(assignmentId);
+    }
+    const lastRunCleanupError = await this.tryDeleteRunningLastRunPointerIfOwnedBy(assignmentId);
+    if (lastRunCleanupError) {
+      throw lastRunCleanupError;
+    }
   }
 
   async write(record: HostRunRecord): Promise<void> {
@@ -173,14 +185,7 @@ export class HostRunStore {
   }
 
   async inspectAll(): Promise<HostRunRecord[]> {
-    const records: HostRunRecord[] = [];
-    for (const inspection of await this.inspectAllArtifacts()) {
-      const record = materializeInspectableRunRecord(inspection);
-      if (record?.assignmentId === inspection.assignmentId) {
-        records.push(record);
-      }
-    }
-    return records;
+    return materializeInspectableRunRecords(await this.inspectAllArtifacts());
   }
 
   async inspectAllArtifacts(): Promise<HostRunArtifactInspection[]> {
@@ -198,12 +203,9 @@ export class HostRunStore {
       cleanupErrors.push(recordError.message);
     }
 
-    const lastRun = await this.repository.readLastRunPointer();
-    if (shouldDeleteRunningLastRunPointer(lastRun, assignmentId)) {
-      const lastRunError = await this.tryDeleteLastRunPointer();
-      if (lastRunError) {
-        cleanupErrors.push(lastRunError.message);
-      }
+    const lastRunError = await this.tryDeleteRunningLastRunPointerIfOwnedBy(assignmentId);
+    if (lastRunError) {
+      cleanupErrors.push(lastRunError.message);
     }
 
     if (cleanupErrors.length === 0) {
@@ -213,33 +215,51 @@ export class HostRunStore {
   }
 
   private async tryDeleteLease(assignmentId: string): Promise<Error | undefined> {
-    try {
-      await this.repository.deleteLease(assignmentId);
-      return undefined;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return new Error(`${this.adapterId} run lease cleanup failed: ${message}`);
-    }
+    return this.tryCleanupArtifact(
+      () => this.repository.deleteLease(assignmentId),
+      "run lease cleanup"
+    );
   }
 
   private async tryDeleteRunRecord(assignmentId: string): Promise<Error | undefined> {
-    try {
-      await this.repository.deleteRunRecord(assignmentId);
-      return undefined;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return new Error(`${this.adapterId} run record cleanup failed: ${message}`);
-    }
+    return this.tryCleanupArtifact(
+      () => this.repository.deleteRunRecord(assignmentId),
+      "run record cleanup"
+    );
   }
 
   private async tryDeleteLastRunPointer(): Promise<Error | undefined> {
+    return this.tryCleanupArtifact(
+      () => this.repository.deleteLastRunPointer(),
+      "last-run pointer cleanup"
+    );
+  }
+
+  private async tryCleanupArtifact(
+    cleanup: () => Promise<void>,
+    context: string
+  ): Promise<Error | undefined> {
     try {
-      await this.repository.deleteLastRunPointer();
+      await cleanup();
       return undefined;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return new Error(`${this.adapterId} last-run pointer cleanup failed: ${message}`);
+      return new Error(`${this.adapterId} ${context} failed: ${message}`);
     }
+  }
+
+  private async tryDeleteRunningLastRunPointerIfOwnedBy(
+    assignmentId: string
+  ): Promise<Error | undefined> {
+    if (!(await this.hasRunningLastRunPointer(assignmentId))) {
+      return undefined;
+    }
+    return this.tryDeleteLastRunPointer();
+  }
+
+  private async hasRunningLastRunPointer(assignmentId: string): Promise<boolean> {
+    const lastRun = await this.repository.readLastRunPointer();
+    return shouldDeleteRunningLastRunPointer(lastRun, assignmentId);
   }
 
   private async claimUnlocked(record: HostRunRecord): Promise<void> {

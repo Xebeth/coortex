@@ -1402,6 +1402,131 @@ test("milestone-2 integration: wrapped resume persists a terminal completed resu
   assert.equal(resumeCompletedTelemetry?.metadata.resultStatus, "completed");
 });
 
+test("milestone-2 integration: wrapped resume recovers a terminal completed result after persistence interruption", serial, async () => {
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch created resumable state before recovered terminal resume coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-recovered-terminal-resume" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "completed",
+        resultSummary: "Wrapped resume recovered a completed result after persistence interruption.",
+        changedFiles: ["src/cli/commands.ts", "src/cli/run-operations.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  const originalCompletedResumeEnvelope = setup.adapter.buildResumeEnvelope.bind(setup.adapter);
+  let poisonCompletedResumeEnvelope = true;
+  setup.adapter.buildResumeEnvelope = async (store, projection, brief) => {
+    const envelope = await originalCompletedResumeEnvelope(store, projection, brief);
+    if (!poisonCompletedResumeEnvelope) {
+      return envelope;
+    }
+    poisonCompletedResumeEnvelope = false;
+    return {
+      ...envelope,
+      objective: "stale pre-recovery objective",
+      recentResults: [{ resultId: "stale-result", summary: "stale recent result", trimmed: true }],
+      trimApplied: true,
+      trimmedFields: [{ label: "stale", originalChars: 999, keptChars: 1, reference: "stale.txt" }],
+      estimatedChars: 999
+    };
+  };
+  const restoreAppend = failNextOutcomeAppend(
+    setup.store,
+    "result.submitted",
+    "simulated resume result persistence failure"
+  );
+  let resumed!: Awaited<ReturnType<typeof resumeRuntime>>;
+  try {
+    resumed = await resumeRuntime(setup.store, setup.adapter);
+  } finally {
+    restoreAppend();
+  }
+  const projection = await loadOperatorProjection(setup.store);
+  const attachment = [...projection.attachments.values()][0];
+  const claim = [...projection.claims.values()][0];
+  const telemetry = await setup.store.loadTelemetry();
+  const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    objective: string;
+    recentResults: Array<{ summary: string }>;
+    trimApplied: boolean;
+    trimmedFields: unknown[];
+    estimatedChars: number;
+  };
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+  assert.equal(resumed.execution.outcome.kind, "result");
+  assert.equal(resumed.execution.outcome.capture.status, "completed");
+  assert.equal(
+    resumed.execution.outcome.capture.summary,
+    "Wrapped resume recovered a completed result after persistence interruption."
+  );
+  assert.equal(resumed.execution.run.resultStatus, "completed");
+  assert.equal(attachment?.state, "released");
+  assert.equal(claim?.state, "released");
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.deepEqual(projection.status.activeAssignmentIds, []);
+  assert.equal(projection.status.currentObjective, "Await the next assignment.");
+  assert.equal(resumed.brief.activeObjective, "Await the next assignment.");
+  assert.equal(resumed.envelope.objective, "Await the next assignment.");
+  assert.equal(
+    resumed.envelope.recentResults[0]?.summary,
+    "Wrapped resume recovered a completed result after persistence interruption."
+  );
+  assert.equal(resumed.envelope.trimApplied, false);
+  assert.deepEqual(resumed.envelope.trimmedFields, []);
+  assert.notEqual(resumed.envelope.estimatedChars, 999);
+  assert.equal(persistedEnvelope.objective, "Await the next assignment.");
+  assert.equal(
+    persistedEnvelope.recentResults[0]?.summary,
+    "Wrapped resume recovered a completed result after persistence interruption."
+  );
+  assert.equal(persistedEnvelope.trimApplied, false);
+  assert.deepEqual(persistedEnvelope.trimmedFields, []);
+  assert.notEqual(persistedEnvelope.estimatedChars, 999);
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.resultStatus, "completed");
+  assert.equal(
+    inspected?.summary,
+    "Wrapped resume recovered a completed result after persistence interruption."
+  );
+  assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.resultStatus, "completed");
+});
+
 test("milestone-2 integration: wrapped resume persists a decision outcome and keeps the claim resumable", serial, async () => {
   const setup = await createSmokeSetupWithRunner({
     runExec: async (input) => {
@@ -1537,6 +1662,162 @@ test("milestone-2 integration: wrapped resume persists a decision outcome and ke
   assert.equal(inspected?.state, "completed");
   assert.equal(inspected?.outcomeKind, "decision");
   assert.equal(inspected?.summary, "Need operator guidance before continuing resumed work.");
+  assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, true);
+  assert.equal(resumeCompletedTelemetry?.metadata.outcomeKind, "decision");
+  assert.equal(resumeCompletedTelemetry?.metadata.resultStatus, "");
+});
+
+test("milestone-2 integration: wrapped resume recovers a decision outcome after persistence interruption", serial, async () => {
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch created resumable state before recovered decision resume coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-recovered-decision-resume" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "decision",
+        resultStatus: "",
+        resultSummary: "",
+        changedFiles: [],
+        blockerSummary: "Recovered decision remained available after persistence interruption.",
+        decisionOptions: [
+          { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+          { id: "skip", label: "Skip", summary: "Skip the blocked step." }
+        ],
+        recommendedOption: "wait"
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  const originalDecisionResumeEnvelope = setup.adapter.buildResumeEnvelope.bind(setup.adapter);
+  let poisonDecisionResumeEnvelope = true;
+  setup.adapter.buildResumeEnvelope = async (store, projection, brief) => {
+    const envelope = await originalDecisionResumeEnvelope(store, projection, brief);
+    if (!poisonDecisionResumeEnvelope) {
+      return envelope;
+    }
+    poisonDecisionResumeEnvelope = false;
+    return {
+      ...envelope,
+      objective: "stale recovered decision objective",
+      recentResults: [{ resultId: "stale-result", summary: "stale recent result", trimmed: true }],
+      trimApplied: true,
+      trimmedFields: [{ label: "stale", originalChars: 999, keptChars: 1, reference: "stale.txt" }],
+      estimatedChars: 999
+    };
+  };
+  const restoreAppend = failNextOutcomeAppend(
+    setup.store,
+    "decision.created",
+    "simulated resume decision persistence failure"
+  );
+  let resumed!: Awaited<ReturnType<typeof resumeRuntime>>;
+  try {
+    resumed = await resumeRuntime(setup.store, setup.adapter);
+  } finally {
+    restoreAppend();
+  }
+  const projection = await loadOperatorProjection(setup.store);
+  const attachment = [...projection.attachments.values()][0];
+  const claim = [...projection.claims.values()][0];
+  const decision = [...projection.decisions.values()].at(-1);
+  const telemetry = await setup.store.loadTelemetry();
+  const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    objective: string;
+    recentResults: Array<{ summary: string }>;
+    trimApplied: boolean;
+    trimmedFields: unknown[];
+    estimatedChars: number;
+  };
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+  assert.equal(resumed.execution.outcome.kind, "decision");
+  assert.equal(
+    resumed.execution.outcome.capture.blockerSummary,
+    "Recovered decision remained available after persistence interruption."
+  );
+  assert.equal(resumed.execution.run.outcomeKind, "decision");
+  assert.equal(attachment?.state, "detached_resumable");
+  assert.deepEqual(attachment?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
+  assert.equal(claim?.state, "active");
+  assert.deepEqual(claim?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
+  assert.equal(projection.assignments.get(setup.assignmentId)?.state, "blocked");
+  assert.deepEqual(projection.status.activeAssignmentIds, [setup.assignmentId]);
+  assert.equal(
+    projection.status.currentObjective,
+    "Recovered decision remained available after persistence interruption."
+  );
+  assert.equal(decision?.state, "open");
+  assert.equal(
+    decision?.blockerSummary,
+    "Recovered decision remained available after persistence interruption."
+  );
+  assert.equal(resumed.brief.activeObjective, "Recovered decision remained available after persistence interruption.");
+  assert.equal(
+    resumed.envelope.recoveryBrief.activeObjective,
+    "Recovered decision remained available after persistence interruption."
+  );
+  assert.equal(
+    resumed.envelope.objective,
+    projection.assignments.get(setup.assignmentId)?.objective
+  );
+  assert.equal(
+    resumed.envelope.recentResults[0]?.summary,
+    "Launch created resumable state before recovered decision resume coverage."
+  );
+  assert.equal(resumed.envelope.trimApplied, false);
+  assert.deepEqual(resumed.envelope.trimmedFields, []);
+  assert.notEqual(resumed.envelope.estimatedChars, 999);
+  assert.equal(
+    persistedEnvelope.objective,
+    projection.assignments.get(setup.assignmentId)?.objective
+  );
+  assert.equal(
+    persistedEnvelope.recentResults[0]?.summary,
+    "Launch created resumable state before recovered decision resume coverage."
+  );
+  assert.equal(persistedEnvelope.trimApplied, false);
+  assert.deepEqual(persistedEnvelope.trimmedFields, []);
+  assert.notEqual(persistedEnvelope.estimatedChars, 999);
+  assert.equal(decision?.recommendedOption, "wait");
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.outcomeKind, "decision");
+  assert.equal(
+    inspected?.summary,
+    "Recovered decision remained available after persistence interruption."
+  );
   assert.equal(resumeCompletedTelemetry?.metadata.reclaimed, true);
   assert.equal(resumeCompletedTelemetry?.metadata.sessionVerified, true);
   assert.equal(resumeCompletedTelemetry?.metadata.outcomeKind, "decision");
@@ -3490,6 +3771,29 @@ async function createSmokeSetupWithRunner(runner: {
     store,
     adapter,
     assignmentId
+  };
+}
+
+function failNextOutcomeAppend(
+  store: RuntimeStore,
+  eventType: "result.submitted" | "decision.created",
+  message: string
+): () => void {
+  const originalAppendEvents = store.appendEvents.bind(store);
+  let failed = false;
+  (store as RuntimeStore & {
+    appendEvents: RuntimeStore["appendEvents"];
+  }).appendEvents = async (events) => {
+    if (!failed && events.some((event) => event.type === eventType)) {
+      failed = true;
+      throw new Error(message);
+    }
+    await originalAppendEvents(events);
+  };
+  return () => {
+    (store as RuntimeStore & {
+      appendEvents: RuntimeStore["appendEvents"];
+    }).appendEvents = originalAppendEvents;
   };
 }
 

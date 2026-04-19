@@ -33,6 +33,20 @@ export function materializeInspectableRunRecord(
   return undefined;
 }
 
+export function materializeInspectableRunRecords(
+  inspections: readonly HostRunArtifactInspection[],
+  options?: MaterializeInspectableRunRecordOptions
+): HostRunRecord[] {
+  const records: HostRunRecord[] = [];
+  for (const inspection of inspections) {
+    const record = materializeInspectableRunRecord(inspection, options);
+    if (record?.assignmentId === inspection.assignmentId) {
+      records.push(record);
+    }
+  }
+  return records;
+}
+
 function createMalformedLeaseRecord(assignmentId: string, leaseIdentity: string): HostRunRecord {
   return {
     assignmentId,

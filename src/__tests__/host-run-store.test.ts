@@ -1633,6 +1633,37 @@ test("host run store ignores a malformed last-run pointer during release cleanup
   );
 });
 
+test("host run store ignores a parseable but invalid last-run pointer during release cleanup", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-release-invalid-pointer",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+
+  await runStore.claim(runningRecord);
+  await store.writeJsonArtifact(artifacts.lastRunPath(), {});
+
+  await runStore.release(runningRecord.assignmentId);
+
+  assert.equal(
+    await store.readTextArtifact(artifacts.runLeasePath(runningRecord.assignmentId), "lease"),
+    undefined
+  );
+  assert.equal(
+    await store.readJsonArtifact(artifacts.runRecordPath(runningRecord.assignmentId), "record"),
+    undefined
+  );
+});
+
 test("host run store ignores a parseable but invalid last-run pointer during claim rollback cleanup", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {

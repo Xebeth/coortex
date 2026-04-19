@@ -79,29 +79,54 @@ export interface ExecuteHostResumeSessionInput<TExecution extends { exitCode: nu
   onSessionIdentity?: (identity: HostSessionIdentity) => Promise<void>;
 }
 
+interface ResumeSessionProof {
+  observedSessionId?: string;
+  verifiedSessionId?: string;
+  sessionVerified: boolean;
+}
+
+interface HostRunSessionCoordinatorInput<TExecution extends { exitCode: number }>
+  extends HostRunSessionTracking<TExecution> {
+  runStore: HostRunStore;
+  runRecord: HostRunRecord;
+  leaseMs: number;
+  heartbeatMs: number;
+}
+
+function queueSessionIdentityHandling<TExecution extends { exitCode: number }>(
+  coordinator: HostRunSessionCoordinator<TExecution>,
+  onSessionIdentity: ((identity: HostSessionIdentity) => Promise<void>) | undefined,
+  identity: HostSessionIdentity,
+  options?: {
+    persistNativeRunId?: boolean;
+  }
+): void {
+  coordinator.queueStartupTask(async () => {
+    if (options?.persistNativeRunId) {
+      const persisted = await coordinator.persistNativeRunId(identity.nativeSessionId);
+      if (!persisted) {
+        return;
+      }
+    }
+    await onSessionIdentity?.(identity);
+  }, "session identity handling");
+}
+
 export async function executeHostRunSession<TExecution extends { exitCode: number }>(
   input: ExecuteHostRunSessionInput<TExecution>
 ): Promise<HostExecutionOutcome> {
-  const coordinator = new HostRunSessionCoordinator<TExecution>({
-    runStore: input.runStore,
-    runRecord: input.runRecord,
-    leaseMs: input.leaseMs,
-    heartbeatMs: input.heartbeatMs,
-    setActiveRun: input.setActiveRun,
-    setActiveExecutionSettled: input.setActiveExecutionSettled
-  });
+  const coordinator = createHostRunSessionCoordinator(input);
 
   return coordinator.execute({
     startRun: () =>
       input.startRun({
         onNativeRunId: async (nativeRunId) => {
-          coordinator.queueStartupTask(async () => {
-            const persisted = await coordinator.persistNativeRunId(nativeRunId);
-            if (!persisted) {
-              return;
-            }
-            await input.onSessionIdentity?.({ nativeSessionId: nativeRunId });
-          }, "session identity handling");
+          queueSessionIdentityHandling(
+            coordinator,
+            input.onSessionIdentity,
+            { nativeSessionId: nativeRunId },
+            { persistNativeRunId: true }
+          );
         }
       }),
     onRuntimeFailure: async (error) =>
@@ -109,37 +134,25 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     onExecutionCompleted: async (execution) => {
       const completedAt = nowIso();
       const completed = await input.deriveCompleted(execution, coordinator.nativeRunId());
-      const outcome = ensureStableHostExecutionOutcomeIds(
-        completed.outcome,
-        completedAt
-      );
       const nativeRunId = completed.nativeRunId ?? coordinator.nativeRunId();
-      const runRecord = buildCompletedRunRecord(
-        outcome,
-        input.assignmentId,
-        input.startedAt,
+      const completionOptions: {
+        nativeRunId?: string;
+        usage?: HostTelemetryCapture["usage"];
+      } = {};
+      if (nativeRunId) {
+        completionOptions.nativeRunId = nativeRunId;
+      }
+      if (completed.usage) {
+        completionOptions.usage = completed.usage;
+      }
+      return buildCompletedRunExecution(
+        input,
+        coordinator,
         completedAt,
-        nativeRunId,
-        input.runRecord.runInstanceId
+        execution.exitCode,
+        completed.outcome,
+        completionOptions
       );
-      const warning = coordinator.collectWarnings(await input.runStore.persistWarning(runRecord));
-
-      return {
-        ...outcome,
-        run: runRecord,
-        ...(warning ? { warning } : {}),
-        telemetry: {
-          eventType: "host.run.completed",
-          taskId: input.taskId,
-          assignmentId: input.assignmentId,
-          metadata: {
-            nativeRunId: nativeRunId ?? "",
-            exitCode: execution.exitCode,
-            outcomeKind: outcome.outcome.kind
-          },
-          ...(completed.usage ? { usage: completed.usage } : {})
-        }
-      };
     },
     onPostExitFailure: async (error, execution) =>
       buildFailedRunOutcome(input, coordinator, error, execution.exitCode)
@@ -149,22 +162,13 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
 export async function executeHostResumeSession<TExecution extends { exitCode: number }>(
   input: ExecuteHostResumeSessionInput<TExecution>
 ): Promise<HostSessionResumeResult> {
-  const coordinator = new HostRunSessionCoordinator<TExecution>({
-    runStore: input.runStore,
-    runRecord: input.runRecord,
-    leaseMs: input.leaseMs,
-    heartbeatMs: input.heartbeatMs,
-    setActiveRun: input.setActiveRun,
-    setActiveExecutionSettled: input.setActiveExecutionSettled
-  });
+  const coordinator = createHostRunSessionCoordinator(input);
 
   return coordinator.execute({
     startRun: () =>
       input.startRun({
         onSessionIdentity: async (identity) => {
-          coordinator.queueStartupTask(async () => {
-            await input.onSessionIdentity?.(identity);
-          }, "session identity handling");
+          queueSessionIdentityHandling(coordinator, input.onSessionIdentity, identity);
         }
       }),
     onRuntimeFailure: async (error) =>
@@ -172,21 +176,19 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
     onExecutionCompleted: async (execution) => {
       const stoppedAt = nowIso();
       const completed = await input.deriveCompleted(execution);
-      const observedSessionId = input.getObservedSessionId();
-      const verifiedSessionId = input.getVerifiedSessionId();
-      const sessionVerified = verifiedSessionId === input.requestedSessionId;
+      const sessionProof = readResumeSessionProof(input);
       const telemetry = {
         eventType: "host.resume.completed",
         taskId: input.taskId,
         assignmentId: input.assignmentId,
         metadata: {
           requestedSessionId: input.requestedSessionId,
-          observedSessionId: observedSessionId ?? "",
-          verifiedSessionId: verifiedSessionId ?? "",
-          sessionVerified,
+          observedSessionId: sessionProof.observedSessionId ?? "",
+          verifiedSessionId: sessionProof.verifiedSessionId ?? "",
+          sessionVerified: sessionProof.sessionVerified,
           exitCode: execution.exitCode,
-          reclaimed: sessionVerified,
-          reclaimState: sessionVerified ? "reclaimed" : "unverified_failed",
+          reclaimed: sessionProof.sessionVerified,
+          reclaimState: sessionProof.sessionVerified ? "reclaimed" : "unverified_failed",
           outcomeKind: completed.outcome.outcome.kind,
           resultStatus:
             completed.outcome.outcome.kind === "result"
@@ -196,26 +198,30 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
         ...(completed.usage ? { usage: completed.usage } : {})
       } satisfies HostTelemetryCapture;
 
-      if (!sessionVerified) {
-        const warning = coordinator.collectWarnings(
-          input.summarizeVerificationFailure(
-            input.requestedSessionId,
-            observedSessionId,
-            execution
-          )
-        );
-        return {
-          reclaimed: false,
-          reclaimState: "unverified_failed",
-          requestedSessionId: input.requestedSessionId,
-          ...(observedSessionId ? { observedSessionId } : {}),
-          ...(verifiedSessionId ? { verifiedSessionId } : {}),
-          sessionVerified,
-          exitCode: execution.exitCode,
-          stoppedAt,
-          telemetry,
-          ...(warning ? { warning } : {})
+      if (!sessionProof.sessionVerified) {
+        const unreclaimedOptions: {
+          telemetry?: HostTelemetryCapture;
+          warningDetail?: string;
+        } = {
+          telemetry
         };
+        const warningDetail = input.summarizeVerificationFailure(
+          input.requestedSessionId,
+          sessionProof.observedSessionId,
+          execution
+        );
+        if (warningDetail) {
+          unreclaimedOptions.warningDetail = warningDetail;
+        }
+        return buildUnreclaimedResumeResult(
+          input,
+          coordinator,
+          stoppedAt,
+          execution.exitCode,
+          "unverified_failed",
+          sessionProof,
+          unreclaimedOptions
+        );
       }
 
       const outcome = ensureStableHostExecutionOutcomeIds(
@@ -231,20 +237,19 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
         input.runRecord.runInstanceId
       );
       const warning = coordinator.collectWarnings(await input.runStore.persistWarning(runRecord));
-      return {
-        reclaimed: true,
-        reclaimState: "reclaimed",
-        requestedSessionId: input.requestedSessionId,
-        ...(observedSessionId ? { observedSessionId } : {}),
-        verifiedSessionId: input.requestedSessionId,
-        sessionVerified,
-        exitCode: execution.exitCode,
+      return buildReclaimedResumeResult(
+        input,
+        coordinator,
         stoppedAt,
-        outcome: outcome.outcome,
-        run: runRecord,
-        telemetry,
-        ...(warning ? { warning } : {})
-      };
+        execution.exitCode,
+        sessionProof,
+        outcome,
+        runRecord,
+        {
+          telemetry,
+          ...(warning ? { warningDetail: warning } : {})
+        }
+      );
     },
     onPostExitFailure: async (error, execution) =>
       buildFailedResumeResult(
@@ -257,31 +262,28 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
   });
 }
 
-async function buildFailedRunOutcome<TExecution extends { exitCode: number }>(
+async function buildCompletedRunExecution<TExecution extends { exitCode: number }>(
   input: ExecuteHostRunSessionInput<TExecution>,
   coordinator: HostRunSessionCoordinator<TExecution>,
-  error: unknown,
-  exitCode: number
+  completedAt: string,
+  exitCode: number,
+  rawOutcome: Pick<HostExecutionOutcome, "outcome">,
+  options?: {
+    nativeRunId?: string;
+    usage?: HostTelemetryCapture["usage"];
+  }
 ): Promise<HostExecutionOutcome> {
-  const completedAt = nowIso();
-  const outcome = ensureStableHostExecutionOutcomeIds(
-    input.buildFailedOutcome(
-      input.assignmentId,
-      completedAt,
-      input.summarizeExecutionFailure(error)
-    ),
-    completedAt
-  );
-  const nativeRunId = coordinator.nativeRunId();
+  const outcome = ensureStableHostExecutionOutcomeIds(rawOutcome, completedAt);
   const runRecord = buildCompletedRunRecord(
     outcome,
     input.assignmentId,
     input.startedAt,
     completedAt,
-    nativeRunId,
+    options?.nativeRunId,
     input.runRecord.runInstanceId
   );
   const warning = coordinator.collectWarnings(await input.runStore.persistWarning(runRecord));
+
   return {
     ...outcome,
     run: runRecord,
@@ -291,12 +293,41 @@ async function buildFailedRunOutcome<TExecution extends { exitCode: number }>(
       taskId: input.taskId,
       assignmentId: input.assignmentId,
       metadata: {
-        nativeRunId: nativeRunId ?? "",
+        nativeRunId: options?.nativeRunId ?? "",
         exitCode,
         outcomeKind: outcome.outcome.kind
-      }
+      },
+      ...(options?.usage ? { usage: options.usage } : {})
     }
   };
+}
+
+async function buildFailedRunOutcome<TExecution extends { exitCode: number }>(
+  input: ExecuteHostRunSessionInput<TExecution>,
+  coordinator: HostRunSessionCoordinator<TExecution>,
+  error: unknown,
+  exitCode: number
+): Promise<HostExecutionOutcome> {
+  const completedAt = nowIso();
+  const failureOptions: {
+    nativeRunId?: string;
+  } = {};
+  const nativeRunId = coordinator.nativeRunId();
+  if (nativeRunId) {
+    failureOptions.nativeRunId = nativeRunId;
+  }
+  return buildCompletedRunExecution(
+    input,
+    coordinator,
+    completedAt,
+    exitCode,
+    input.buildFailedOutcome(
+      input.assignmentId,
+      completedAt,
+      input.summarizeExecutionFailure(error)
+    ),
+    failureOptions
+  );
 }
 
 function buildFailedResumeResult<TExecution extends { exitCode: number }>(
@@ -306,18 +337,133 @@ function buildFailedResumeResult<TExecution extends { exitCode: number }>(
   exitCode: number,
   warningDetail: string | undefined
 ): HostSessionResumeResult {
+  const failureOptions: {
+    warningDetail?: string;
+  } = {};
+  if (warningDetail) {
+    failureOptions.warningDetail = warningDetail;
+  }
+  const sessionProof = readResumeSessionProof(input);
+  return buildUnreclaimedResumeResult(
+    input,
+    coordinator,
+    stoppedAt,
+    exitCode,
+    sessionProof.sessionVerified ? "verified_then_failed" : "unverified_failed",
+    sessionProof,
+    failureOptions
+  );
+}
+
+function buildReclaimedResumeResult<TExecution extends { exitCode: number }>(
+  input: ExecuteHostResumeSessionInput<TExecution>,
+  coordinator: HostRunSessionCoordinator<TExecution>,
+  stoppedAt: string,
+  exitCode: number,
+  sessionProof: ResumeSessionProof,
+  outcome: Pick<HostExecutionOutcome, "outcome">,
+  runRecord: HostRunRecord,
+  options?: {
+    telemetry?: HostTelemetryCapture;
+    warningDetail?: string;
+  }
+): HostSessionResumeResult {
+  return {
+    reclaimed: true,
+    reclaimState: "reclaimed",
+    ...buildResumeResultFields(
+      input,
+      coordinator,
+      sessionProof,
+      exitCode,
+      stoppedAt,
+      options
+    ),
+    verifiedSessionId: sessionProof.verifiedSessionId ?? input.requestedSessionId,
+    outcome: outcome.outcome,
+    run: runRecord
+  };
+}
+
+function readResumeSessionProof<TExecution extends { exitCode: number }>(
+  input: ExecuteHostResumeSessionInput<TExecution>
+): ResumeSessionProof {
   const observedSessionId = input.getObservedSessionId();
   const verifiedSessionId = input.getVerifiedSessionId();
-  const warning = coordinator.collectWarnings(warningDetail);
   return {
-    reclaimed: false,
-    reclaimState: verifiedSessionId ? "verified_then_failed" : "unverified_failed",
-    requestedSessionId: input.requestedSessionId,
     ...(observedSessionId ? { observedSessionId } : {}),
     ...(verifiedSessionId ? { verifiedSessionId } : {}),
-    sessionVerified: verifiedSessionId === input.requestedSessionId,
+    sessionVerified: verifiedSessionId === input.requestedSessionId
+  };
+}
+
+function createHostRunSessionCoordinator<TExecution extends { exitCode: number }>(
+  input: HostRunSessionCoordinatorInput<TExecution>
+): HostRunSessionCoordinator<TExecution> {
+  return new HostRunSessionCoordinator<TExecution>({
+    runStore: input.runStore,
+    runRecord: input.runRecord,
+    leaseMs: input.leaseMs,
+    heartbeatMs: input.heartbeatMs,
+    setActiveRun: input.setActiveRun,
+    setActiveExecutionSettled: input.setActiveExecutionSettled
+  });
+}
+
+function buildUnreclaimedResumeResult<TExecution extends { exitCode: number }>(
+  input: ExecuteHostResumeSessionInput<TExecution>,
+  coordinator: HostRunSessionCoordinator<TExecution>,
+  stoppedAt: string,
+  exitCode: number,
+  reclaimState: "unverified_failed" | "verified_then_failed",
+  sessionProof: {
+    observedSessionId?: string;
+    verifiedSessionId?: string;
+    sessionVerified: boolean;
+  },
+  options?: {
+    telemetry?: HostTelemetryCapture;
+    warningDetail?: string;
+  }
+): HostSessionResumeResult {
+  return {
+    reclaimed: false,
+    reclaimState,
+    ...buildResumeResultFields(
+      input,
+      coordinator,
+      sessionProof,
+      exitCode,
+      stoppedAt,
+      options
+    )
+  };
+}
+
+function buildResumeResultFields<TExecution extends { exitCode: number }>(
+  input: ExecuteHostResumeSessionInput<TExecution>,
+  coordinator: HostRunSessionCoordinator<TExecution>,
+  sessionProof: ResumeSessionProof,
+  exitCode: number,
+  stoppedAt: string,
+  options?: {
+    telemetry?: HostTelemetryCapture;
+    warningDetail?: string;
+  }
+) {
+  const warning = coordinator.collectWarnings(options?.warningDetail);
+  return {
+    requestedSessionId: input.requestedSessionId,
+    ...(sessionProof.observedSessionId
+      ? { observedSessionId: sessionProof.observedSessionId }
+      : {}),
+    ...(sessionProof.verifiedSessionId
+      ? { verifiedSessionId: sessionProof.verifiedSessionId }
+      : {}),
+    sessionVerified: sessionProof.sessionVerified,
     exitCode,
     stoppedAt,
+    ...(options?.telemetry ? { telemetry: options.telemetry } : {}),
     ...(warning ? { warning } : {})
   };
 }

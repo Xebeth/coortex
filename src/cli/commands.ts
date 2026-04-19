@@ -275,6 +275,144 @@ async function persistResumeEnvelopeAndTelemetry(
   return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
 }
 
+async function buildReclaimedResumeResult(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  resumeEnvelope: TaskEnvelope,
+  envelopePath: string,
+  diagnostics: CommandDiagnostic[],
+  execution: SessionExecution,
+  attachment: RuntimeAttachment,
+  claim: AssignmentClaim
+): Promise<ResumeRuntimeResult> {
+  const finalArtifacts = await buildResumeArtifactsFromProjection(
+    store,
+    adapter,
+    projection,
+    true
+  );
+  diagnostics.push(
+    ...(await persistResumeEnvelopeAndTelemetry(
+      store,
+      adapter,
+      projection,
+      finalArtifacts.envelope ?? resumeEnvelope,
+      undefined
+    ))
+  );
+  return {
+    mode: "reclaimed",
+    projection,
+    brief: finalArtifacts.brief,
+    envelope: finalArtifacts.envelope ?? resumeEnvelope,
+    envelopePath,
+    diagnostics,
+    execution,
+    attachment,
+    claim
+  };
+}
+
+function requireReclaimedResumeBinding(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  attachmentId: string,
+  claimId: string,
+  context: string
+): {
+  attachment: RuntimeAttachment;
+  claim: AssignmentClaim;
+} {
+  const attachment = projection.attachments.get(attachmentId);
+  const claim = projection.claims.get(claimId);
+  if (!attachment || !claim) {
+    throw new Error(
+      `Attachment ${attachmentId} or claim ${claimId} disappeared during ${context}.`
+    );
+  }
+  return { attachment, claim };
+}
+
+async function buildReclaimedResumeResultForTarget(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  resumeEnvelope: TaskEnvelope,
+  envelopePath: string,
+  diagnostics: CommandDiagnostic[],
+  execution: SessionExecution,
+  attachmentId: string,
+  claimId: string,
+  context: string
+): Promise<ResumeRuntimeResult> {
+  const { attachment, claim } = requireReclaimedResumeBinding(
+    projection,
+    attachmentId,
+    claimId,
+    context
+  );
+  return buildReclaimedResumeResult(
+    store,
+    adapter,
+    projection,
+    resumeEnvelope,
+    envelopePath,
+    diagnostics,
+    execution,
+    attachment,
+    claim
+  );
+}
+
+async function recoverReclaimedResumeResult(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  assignmentId: string,
+  attachmentId: string,
+  claimId: string,
+  verifiedSessionId: string | undefined,
+  options: ProjectionWriteOptions,
+  warningPrefix: string,
+  stoppedAt: string | undefined,
+  buildPreparedResult: (
+    projection: Awaited<ReturnType<typeof loadOperatorProjection>>
+  ) => Promise<ResumeRuntimeResult>,
+  resumeEnvelope: TaskEnvelope,
+  envelopePath: string,
+  diagnostics: CommandDiagnostic[],
+  context: string
+): Promise<ResumeRuntimeResult> {
+  const recoveredResume = await recoverCompletedWrappedExecution(
+    store,
+    adapter,
+    projection,
+    assignmentId,
+    attachmentId,
+    claimId,
+    verifiedSessionId,
+    options,
+    warningPrefix,
+    stoppedAt
+  );
+  diagnostics.push(...recoveredResume.diagnostics);
+  if (!recoveredResume.execution) {
+    return buildPreparedResult(recoveredResume.projection);
+  }
+  return buildReclaimedResumeResultForTarget(
+    store,
+    adapter,
+    recoveredResume.projection,
+    resumeEnvelope,
+    envelopePath,
+    diagnostics,
+    recoveredResume.execution,
+    attachmentId,
+    claimId,
+    context
+  );
+}
+
 export async function prepareResumeRuntime(
   store: RuntimeStore,
   adapter: HostAdapter
@@ -431,7 +569,7 @@ export async function resumeRuntime(
 
   switch (resumeResult.reclaimState) {
     case "verified_then_failed": {
-      const recoveredResume = await recoverCompletedWrappedExecution(
+      return recoverReclaimedResumeResult(
         store,
         adapter,
         effectiveProjection,
@@ -443,59 +581,26 @@ export async function resumeRuntime(
         `Wrapped same-session resume verified the requested session but runtime persistence did not complete cleanly. ${
           resumeResult.warning ?? "No durable host completion could be recovered."
         }`,
-        resumeResult.stoppedAt
+        resumeResult.stoppedAt,
+        buildPreparedResult,
+        resumeEnvelope,
+        envelopePath,
+        diagnostics,
+        "recovered resume finalization"
       );
-      diagnostics.push(...recoveredResume.diagnostics);
-      if (!recoveredResume.execution) {
-        return buildPreparedResult(recoveredResume.projection);
-      }
-      effectiveProjection = recoveredResume.projection;
-      const recoveredAttachment = effectiveProjection.attachments.get(target.attachment.id);
-      const recoveredClaim = effectiveProjection.claims.get(target.claim.id);
-      if (!recoveredAttachment || !recoveredClaim) {
-        throw new Error(
-          `Attachment ${target.attachment.id} or claim ${target.claim.id} disappeared during recovered resume finalization.`
-        );
-      }
-      const finalArtifacts = await buildResumeArtifactsFromProjection(
+    }
+    case "unverified_failed": {
+      const failedResume = await AttachmentLifecycleService.orphanAttachmentClaimAndRequeue(
         store,
         adapter,
         effectiveProjection,
-        true
+        target.attachment,
+        target.claim,
+        resumeResult.warning ?? "Wrapped same-session resume failed.",
+        resumeWriteOptions
       );
-      diagnostics.push(
-        ...(await persistResumeEnvelopeAndTelemetry(
-          store,
-          adapter,
-          effectiveProjection,
-          finalArtifacts.envelope ?? resumeEnvelope,
-          undefined
-        ))
-      );
-      return {
-        mode: "reclaimed",
-        projection: effectiveProjection,
-        brief: finalArtifacts.brief,
-        envelope: finalArtifacts.envelope ?? resumeEnvelope,
-        envelopePath,
-        diagnostics,
-        execution: recoveredResume.execution,
-        attachment: recoveredAttachment,
-        claim: recoveredClaim
-      };
-    }
-    case "unverified_failed": {
-    const failedResume = await AttachmentLifecycleService.orphanAttachmentClaimAndRequeue(
-      store,
-      adapter,
-      effectiveProjection,
-      target.attachment,
-      target.claim,
-      resumeResult.warning ?? "Wrapped same-session resume failed.",
-      resumeWriteOptions
-    );
-    diagnostics.push(...failedResume.diagnostics);
-    return buildPreparedResult(failedResume.projection);
+      diagnostics.push(...failedResume.diagnostics);
+      return buildPreparedResult(failedResume.projection);
     }
     case "reclaimed":
       break;
@@ -545,63 +650,41 @@ export async function resumeRuntime(
         reclaimedResume.stoppedAt
       );
   } catch (error) {
-      const recoveredResume = await recoverCompletedWrappedExecution(
-        store,
-        adapter,
-        effectiveProjection,
-        assignment.id,
-        target.attachment.id,
-        target.claim.id,
-        reclaimedResume.verifiedSessionId,
-        resumeWriteOptions,
-        `Runtime event persistence was interrupted after wrapped same-session resume completed durably. ${
-          error instanceof Error ? error.message : String(error)
-      }`,
-      reclaimedResume.stoppedAt
-    );
-    diagnostics.push(...recoveredResume.diagnostics);
-    if (!recoveredResume.execution) {
-      return buildPreparedResult(recoveredResume.projection);
-    }
-    effectiveProjection = recoveredResume.projection;
-  }
-  const resumedAttachment = effectiveProjection.attachments.get(target.attachment.id);
-  const resumedClaim = effectiveProjection.claims.get(target.claim.id);
-  if (!resumedAttachment || !resumedClaim) {
-    throw new Error(
-      `Attachment ${target.attachment.id} or claim ${target.claim.id} disappeared during resume finalization.`
-    );
-  }
-
-  const finalArtifacts = await buildResumeArtifactsFromProjection(
-    store,
-    adapter,
-    effectiveProjection,
-    true
-  );
-  diagnostics.push(
-    ...(await persistResumeEnvelopeAndTelemetry(
+    return recoverReclaimedResumeResult(
       store,
       adapter,
       effectiveProjection,
-      finalArtifacts.envelope ?? resumeEnvelope,
-      undefined
-    ))
-  );
-  return {
-    mode: "reclaimed",
-    projection: effectiveProjection,
-    brief: finalArtifacts.brief,
-    envelope: finalArtifacts.envelope ?? resumeEnvelope,
+      assignment.id,
+      target.attachment.id,
+      target.claim.id,
+      reclaimedResume.verifiedSessionId,
+      resumeWriteOptions,
+      `Runtime event persistence was interrupted after wrapped same-session resume completed durably. ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      reclaimedResume.stoppedAt,
+      buildPreparedResult,
+      resumeEnvelope,
+      envelopePath,
+      diagnostics,
+      "resume finalization"
+    );
+  }
+  return buildReclaimedResumeResultForTarget(
+    store,
+    adapter,
+    effectiveProjection,
+    resumeEnvelope,
     envelopePath,
     diagnostics,
-    execution: {
+    {
       outcome: reclaimedResume.outcome,
       run: reclaimedResume.run
     },
-    attachment: resumedAttachment,
-    claim: resumedClaim
-  };
+    target.attachment.id,
+    target.claim.id,
+    "resume finalization"
+  );
 }
 
 export async function runRuntime(
