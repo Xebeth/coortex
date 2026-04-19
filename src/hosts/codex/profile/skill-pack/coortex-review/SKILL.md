@@ -82,6 +82,10 @@ These match the built-in lens ids configured by `review-baseline` and used by
 Even for a bounded review, keep the user informed with brief plan/progress
 updates when the review takes more than one phase.
 
+- Use the conversation `update_plan` tool at the start and after each major
+  phase boundary when the review spans multiple phases.
+- Do not rely only on prose status messages when `update_plan` is available.
+
 - At the start, state the bounded scope and next review step.
 - If you expand to inspect sibling paths or run executable evidence, mention
   that before doing it.

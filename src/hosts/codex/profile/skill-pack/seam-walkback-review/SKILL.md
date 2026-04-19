@@ -25,6 +25,11 @@ This skill turns that work into a repeatable loop:
 Keep a short conversation-visible plan/progress list updated while this skill
 runs so the user can tell what is happening.
 
+- Use the conversation `update_plan` tool at the start and after each major
+  phase boundary. Keep exactly one step `in_progress` and move it forward as
+  the workflow advances.
+- Do not rely only on prose status messages when `update_plan` is available.
+
 - At the start, state the current cluster or seam and the next planned step.
 - After each major phase boundary, update the in-conversation plan/progress
   before diving back into execution.
@@ -33,6 +38,12 @@ runs so the user can tell what is happening.
 - These updates are status signals, not approval checkpoints. Unless the user
   explicitly asks you to pause or you are genuinely blocked, continue after the
   update without waiting for acknowledgment.
+- After a successful verification+commit boundary, immediately continue to the
+  next bounded slice when one exists. Do not end with "if you want, I can
+  continue" or similar handoff wording unless a real terminal condition is met.
+- Terminal conditions for this workflow are: explicit user stop, explicit slice
+  budget reached, no bounded next slice, or a genuine blocker that prevents
+  continued execution.
 
 ## When to use it
 

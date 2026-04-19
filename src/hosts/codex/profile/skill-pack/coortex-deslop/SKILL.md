@@ -162,6 +162,10 @@ Report:
 
 Keep the user informed while the cleanup pass runs.
 
+- Use the conversation `update_plan` tool at the start and after each major
+  cleanup pass or gate rerun.
+- Do not rely only on prose status messages when `update_plan` is available.
+
 - At the start, state the bounded scope, behavior lock, and first cleanup pass.
 - After each major cleanup pass or gate rerun, update the in-conversation
   progress before continuing.

@@ -16,6 +16,11 @@ When a project has recurring narrow review modes, this skill may also write stan
 Keep a short conversation-visible plan/progress list updated while baseline work
 runs so the user can see which phase is in flight.
 
+- Use the conversation `update_plan` tool at the start and after each major
+  phase boundary. Keep exactly one step `in_progress` and move it forward as
+  the baseline work advances.
+- Do not rely only on prose status messages when `update_plan` is available.
+
 - At the start, state whether you are refreshing the primary baseline or
   creating an alternative baseline and what comes next.
 - After inventory, after surface drafting, and before writing the baseline,

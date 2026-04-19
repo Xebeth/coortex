@@ -13,6 +13,11 @@ owning seam rather than patching the nearest manifestation.
 Keep a short conversation-visible plan/progress list updated while this
 workflow runs so the user can tell which family or phase is active.
 
+- Use the conversation `update_plan` tool at the start and after each major
+  phase boundary. Keep exactly one step `in_progress` and move it forward as
+  the fixer advances.
+- Do not rely only on prose status messages when `update_plan` is available.
+
 - At the start, state the active family set (or current family) and the next
   step.
 - After intake, after each family closeout, and before final verification,

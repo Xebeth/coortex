@@ -68,6 +68,11 @@ Because orchestrated review can run for a while, keep a short
 conversation-visible plan/progress list updated so the user knows what phase is
 active.
 
+- Use the conversation `update_plan` tool at the start and after each major
+  phase boundary. Keep exactly one step `in_progress` and move it forward as
+  the review advances.
+- Do not rely only on prose status messages when `update_plan` is available.
+
 - At the start, state the review mode and the next phase.
 - After prep, after lane spawning, and before final synthesis, update the
   in-conversation plan/progress.
