@@ -15,6 +15,7 @@ TRACE_PHASES = {
     "prep",
     "lane_plan",
     "lane_result",
+    "omission_followup",
     "family_synthesis",
     "refreshed_review_handoff",
     "final_review",
@@ -49,6 +50,11 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "thin_areas": "list",
         "stop_reason": "string",
         "coverage_confidence": "string",
+        "omission_entries": "list",
+    },
+    "omission_followup": {
+        "source_lane_ids": "list",
+        "followup_decisions": "list",
     },
     "family_synthesis": {
         "family_id": "string",
@@ -87,6 +93,31 @@ FOCUS_ALIASES = {
     "separation_of_concerns": "soc",
     "separation of concerns": "soc",
     "separation-concerns": "soc",
+}
+
+KNOWN_OMISSION_KINDS = {
+    "skipped-area",
+    "thin-area",
+}
+
+KNOWN_OMISSION_DISPOSITIONS = {
+    "ignore",
+    "carry-thin",
+    "spawn-follow-up",
+}
+
+KNOWN_FOLLOWUP_LANE_TYPES = {
+    "coverage-lane",
+    "family-exploration-lane",
+    "return-review-lane",
+    "deferred-thread-exploration-lane",
+}
+
+KNOWN_FOLLOWUP_DECISIONS = {
+    "ignored",
+    "carried-thin",
+    "spawned-follow-up",
+    "declined-follow-up",
 }
 
 def load_json_object(path: pathlib.Path) -> dict[str, Any]:
@@ -217,6 +248,80 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
     if phase == "family_synthesis" and lane_id is not None:
         errors.append(f"{prefix} phase {phase!r} should not include lane_id")
 
+    if phase == "lane_result":
+        errors.extend(validate_omission_entries(record.get("omission_entries"), f"{prefix} phase {phase!r}"))
+    if phase == "omission_followup":
+        errors.extend(validate_followup_decisions(record, f"{prefix} phase {phase!r}"))
+
+    return errors
+
+
+def validate_omission_entries(value: Any, prefix: str) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(value, list):
+        return [f"{prefix} field omission_entries must be a list"]
+    for index, entry in enumerate(value):
+        entry_prefix = f"{prefix} omission_entries[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{entry_prefix} must be a mapping")
+            continue
+        omission_id = entry.get("omission_id")
+        if not isinstance(omission_id, str) or not omission_id.strip():
+            errors.append(f"{entry_prefix} omission_id must be a non-empty string")
+        kind = entry.get("kind")
+        if kind not in KNOWN_OMISSION_KINDS:
+            errors.append(f"{entry_prefix} kind must be one of {sorted(KNOWN_OMISSION_KINDS)}")
+        area = entry.get("area")
+        if not isinstance(area, str) or not area.strip():
+            errors.append(f"{entry_prefix} area must be a non-empty string")
+        reason = entry.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            errors.append(f"{entry_prefix} reason must be a non-empty string")
+        disposition = entry.get("disposition")
+        if disposition not in KNOWN_OMISSION_DISPOSITIONS:
+            errors.append(
+                f"{entry_prefix} disposition must be one of {sorted(KNOWN_OMISSION_DISPOSITIONS)}"
+            )
+            continue
+        if disposition == "spawn-follow-up":
+            lane_type = entry.get("suggested_lane_type")
+            if lane_type not in KNOWN_FOLLOWUP_LANE_TYPES:
+                errors.append(
+                    f"{entry_prefix} suggested_lane_type must be one of {sorted(KNOWN_FOLLOWUP_LANE_TYPES)} when disposition is 'spawn-follow-up'"
+                )
+            target = entry.get("suggested_target")
+            if not isinstance(target, str) or not target.strip():
+                errors.append(
+                    f"{entry_prefix} suggested_target must be a non-empty string when disposition is 'spawn-follow-up'"
+                )
+    return errors
+
+
+def validate_followup_decisions(record: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    source_lane_ids = record.get("source_lane_ids")
+    if not isinstance(source_lane_ids, list):
+        errors.append(f"{prefix} field source_lane_ids must be a list")
+    followup_decisions = record.get("followup_decisions")
+    if not isinstance(followup_decisions, list):
+        return errors + [f"{prefix} field followup_decisions must be a list"]
+    for index, entry in enumerate(followup_decisions):
+        entry_prefix = f"{prefix} followup_decisions[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{entry_prefix} must be a mapping")
+            continue
+        for field in ("source_lane_id", "omission_id", "area", "coordinator_reason"):
+            if not isinstance(entry.get(field), str) or not str(entry.get(field)).strip():
+                errors.append(f"{entry_prefix} {field} must be a non-empty string")
+        decision = entry.get("decision")
+        if decision not in KNOWN_FOLLOWUP_DECISIONS:
+            errors.append(f"{entry_prefix} decision must be one of {sorted(KNOWN_FOLLOWUP_DECISIONS)}")
+            continue
+        if decision == "spawned-follow-up":
+            if not isinstance(entry.get("spawned_lane_id"), str) or not str(entry.get("spawned_lane_id")).strip():
+                errors.append(f"{entry_prefix} spawned_lane_id must be a non-empty string when decision is 'spawned-follow-up'")
+        if decision in {"ignored", "carried-thin", "declined-follow-up"} and entry.get("spawned_lane_id") not in (None, "", "none"):
+            errors.append(f"{entry_prefix} spawned_lane_id must be omitted unless decision is 'spawned-follow-up'")
     return errors
 
 
@@ -813,6 +918,91 @@ def resolve_full_review_baseline(args: argparse.Namespace) -> int:
     return 2
 
 
+def summarize_lane_omissions(args: argparse.Namespace) -> int:
+    lane_results: list[dict[str, Any]] = []
+    if args.lane_result_file:
+        for raw_path in args.lane_result_file:
+            path = pathlib.Path(raw_path)
+            data = load_json_object(path)
+            lane_results.append(data)
+    if args.lane_result_json:
+        for raw_json in args.lane_result_json:
+            data = json.loads(raw_json)
+            if not isinstance(data, dict):
+                raise SystemExit("lane_result_json entries must parse to objects")
+            lane_results.append(data)
+    if not lane_results:
+        raise SystemExit("provide at least one --lane-result-file or --lane-result-json")
+
+    errors: list[str] = []
+    ignore_entries: list[dict[str, Any]] = []
+    carry_entries: list[dict[str, Any]] = []
+    followup_entries: list[dict[str, Any]] = []
+    source_lane_ids: list[str] = []
+
+    for index, lane in enumerate(lane_results):
+        lane_prefix = f"lane_results[{index}]"
+        lane_id = lane.get("lane_id")
+        if not isinstance(lane_id, str) or not lane_id.strip():
+            errors.append(f"{lane_prefix} missing lane_id")
+            continue
+        source_lane_ids.append(lane_id)
+        lane_type = lane.get("lane_type")
+        if not isinstance(lane_type, str) or not lane_type.strip():
+            errors.append(f"{lane_prefix} missing lane_type")
+            lane_type = ""
+        target = lane.get("target")
+        if not isinstance(target, str) or not target.strip():
+            errors.append(f"{lane_prefix} missing target")
+            target = ""
+        scope_summary = lane.get("scope_summary")
+        if not isinstance(scope_summary, str) or not scope_summary.strip():
+            errors.append(f"{lane_prefix} missing scope_summary")
+            scope_summary = ""
+        omission_entries = lane.get("omission_entries")
+        errors.extend(validate_omission_entries(omission_entries, lane_prefix))
+        if not isinstance(omission_entries, list):
+            continue
+        for entry in omission_entries:
+            if not isinstance(entry, dict):
+                continue
+            normalized = {
+                "source_lane_id": lane_id,
+                "source_lane_type": lane_type,
+                "source_target": target,
+                "scope_summary": scope_summary,
+                "omission_id": entry.get("omission_id"),
+                "kind": entry.get("kind"),
+                "area": entry.get("area"),
+                "reason": entry.get("reason"),
+                "disposition": entry.get("disposition"),
+            }
+            if entry.get("disposition") == "ignore":
+                ignore_entries.append(normalized)
+            elif entry.get("disposition") == "carry-thin":
+                carry_entries.append(normalized)
+            elif entry.get("disposition") == "spawn-follow-up":
+                normalized["suggested_lane_type"] = entry.get("suggested_lane_type")
+                normalized["suggested_target"] = entry.get("suggested_target")
+                followup_entries.append(normalized)
+
+    output = {
+        "mode": "review-omission-summary",
+        "omission_summary": {
+            "source_lane_ids": source_lane_ids,
+            "ignored": ignore_entries,
+            "carry_thin": carry_entries,
+            "spawn_follow_up": followup_entries,
+        },
+    }
+    if errors:
+        output["errors"] = errors
+        print(json.dumps(output, indent=2, sort_keys=True))
+        return 2
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return 0
+
+
 def anchored_patterns(surface: dict[str, Any]) -> list[str]:
     return normalize_string_list(surface.get("primary_anchors")) + normalize_string_list(
         surface.get("supporting_anchors")
@@ -1143,6 +1333,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional user-provided explicit baseline path, absolute or project-relative.",
     )
     baseline.set_defaults(func=resolve_full_review_baseline)
+
+    omissions = subparsers.add_parser(
+        "summarize-lane-omissions",
+        help="Validate and summarize machine-readable omission entries from one or more lane results.",
+    )
+    omissions.add_argument(
+        "--lane-result-file",
+        action="append",
+        default=[],
+        help="Path to a lane result JSON file. Repeat for multiple results.",
+    )
+    omissions.add_argument(
+        "--lane-result-json",
+        action="append",
+        default=[],
+        help="Inline lane result JSON object. Repeat for multiple results.",
+    )
+    omissions.set_defaults(func=summarize_lane_omissions)
 
     narrowing = subparsers.add_parser(
         "validate-full-review-narrowing",

@@ -42,6 +42,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
    - if the user asks for a run-local narrowing inside the selected baseline, infer a candidate surface/path-subset/focus tuple from the user's wording, serialize the selected baseline to JSON, and run the bundled narrowing helper before prep
    - run full-review prep
    - spawn coverage lanes, using bounded waves when required lane count exceeds current subagent capacity
+   - when completed lanes return structured `omission_entries`, run the bundled omission helper before synthesis and treat its output as the deterministic omission-action input
    - group coverage findings into candidate defect families
    - spawn mandatory family-exploration lanes, using bounded waves when required lane count exceeds current subagent capacity
 5. If this is a targeted return review:
@@ -53,6 +54,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
    - spawn return-review lanes, using bounded waves when required lane count exceeds current subagent capacity
    - if the fixer reported deferred families that materially overlap the current diff or no longer look safely deferrable, spawn family-local or broader cross-family re-review lanes for those families too
    - if the fixer reported grounded deferred threads, spawn targeted exploration lanes for those threads, also using bounded waves when required
+   - when completed lanes return structured `omission_entries`, run the bundled omission helper before synthesis and treat its output as the deterministic omission-action input
 6. Synthesize the final review result.
 7. In targeted return-review mode, when any families remain actionable after synthesis, emit a refreshed open-families-only `review_handoff` for the next fixer slice.
    - when deferred families are only being carried forward, use the bundled helper to assemble that refreshed handoff skeleton
@@ -89,6 +91,7 @@ In targeted return-review mode, stay family-local and review the completed fix a
 - In targeted return-review mode, do not reactivate dormant deferred families by default. When a fixer-reported deferred family is `user-scope-excluded`, `touch_state: not-started`, and the current diff still does not overlap its owning seam, keep it visible in review output and ledger but leave it out of the refreshed downstream `review_handoff` unless the user explicitly re-includes it.
 - Use the bundled `scripts/return_review_state.py` helper for deterministic deferred-family validation/classification and keep the model focused on the judgment calls the script cannot make. Serialize the relevant handoff blocks to JSON before invoking it.
 - Use the bundled `scripts/return_review_state.py` helper for deterministic trace path/file handling and carried-deferred handoff assembly. Keep the model focused on review judgments and evidence.
+- Use the bundled `scripts/return_review_state.py summarize-lane-omissions ...` helper for deterministic omission bucketing before synthesis. Keep the model focused on judging whether a `spawn-follow-up` candidate really deserves a new lane.
 - Use the repository family ledger on disk to track which families were deemed closed and later reopened. Treat repeated reopenings as a workflow-quality/debugging signal.
 - Use the bundled helper, not prose reconstruction, to decide which reopened families from the current run should be surfaced to the user.
 - Do not rely on vague "this surface seems fine" boundedness judgments. Use explicit split triggers and record boundedness exceptions whenever a large slice is kept intact.
@@ -220,6 +223,8 @@ Use the refusal rules from `references/prep-and-refusal.md`.
 - In targeted return-review mode, do not silently lose untouched but still-actionable fixer families. Either carry them forward structurally or reopen broader exploration when the new evidence points to a shared root cause across family boundaries.
 - In targeted return-review mode, do not preserve a deferred-family classification when the family was materially started and left half-done. Rebuild it as an open family with reviewer-backed open-status reasoning instead.
 - In both full discovery and targeted return review, wait for the required independent lane results. If a lane is slow or capacity-limited, schedule it later or relaunch it; do not silently replace it with coordinator-local review work.
+- When a lane reports omission entries with disposition `spawn-follow-up`, either spawn a bounded follow-up lane or append an `omission_followup` trace record explaining why the follow-up was declined. Do not silently drop the omission signal.
+- When a lane reports omission entries with disposition `carry-thin`, preserve that omission in synthesis as a confidence-reducing thin-area signal rather than treating it as no-action.
 - If independent review could not be completed for a required return-review family, emit `unverified` for that family's closure-claim verdict instead of inferring a verdict from local evidence alone.
 - Use the final-review output contract in `references/report-contract.md` for which lane-level and family-level self-check signals must surface in synthesis.
 - Keep the detailed `review_shape_trace`, `unexplored_area_ledger`, and `boundedness_exceptions` on disk in the trace artifacts by default.

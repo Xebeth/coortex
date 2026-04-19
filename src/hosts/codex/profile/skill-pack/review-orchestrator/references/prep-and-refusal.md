@@ -61,6 +61,21 @@ surface/path/focus tuple.
 8. Assess boundedness of each touched surface slice.
 9. Keep the baseline-configured lenses unchanged and carry any validated
    run-local focus override as separate emphasis metadata for this run; the override may be a built-in lens id used as extra runtime focus or a runtime-only emphasis token.
+10. When completed coverage or return-review lanes emit `omission_entries`,
+    run the bundled omission helper before synthesis:
+
+```bash
+python scripts/return_review_state.py summarize-lane-omissions \
+  --lane-result-file <lane-json> \
+  [--lane-result-file <lane-json> ...]
+```
+
+Treat the helper output as the deterministic starting point for omission
+handling:
+- `ignored` means no coordinator follow-up is required
+- `carry_thin` means preserve the omission as a confidence caveat
+- `spawn_follow_up` means the coordinator must either spawn a bounded
+  follow-up lane or record an explicit declined-follow-up reason in trace
 
 Boundedness assessment must use explicit split triggers, not only intuition.
 For each touched surface slice, record:

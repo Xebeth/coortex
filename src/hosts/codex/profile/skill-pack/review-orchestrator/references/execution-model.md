@@ -59,6 +59,13 @@ If any split trigger fires but the surface is kept as one lane anyway:
 Every coverage lane must emit the coverage-lane contract from
 `references/report-contract.md`.
 
+When completed coverage or return-review lanes report machine-readable
+`omission_entries`, run the bundled omission helper before synthesis:
+- bucket `ignore` omissions as no-action
+- preserve `carry-thin` omissions for confidence rollup
+- treat `spawn-follow-up` omissions as follow-up candidates that require either
+  a bounded new lane or an explicit declined reason recorded in trace
+
 ## Return-review lanes
 
 Default unit:
@@ -105,6 +112,9 @@ Each return-review lane must emit the family-local return-review contract from
 If a return-review lane shows the family still remains open and actionable, the
 lane evidence should be rich enough for synthesis to rebuild a refreshed
 downstream family entry instead of leaving only a verdict row.
+
+When a return-review lane emits `omission_entries`, use the same omission helper
+and trace discipline as coverage lanes before trusting closure confidence.
 
 `unverified` is coordinator-only:
 - use it only when no required independent family-local lane result completed
@@ -165,6 +175,11 @@ The coordinator must:
 - spawn return-review lanes for targeted return review
 - spawn deferred-thread exploration lanes for grounded deferred threads in targeted return review
 - queue excess lanes in bounded waves when required lane count exceeds current subagent capacity
+- when lane omissions are summarized as `spawn-follow-up`, either spawn a
+  bounded follow-up lane or record an explicit declined-follow-up decision with
+  a coordinator reason
+- carry `carry-thin` omissions into synthesis as confidence-reducing thin-area
+  signals instead of silently dropping them
 - wait patiently for required independent lane results instead of taking over their substantive review work
 - relaunch or retry a stalled lane before giving up on it
 - do not interrupt an active lane merely to force a bounded finish, stop scope expansion mid-pass, or demand a premature best-effort result

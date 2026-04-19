@@ -8,6 +8,7 @@ Use the bundled helper for deterministic path/file management:
 python scripts/return_review_state.py init-trace --mode <mode>
 python scripts/return_review_state.py lane-trace-file --trace-dir <dir> --lane-type <type> --session-id <id> --family-id <family_id> --family-name "<family name>"
 python scripts/return_review_state.py append-trace --trace-file <path> --record-file <json-file>
+python scripts/return_review_state.py summarize-lane-omissions --lane-result-file <lane-json> [--lane-result-file <lane-json> ...]
 python scripts/return_review_state.py append-family-ledger --run-id <run_id> --review-mode <mode> --review-target-mode <target_mode> --review-target-summary "<summary>" --family-id <family_id> --family-state <state>
 python scripts/return_review_state.py current-run-reopens --run-id <run_id>
 ```
@@ -18,6 +19,7 @@ The helper owns:
 - lane filename construction
 - JSONL append mechanics
 - trace-record validation for known phase-boundary record types
+- structured omission-entry validation and omission-summary bucketing
 - repository family-ledger append/summary mechanics
 - current-run reopened-family summary mechanics
 
@@ -61,6 +63,7 @@ At minimum, append these record types when applicable:
 - `prep`
 - `lane_plan`
 - `lane_result`
+- `omission_followup`
 - `family_synthesis`
 - `refreshed_review_handoff`
 - `final_review`
@@ -114,9 +117,32 @@ Include:
 - `thin_areas`
 - `stop_reason`
 - `coverage_confidence`
+- `omission_entries`
 
 `files_read` and `docs_read` should list the material files/docs the lane relied
 on, not every incidental read.
+
+`omission_entries` should preserve the lane's machine-readable omission
+dispositions so later coordinator decisions are traceable on disk even when
+normal output only surfaces the high-level confidence summary.
+
+## Omission-followup record
+
+Include:
+- `source_lane_ids`
+- `followup_decisions`
+
+For each `followup_decisions` entry include:
+- `source_lane_id`
+- `omission_id`
+- `area`
+- `decision`
+  - `ignored`
+  - `carried-thin`
+  - `spawned-follow-up`
+  - `declined-follow-up`
+- `coordinator_reason`
+- `spawned_lane_id` when a follow-up lane was actually created
 
 ## Family-synthesis record
 

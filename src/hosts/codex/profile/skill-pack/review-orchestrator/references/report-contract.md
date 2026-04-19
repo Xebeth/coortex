@@ -61,6 +61,7 @@ Also include:
 - `stop_reason`
 - `coverage_confidence`
 - `thin_areas`
+- `omission_entries`
 - local family status:
   - `isolated`
   - `local-family`
@@ -81,6 +82,21 @@ Rules:
   - `candidate_root_cause`
   - `manifestations`
   - `family_status`
+- `omission_entries` should be an explicit structured list. Use `[]` when no material omission remains.
+- For each omission entry include:
+  - `omission_id`
+  - `kind`
+    - `skipped-area`
+    - `thin-area`
+  - `area`
+  - `reason`
+  - `disposition`
+    - `ignore`
+    - `carry-thin`
+    - `spawn-follow-up`
+  - when `disposition` is `spawn-follow-up`, also include:
+    - `suggested_lane_type`
+    - `suggested_target`
 
 Use these `family_status` tokens for coverage lanes:
 - `isolated`
@@ -107,6 +123,7 @@ Required fields:
 - `stop_reason`
 - `coverage_confidence`
 - `thin_areas`
+- `omission_entries`
 
 Closure status values:
 - `isolated`
@@ -119,6 +136,7 @@ Rules:
 - Use the same self-check discipline as coverage lanes.
 - `material_evidence_actions` should make the exploration lane's search behavior inspectable: key files/docs read, search pivots used, candidate manifestations rejected, and sibling paths checked.
 - `thin_areas` must be explicit for exploration lanes too. Use `none` when nothing material was left unexplored inside the family lane.
+- `omission_entries` must be explicit for exploration lanes too. Use `[]` when nothing material remains actionable from skipped/thin coverage inside the family lane.
 - `sibling_search_scope` must state where sibling exploration was attempted, even when no sibling bugs were found.
 
 ## Final review output

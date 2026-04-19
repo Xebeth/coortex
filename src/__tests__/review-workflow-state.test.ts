@@ -852,7 +852,8 @@ test("orchestrator trace helper validates lane result records before appending",
       skipped_areas: ["none"],
       thin_areas: ["legacy no-snapshot replay not reproduced"],
       stop_reason: "bounded surface reviewed",
-      coverage_confidence: "high"
+      coverage_confidence: "high",
+      omission_entries: []
     })
   ]);
 
@@ -912,6 +913,289 @@ test("orchestrator trace helper validates lane result records before appending",
   assert.ok(
     invalidJson.errors.some((error) =>
       error.includes("missing coverage_confidence")
+    )
+  );
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("missing omission_entries")
+    )
+  );
+});
+
+test("omission helper buckets ignore carry-thin and follow-up entries deterministically", async () => {
+  const result = await runPythonJson(returnReviewStateScript, [
+    "summarize-lane-omissions",
+    "--lane-result-json",
+    JSON.stringify({
+      lane_id: "coverage-runtime-authority-01",
+      lane_type: "coverage-lane",
+      target: "runtime-authority",
+      scope_summary: "runtime authority surface",
+      omission_entries: [
+        {
+          omission_id: "O1",
+          kind: "skipped-area",
+          area: "src/core/retry-policy.ts",
+          reason: "outside bounded coverage slice",
+          disposition: "ignore"
+        },
+        {
+          omission_id: "O2",
+          kind: "thin-area",
+          area: "src/core/replay.ts",
+          reason: "adjacent replay branch not reproduced",
+          disposition: "carry-thin"
+        },
+        {
+          omission_id: "O3",
+          kind: "thin-area",
+          area: "src/core/lease-handshake.ts",
+          reason: "ownership fence branch stayed materially relevant",
+          disposition: "spawn-follow-up",
+          suggested_lane_type: "coverage-lane",
+          suggested_target: "src/core/lease-handshake.ts"
+        }
+      ]
+    }),
+    "--lane-result-json",
+    JSON.stringify({
+      lane_id: "return-review-F05-01",
+      lane_type: "return-review-lane",
+      target: "F05",
+      scope_summary: "family-local return review",
+      omission_entries: []
+    })
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.json, {
+    mode: "review-omission-summary",
+    omission_summary: {
+      source_lane_ids: ["coverage-runtime-authority-01", "return-review-F05-01"],
+      ignored: [
+        {
+          area: "src/core/retry-policy.ts",
+          disposition: "ignore",
+          kind: "skipped-area",
+          omission_id: "O1",
+          reason: "outside bounded coverage slice",
+          scope_summary: "runtime authority surface",
+          source_lane_id: "coverage-runtime-authority-01",
+          source_lane_type: "coverage-lane",
+          source_target: "runtime-authority"
+        }
+      ],
+      carry_thin: [
+        {
+          area: "src/core/replay.ts",
+          disposition: "carry-thin",
+          kind: "thin-area",
+          omission_id: "O2",
+          reason: "adjacent replay branch not reproduced",
+          scope_summary: "runtime authority surface",
+          source_lane_id: "coverage-runtime-authority-01",
+          source_lane_type: "coverage-lane",
+          source_target: "runtime-authority"
+        }
+      ],
+      spawn_follow_up: [
+        {
+          area: "src/core/lease-handshake.ts",
+          disposition: "spawn-follow-up",
+          kind: "thin-area",
+          omission_id: "O3",
+          reason: "ownership fence branch stayed materially relevant",
+          scope_summary: "runtime authority surface",
+          source_lane_id: "coverage-runtime-authority-01",
+          source_lane_type: "coverage-lane",
+          source_target: "runtime-authority",
+          suggested_lane_type: "coverage-lane",
+          suggested_target: "src/core/lease-handshake.ts"
+        }
+      ]
+    }
+  });
+});
+
+test("omission helper rejects malformed omission entries with structured errors", async () => {
+  const result = await runPythonJson(returnReviewStateScript, [
+    "summarize-lane-omissions",
+    "--lane-result-json",
+    JSON.stringify({
+      lane_id: "coverage-runtime-authority-01",
+      lane_type: "coverage-lane",
+      target: "runtime-authority",
+      scope_summary: "runtime authority surface",
+      omission_entries: [
+        {
+          omission_id: "O3",
+          kind: "thin-area",
+          area: "src/core/lease-handshake.ts",
+          reason: "ownership fence branch stayed materially relevant",
+          disposition: "spawn-follow-up",
+          suggested_lane_type: "coverage-lane"
+        }
+      ]
+    })
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  assert.deepEqual(result.json, {
+    errors: [
+      "lane_results[0] omission_entries[0] suggested_target must be a non-empty string when disposition is 'spawn-follow-up'"
+    ],
+    mode: "review-omission-summary",
+    omission_summary: {
+      source_lane_ids: ["coverage-runtime-authority-01"],
+      ignored: [],
+      carry_thin: [],
+      spawn_follow_up: [
+        {
+          area: "src/core/lease-handshake.ts",
+          disposition: "spawn-follow-up",
+          kind: "thin-area",
+          omission_id: "O3",
+          reason: "ownership fence branch stayed materially relevant",
+          scope_summary: "runtime authority surface",
+          source_lane_id: "coverage-runtime-authority-01",
+          source_lane_type: "coverage-lane",
+          source_target: "runtime-authority",
+          suggested_lane_type: "coverage-lane",
+          suggested_target: null
+        }
+      ]
+    }
+  });
+});
+
+test("omission helper rejects lane results missing follow-up-bounding fields", async () => {
+  const result = await runPythonJson(returnReviewStateScript, [
+    "summarize-lane-omissions",
+    "--lane-result-json",
+    JSON.stringify({
+      lane_id: "coverage-runtime-authority-01",
+      omission_entries: [
+        {
+          omission_id: "O1",
+          kind: "thin-area",
+          area: "src/core/lease-handshake.ts",
+          reason: "ownership fence branch stayed materially relevant",
+          disposition: "carry-thin"
+        }
+      ]
+    })
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  const invalidJson = result.json as {
+    errors: string[];
+    omission_summary: {
+      source_lane_ids: string[];
+      carry_thin: Array<Record<string, unknown>>;
+    };
+  };
+  assert.deepEqual(invalidJson.omission_summary.source_lane_ids, [
+    "coverage-runtime-authority-01"
+  ]);
+  assert.ok(invalidJson.errors.includes("lane_results[0] missing lane_type"));
+  assert.ok(invalidJson.errors.includes("lane_results[0] missing target"));
+  assert.ok(invalidJson.errors.includes("lane_results[0] missing scope_summary"));
+  assert.deepEqual(invalidJson.omission_summary.carry_thin, [
+    {
+      area: "src/core/lease-handshake.ts",
+      disposition: "carry-thin",
+      kind: "thin-area",
+      omission_id: "O1",
+      reason: "ownership fence branch stayed materially relevant",
+      scope_summary: "",
+      source_lane_id: "coverage-runtime-authority-01",
+      source_lane_type: "",
+      source_target: ""
+    }
+  ]);
+});
+
+test("orchestrator trace helper validates omission follow-up records before appending", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
+  const traceFile = join(tempDir, "coordinator.jsonl");
+
+  const valid = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "review-orchestrator-full-review-20260419T120000Z",
+      timestamp_utc: "2026-04-19T12:00:00Z",
+      skill: "review-orchestrator",
+      mode: "full-review",
+      phase: "omission_followup",
+      review_target: { mode: "branch", scope_summary: "test" },
+      source_lane_ids: ["coverage-runtime-authority-01"],
+      followup_decisions: [
+        {
+          source_lane_id: "coverage-runtime-authority-01",
+          omission_id: "O3",
+          area: "src/core/lease-handshake.ts",
+          decision: "spawned-follow-up",
+          coordinator_reason: "thin area remained materially review-relevant",
+          spawned_lane_id: "coverage-runtime-authority-followup-01"
+        },
+        {
+          source_lane_id: "coverage-runtime-authority-01",
+          omission_id: "O2",
+          area: "src/core/replay.ts",
+          decision: "carried-thin",
+          coordinator_reason: "confidence caveat preserved for synthesis"
+        }
+      ]
+    })
+  ]);
+
+  assert.equal(valid.exitCode, 0);
+  assert.deepEqual(valid.json, {
+    appended: true,
+    status: "ok",
+    trace_file: traceFile
+  });
+
+  const invalid = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "review-orchestrator-full-review-20260419T120000Z",
+      timestamp_utc: "2026-04-19T12:01:00Z",
+      skill: "review-orchestrator",
+      mode: "full-review",
+      phase: "omission_followup",
+      review_target: { mode: "branch", scope_summary: "test" },
+      source_lane_ids: ["coverage-runtime-authority-01"],
+      followup_decisions: [
+        {
+          source_lane_id: "coverage-runtime-authority-01",
+          omission_id: "O3",
+          area: "src/core/lease-handshake.ts",
+          decision: "declined-follow-up",
+          coordinator_reason: "follow-up would duplicate an existing family lane",
+          spawned_lane_id: "coverage-runtime-authority-followup-01"
+        }
+      ]
+    })
+  ]);
+
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as {
+    appended: boolean;
+    errors: string[];
+    status: string;
+  };
+  assert.equal(invalidJson.appended, false);
+  assert.equal(invalidJson.status, "error");
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("spawned_lane_id must be omitted unless decision is 'spawned-follow-up'")
     )
   );
 });
