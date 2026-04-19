@@ -22,3 +22,13 @@ export async function recordTelemetryWarningDiagnostics(
   );
   return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
 }
+
+export function hostRunPersistDiagnostics(
+  assignmentId: string,
+  cleanupError: Error
+): CommandDiagnostic[] {
+  return diagnosticsFromWarning(
+    `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
+    "host-run-persist-failed"
+  );
+}

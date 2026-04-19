@@ -25,7 +25,11 @@ import {
 import { RuntimeStore } from "../persistence/store.js";
 
 import type { CommandDiagnostic } from "./types.js";
-import { diagnosticsFromWarning, recordTelemetryWarningDiagnostics } from "./diagnostics.js";
+import {
+  diagnosticsFromWarning,
+  hostRunPersistDiagnostics,
+  recordTelemetryWarningDiagnostics
+} from "./diagnostics.js";
 
 type WorkflowHiddenCleanup = ReturnType<typeof buildWorkflowHiddenRunCleanup>;
 type WorkflowStaleRecovery = ReturnType<typeof buildWorkflowStaleRunRecovery>;
@@ -345,12 +349,7 @@ async function cleanupRunArtifactsWithDiagnostics(
 ): Promise<WorkflowCleanupResult> {
   const cleanupError = await cleanupRunArtifacts(store, adapter, record);
   return {
-    diagnostics: cleanupError
-      ? diagnosticsFromWarning(
-          `Host run reconciliation artifacts could not be updated for assignment ${record.assignmentId}. ${cleanupError.message}`,
-          "host-run-persist-failed"
-        )
-      : [],
+    diagnostics: cleanupError ? hostRunPersistDiagnostics(record.assignmentId, cleanupError) : [],
     clearedLease: !cleanupError
   };
 }

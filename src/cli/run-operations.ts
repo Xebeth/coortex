@@ -15,18 +15,12 @@ import { RuntimeStore } from "../persistence/store.js";
 import { deriveWorkflowSummary } from "../workflows/index.js";
 
 import type { CommandDiagnostic } from "./types.js";
-import { diagnosticsFromWarning, recordTelemetryWarningDiagnostics } from "./diagnostics.js";
+import {
+  diagnosticsFromWarning,
+  hostRunPersistDiagnostics,
+  recordTelemetryWarningDiagnostics
+} from "./diagnostics.js";
 import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
-
-function hostRunPersistDiagnostics(
-  assignmentId: string,
-  cleanupError: Error
-): CommandDiagnostic[] {
-  return diagnosticsFromWarning(
-    `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-    "host-run-persist-failed"
-  );
-}
 
 function buildStaleRunTelemetryCapture(
   sessionId: string,
