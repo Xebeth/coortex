@@ -33,13 +33,16 @@ export function buildCompletedRunRecord(
   completedAt: string,
   options: HostRunRecordStampOptions = {}
 ): HostRunRecord {
+  const completedRecordBase = {
+    assignmentId,
+    state: "completed" as const,
+    startedAt,
+    completedAt,
+    ...buildHostRunRecordStamp(options)
+  };
   if (outcome.outcome.kind === "decision") {
     return {
-      assignmentId,
-      state: "completed",
-      ...(options.workflowAttempt ? { workflowAttempt: options.workflowAttempt } : {}),
-      startedAt,
-      completedAt,
+      ...completedRecordBase,
       outcomeKind: "decision",
       summary: outcome.outcome.capture.blockerSummary,
       terminalOutcome: {
@@ -55,17 +58,12 @@ export function buildCompletedRunRecord(
             ? { decisionId: outcome.outcome.capture.decisionId }
             : {})
         }
-      },
-      ...(options.nativeRunId ? { adapterData: { nativeRunId: options.nativeRunId } } : {})
+      }
     };
   }
 
   return {
-    assignmentId,
-    state: "completed",
-    ...(options.workflowAttempt ? { workflowAttempt: options.workflowAttempt } : {}),
-    startedAt,
-    completedAt,
+    ...completedRecordBase,
     outcomeKind: "result",
     resultStatus: outcome.outcome.capture.status,
     summary: outcome.outcome.capture.summary,
@@ -79,8 +77,7 @@ export function buildCompletedRunRecord(
         createdAt: outcome.outcome.capture.createdAt ?? completedAt,
         ...(outcome.outcome.capture.resultId ? { resultId: outcome.outcome.capture.resultId } : {})
       }
-    },
-    ...(options.nativeRunId ? { adapterData: { nativeRunId: options.nativeRunId } } : {})
+    }
   };
 }
 
@@ -93,11 +90,10 @@ export function createRunningRunRecord(
   return {
     assignmentId,
     state: "running",
-    ...(options.workflowAttempt ? { workflowAttempt: options.workflowAttempt } : {}),
+    ...buildHostRunRecordStamp(options),
     startedAt,
     heartbeatAt: startedAt,
-    leaseExpiresAt: new Date(Date.parse(startedAt) + leaseMs).toISOString(),
-    ...(options.nativeRunId ? { adapterData: { nativeRunId: options.nativeRunId } } : {})
+    leaseExpiresAt: new Date(Date.parse(startedAt) + leaseMs).toISOString()
   };
 }
 
@@ -108,5 +104,12 @@ export function withRunNativeId(record: HostRunRecord, nativeRunId: string): Hos
       ...(record.adapterData ?? {}),
       nativeRunId
     }
+  };
+}
+
+function buildHostRunRecordStamp(options: HostRunRecordStampOptions) {
+  return {
+    ...(options.workflowAttempt ? { workflowAttempt: options.workflowAttempt } : {}),
+    ...(options.nativeRunId ? { adapterData: { nativeRunId: options.nativeRunId } } : {})
   };
 }
