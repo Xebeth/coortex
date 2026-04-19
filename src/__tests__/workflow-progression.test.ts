@@ -770,6 +770,105 @@ test("workflow progression reuses a durable next assignment when rewind transiti
   );
 });
 
+test("workflow progression does not reuse a prior-cycle equivalent assignment during advance convergence", async () => {
+  const planAssignment = createWorkflowAssignment(
+    "plan-assignment-advance-cycle-2",
+    "default",
+    "Produce the cycle plan artifact and review-ready evidence for the current workflow objective.",
+    "in_progress",
+    "2026-04-15T12:50:00.000Z"
+  );
+  const legacyReviewAssignment: Assignment = {
+    id: "review-assignment-cycle-1-legacy",
+    parentTaskId: "session-workflow",
+    workflow: "default",
+    ownerType: "host",
+    ownerId: "codex",
+    objective:
+      "Assess the latest accepted plan artifact carried into the current cycle and produce a review verdict.",
+    writeScope: ["src/", "docs/"],
+    requiredOutputs: ["verdict", "rationaleSummary"],
+    state: "queued",
+    createdAt: "2026-04-15T12:10:00.000Z",
+    updatedAt: "2026-04-15T12:10:00.000Z"
+  };
+  const planResult: ResultPacket = {
+    resultId: "plan-result-advance-cycle-2",
+    assignmentId: planAssignment.id,
+    producerId: "codex",
+    status: "completed",
+    summary: "Plan is ready for a new-cycle review assignment.",
+    changedFiles: [],
+    createdAt: "2026-04-15T12:51:00.000Z"
+  };
+  const projection = createWorkflowProjection({
+    currentModuleId: "plan",
+    workflowCycle: 2,
+    currentModuleAttempt: 1,
+    currentAssignment: planAssignment,
+    currentResult: planResult,
+    moduleRecords: {
+      plan: {
+        moduleId: "plan",
+        workflowCycle: 2,
+        moduleAttempt: 1,
+        assignmentId: planAssignment.id,
+        moduleState: "in_progress",
+        sourceResultIds: [],
+        sourceDecisionIds: [],
+        artifactReferences: [],
+        enteredAt: "2026-04-15T12:50:00.000Z"
+      },
+      review: {
+        moduleId: "review",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId: legacyReviewAssignment.id,
+        moduleState: "completed",
+        gateOutcome: "approved",
+        sourceResultIds: ["review-result-cycle-1"],
+        sourceDecisionIds: [],
+        artifactReferences: [],
+        enteredAt: "2026-04-15T12:10:00.000Z"
+      }
+    }
+  });
+  projection.assignments.set(legacyReviewAssignment.id, legacyReviewAssignment);
+  const artifactPath = workflowArtifactPath("default", 2, "plan", planAssignment.id, 1);
+  const store = new StaticWorkflowArtifactStore(
+    new Map([
+      [
+        artifactPath,
+        {
+          workflowId: "default",
+          workflowCycle: 2,
+          moduleId: "plan",
+          moduleAttempt: 1,
+          assignmentId: planAssignment.id,
+          createdAt: "2026-04-15T12:51:00.000Z",
+          payload: {
+            planSummary: "Plan ready for review.",
+            implementationSteps: ["Do not reuse the prior-cycle legacy review assignment."],
+            reviewEvidenceSummary: "Advance convergence should create a cycle-2 review assignment."
+          }
+        }
+      ]
+    ])
+  );
+
+  const progression = await evaluateWorkflowProgression(projection, store, {
+    timestamp: "2026-04-15T12:51:01.000Z"
+  });
+  const transition = getTransitionEvent(progression.events);
+  const createdAssignment = getCreatedAssignmentEvent(progression.events);
+
+  assert.ok(createdAssignment, "expected a new review assignment for cycle 2");
+  assert.notEqual(createdAssignment.payload.assignment.id, legacyReviewAssignment.id);
+  assert.equal(createdAssignment.payload.assignment.workflowAttempt?.workflowCycle, 2);
+  assert.equal(createdAssignment.payload.assignment.workflowAttempt?.moduleId, "review");
+  assert.equal(transition?.payload.nextAssignmentId, createdAssignment.payload.assignment.id);
+});
+
 test("workflow progression preserves explicit runtime artifact references into the next module context", async () => {
   const timestamp = "2026-04-15T13:00:00.000Z";
   const bootstrap = buildWorkflowBootstrap({

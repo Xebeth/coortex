@@ -98,6 +98,7 @@ export interface Assignment {
   workflow: string;
   ownerType: string;
   ownerId: string;
+  workflowAttempt?: WorkflowRunAttemptIdentity;
   objective: string;
   writeScope: string[];
   requiredOutputs: string[];

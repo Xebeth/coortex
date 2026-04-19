@@ -195,7 +195,6 @@ export function buildModuleTransitionEvents(
   transitionType: Extract<WorkflowTransitionType, "advance" | "rewind">,
   nextModuleId: string,
   workflowCycle: number,
-  transitionBoundaryAt: string,
   timestamp: string
 ): RuntimeEvent[] {
   const nextAssignmentResolution = resolveModuleTransitionAssignment(
@@ -204,7 +203,6 @@ export function buildModuleTransitionEvents(
     currentAssignment,
     nextModuleId,
     workflowCycle,
-    transitionBoundaryAt,
     timestamp
   );
   const events: RuntimeEvent[] = [];

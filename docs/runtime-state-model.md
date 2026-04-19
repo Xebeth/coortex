@@ -37,6 +37,17 @@ Required fields:
 
 This model must remain independent of any host-specific session identifier format.
 
+Optional workflow-mode assignment identity may also be stored when an
+assignment belongs to a workflow attempt:
+
+- `workflow_attempt.workflow_id`
+- `workflow_attempt.workflow_cycle`
+- `workflow_attempt.module_id`
+- `workflow_attempt.module_attempt`
+
+That identity is durable workflow metadata for convergence and
+recovery. It must not be derived from wall-clock ordering heuristics.
+
 ## 2. Result Packet
 
 A result packet is the durable artifact for completed or partial work output.

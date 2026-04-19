@@ -226,7 +226,6 @@ export async function evaluateWorkflowProgression(
           gateEvaluation.transition.type,
           gateEvaluation.transition.toModuleId,
           gateEvaluation.transition.workflowCycle,
-          lane.result.createdAt,
           timestamp
         )
       );

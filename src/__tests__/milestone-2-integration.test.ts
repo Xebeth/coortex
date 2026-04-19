@@ -497,6 +497,9 @@ test("milestone-2 integration: inspect converges onto a pre-created review assig
   assert.ok(createdReviewAssignment, "expected the interrupted advance to pre-create a review assignment");
 
   const reviewAssignmentId = createdReviewAssignment.payload.assignment.id;
+  const activeLeaseStartedAt = new Date(Date.now() - 60_000).toISOString();
+  const activeLeaseHeartbeatAt = new Date(Date.now() - 5_000).toISOString();
+  const activeLeaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
   const reviewRun: HostRunRecord = {
     assignmentId: reviewAssignmentId,
     state: "running",
@@ -507,9 +510,9 @@ test("milestone-2 integration: inspect converges onto a pre-created review assig
       moduleAttempt: 1
     },
     adapterData: { nativeRunId: "interrupted-advance-review-thread" },
-    startedAt: "2026-04-18T09:01:30.000Z",
-    heartbeatAt: "2026-04-18T09:01:45.000Z",
-    leaseExpiresAt: "2026-04-18T09:05:00.000Z"
+    startedAt: activeLeaseStartedAt,
+    heartbeatAt: activeLeaseHeartbeatAt,
+    leaseExpiresAt: activeLeaseExpiresAt
   };
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${reviewAssignmentId}.json`, reviewRun);
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${reviewAssignmentId}.lease.json`, reviewRun);
@@ -1062,6 +1065,9 @@ test("milestone-2 integration: inspect converges onto a pre-created review assig
   assert.ok(createdReviewAssignment, "expected the interrupted rewind to pre-create a review assignment");
 
   const rewoundReviewAssignmentId = createdReviewAssignment.payload.assignment.id;
+  const activeLeaseStartedAt = new Date(Date.now() - 60_000).toISOString();
+  const activeLeaseHeartbeatAt = new Date(Date.now() - 5_000).toISOString();
+  const activeLeaseExpiresAt = new Date(Date.now() + 60_000).toISOString();
   const rewoundReviewRun: HostRunRecord = {
     assignmentId: rewoundReviewAssignmentId,
     state: "running",
@@ -1072,9 +1078,9 @@ test("milestone-2 integration: inspect converges onto a pre-created review assig
       moduleAttempt: 1
     },
     adapterData: { nativeRunId: "interrupted-rewind-review-thread" },
-    startedAt: "2026-04-18T10:05:30.000Z",
-    heartbeatAt: "2026-04-18T10:05:45.000Z",
-    leaseExpiresAt: "2026-04-18T10:09:00.000Z"
+    startedAt: activeLeaseStartedAt,
+    heartbeatAt: activeLeaseHeartbeatAt,
+    leaseExpiresAt: activeLeaseExpiresAt
   };
   await setup.store.writeJsonArtifact(
     `adapters/codex/runs/${rewoundReviewAssignmentId}.json`,

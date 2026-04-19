@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import type {
   Assignment,
   RuntimeProjection,
-  WorkflowProgressRecord
+  WorkflowProgressRecord,
+  WorkflowRunAttemptIdentity
 } from "../core/types.js";
 import { getWorkflowModule } from "./registry.js";
 
@@ -35,7 +36,6 @@ export function resolveModuleTransitionAssignment(
   currentAssignment: Assignment,
   nextModuleId: string,
   workflowCycle: number,
-  transitionBoundaryAt: string,
   timestamp: string
 ): {
   assignment: Assignment;
@@ -52,8 +52,8 @@ export function resolveModuleTransitionAssignment(
   });
   const existingAssignment = findExistingImpliedTransitionAssignment(
     projection,
-    currentAssignment,
-    transitionBoundaryAt,
+    progress,
+    currentAssignment.id,
     assignmentTemplate
   );
   if (existingAssignment) {
@@ -97,6 +97,12 @@ function buildWorkflowAssignmentTemplate(options: {
     workflow: template.workflow,
     ownerType: template.ownerType,
     ownerId: template.ownerId,
+    workflowAttempt: {
+      workflowId: options.workflowId,
+      workflowCycle: options.workflowCycle,
+      moduleId: options.moduleId,
+      moduleAttempt: options.moduleAttempt
+    },
     objective: template.objective,
     writeScope: [...template.writeScope],
     requiredOutputs: [...template.requiredOutputs],
@@ -106,28 +112,31 @@ function buildWorkflowAssignmentTemplate(options: {
 
 function findExistingImpliedTransitionAssignment(
   projection: RuntimeProjection,
-  currentAssignment: Assignment,
-  transitionBoundaryAt: string,
+  progress: WorkflowProgressRecord,
+  currentAssignmentId: string,
   expectedAssignment: Omit<Assignment, "id" | "createdAt" | "updatedAt">
 ): Assignment | undefined {
-  const lowerBound = [currentAssignment.createdAt, currentAssignment.updatedAt, transitionBoundaryAt]
-    .sort()
-    .at(-1) ?? transitionBoundaryAt;
   return [...projection.assignments.values()]
     .filter((candidate) =>
-      candidate.id !== currentAssignment.id &&
-      candidate.createdAt >= lowerBound &&
-      isEquivalentImpliedTransitionAssignment(candidate, expectedAssignment)
+      candidate.id !== currentAssignmentId &&
+      isEquivalentImpliedTransitionAssignment(candidate, expectedAssignment, progress)
     )
     .sort(
       (left, right) =>
-        left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
+        compareTransitionAssignmentIdentity(
+          resolveWorkflowAttemptIdentity(left, progress),
+          resolveWorkflowAttemptIdentity(right, progress),
+          expectedAssignment.workflowAttempt
+        ) ||
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.id.localeCompare(right.id)
     )[0];
 }
 
 function isEquivalentImpliedTransitionAssignment(
   candidate: Assignment,
-  expectedAssignment: Omit<Assignment, "id" | "createdAt" | "updatedAt">
+  expectedAssignment: Omit<Assignment, "id" | "createdAt" | "updatedAt">,
+  progress: WorkflowProgressRecord
 ): boolean {
   if (
     candidate.parentTaskId !== expectedAssignment.parentTaskId ||
@@ -138,9 +147,84 @@ function isEquivalentImpliedTransitionAssignment(
   ) {
     return false;
   }
+  const expectedAttempt = expectedAssignment.workflowAttempt;
+  const candidateAttempt = resolveWorkflowAttemptIdentity(candidate, progress);
+  if (expectedAttempt && candidateAttempt && !workflowAttemptsMatch(candidateAttempt, expectedAttempt)) {
+    return false;
+  }
   return (
     arrayShallowEqual(candidate.writeScope, expectedAssignment.writeScope) &&
     arrayShallowEqual(candidate.requiredOutputs, expectedAssignment.requiredOutputs)
+  );
+}
+
+function compareTransitionAssignmentIdentity(
+  left: WorkflowRunAttemptIdentity | undefined,
+  right: WorkflowRunAttemptIdentity | undefined,
+  expected: WorkflowRunAttemptIdentity | undefined
+): number {
+  return compareIdentitySpecificity(left, expected) - compareIdentitySpecificity(right, expected);
+}
+
+function compareIdentitySpecificity(
+  candidate: WorkflowRunAttemptIdentity | undefined,
+  expected: WorkflowRunAttemptIdentity | undefined
+): number {
+  if (!expected) {
+    return 0;
+  }
+  return candidate && workflowAttemptsMatch(candidate, expected) ? 0 : 1;
+}
+
+function resolveWorkflowAttemptIdentity(
+  candidate: Assignment,
+  progress: WorkflowProgressRecord
+): WorkflowRunAttemptIdentity | undefined {
+  return candidate.workflowAttempt ?? inferWorkflowAttemptFromProgress(progress, candidate.id);
+}
+
+function inferWorkflowAttemptFromProgress(
+  progress: WorkflowProgressRecord,
+  assignmentId: string
+): WorkflowRunAttemptIdentity | undefined {
+  for (const module of Object.values(progress.modules)) {
+    if (module.assignmentId === assignmentId) {
+      return {
+        workflowId: progress.workflowId,
+        workflowCycle: module.workflowCycle,
+        moduleId: module.moduleId,
+        moduleAttempt: module.moduleAttempt
+      };
+    }
+  }
+  if (progress.lastGate?.assignmentId === assignmentId) {
+    return {
+      workflowId: progress.workflowId,
+      workflowCycle: progress.lastGate.workflowCycle,
+      moduleId: progress.lastGate.moduleId,
+      moduleAttempt: progress.lastGate.moduleAttempt
+    };
+  }
+  if (progress.lastTransition?.nextAssignmentId === assignmentId) {
+    return {
+      workflowId: progress.workflowId,
+      workflowCycle: progress.lastTransition.workflowCycle,
+      moduleId: progress.lastTransition.toModuleId,
+      moduleAttempt: progress.lastTransition.moduleAttempt
+    };
+  }
+  return undefined;
+}
+
+function workflowAttemptsMatch(
+  left: WorkflowRunAttemptIdentity,
+  right: WorkflowRunAttemptIdentity
+): boolean {
+  return (
+    left.workflowId === right.workflowId &&
+    left.workflowCycle === right.workflowCycle &&
+    left.moduleId === right.moduleId &&
+    left.moduleAttempt === right.moduleAttempt
   );
 }
 
