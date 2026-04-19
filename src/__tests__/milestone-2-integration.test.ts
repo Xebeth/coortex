@@ -1063,6 +1063,118 @@ test("milestone-2 integration: provisional live-lease reclaim takeover is atomic
   assert.equal(resumeAttempts, 1);
 });
 
+test("milestone-2 integration: wrapped resume prompt omits redundant resume-next-action guidance", serial, async () => {
+  let promptSeen = "";
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch created resumable state before prompt coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-resume-prompt" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      promptSeen = input.prompt ?? "";
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "completed",
+        resultSummary: "Wrapped resume completed after prompt coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  await resumeRuntime(setup.store, setup.adapter);
+
+  assert.doesNotMatch(promptSeen, /"nextRequiredAction":"Resume attachment /);
+  assert.match(promptSeen, /"nextRequiredAction":"Continue assignment /);
+});
+
+test("milestone-2 integration: wrapped resume rebuilds an inactive bounded envelope after a long terminal result", serial, async () => {
+  const longSummary = "Wrapped resume finished with a very long summary. ".repeat(20);
+  const setup = await createSmokeSetupWithRunner({
+    runExec: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "partial",
+        resultSummary: "Launch created resumable state before bounded inactive envelope coverage.",
+        changedFiles: ["src/cli/commands.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-bounded-inactive-envelope" });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    },
+    runResume: async (input) => {
+      await writeStructuredOutput(input.outputPath, {
+        outcomeType: "result",
+        resultStatus: "completed",
+        resultSummary: longSummary,
+        changedFiles: ["src/hosts/codex/adapter/envelope.ts"],
+        blockerSummary: "",
+        decisionOptions: [],
+        recommendedOption: ""
+      });
+      await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: ""
+      };
+    }
+  });
+
+  await runRuntime(setup.store, setup.adapter);
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    trimApplied: boolean;
+    trimmedFields: Array<{ label: string }>;
+    recentResults: Array<{ summary: string; trimmed: boolean; reference?: string }>;
+    estimatedChars: number;
+  };
+
+  assert.equal(resumed.mode, "reclaimed");
+  assert.equal(resumed.envelope.trimApplied, true);
+  assert.ok(resumed.envelope.trimmedFields.some((field) => field.label.startsWith("result:")));
+  assert.equal(resumed.envelope.recentResults[0]?.trimmed, true);
+  assert.match(resumed.envelope.recentResults[0]?.summary ?? "", /\.\.\.\[trimmed\]$/);
+  assert.match(resumed.envelope.recentResults[0]?.reference ?? "", /\.coortex\/artifacts\/results\//);
+  assert.ok(resumed.envelope.estimatedChars <= 4_000);
+  assert.equal(persistedEnvelope.trimApplied, true);
+  assert.ok(persistedEnvelope.trimmedFields.some((field) => field.label.startsWith("result:")));
+  assert.equal(persistedEnvelope.recentResults[0]?.trimmed, true);
+  assert.match(persistedEnvelope.recentResults[0]?.summary ?? "", /\.\.\.\[trimmed\]$/);
+  assert.match(persistedEnvelope.recentResults[0]?.reference ?? "", /\.coortex\/artifacts\/results\//);
+  assert.ok(persistedEnvelope.estimatedChars <= 4_000);
+});
+
 test("milestone-2 integration: wrapped resume persists a terminal completed result and releases attachment authority", serial, async () => {
   const setup = await createSmokeSetupWithRunner({
     runExec: async (input) => {

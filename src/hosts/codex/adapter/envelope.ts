@@ -24,9 +24,6 @@ export async function buildTaskEnvelope(
     .map((assignmentId) => projection.assignments.get(assignmentId))
     .find((assignment): assignment is NonNullable<typeof assignment> => Boolean(assignment));
 
-  if (!activeAssignment) {
-    throw new Error("Cannot build envelope without an active assignment.");
-  }
 
   const trimmedFields: TrimmedField[] = [];
   const compactResults = await Promise.all(
@@ -105,9 +102,9 @@ export async function buildTaskEnvelope(
   let envelope: TaskEnvelope = {
     host: options.host,
     adapter: options.adapter,
-    objective: activeAssignment.objective,
-    writeScope: activeAssignment.writeScope,
-    requiredOutputs: activeAssignment.requiredOutputs,
+    objective: activeAssignment?.objective ?? projection.status.currentObjective,
+    writeScope: activeAssignment?.writeScope ?? [],
+    requiredOutputs: activeAssignment?.requiredOutputs ?? [],
     recoveryBrief: {
       ...brief,
       lastDurableResults: compactResults,
@@ -116,7 +113,7 @@ export async function buildTaskEnvelope(
     recentResults,
     metadata: {
       activeMode: projection.status.activeMode,
-      activeAssignmentId: activeAssignment.id,
+      activeAssignmentId: activeAssignment?.id ?? "",
       unresolvedDecisionCount: brief.unresolvedDecisions.length
     },
     estimatedChars: 0,
