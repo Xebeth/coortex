@@ -93,6 +93,7 @@ Each family-local return-review lane should report:
 - `stop_reason`
 - `coverage_confidence`
 - `thin_areas`
+- `omission_entries`
 
 For each `closure_gate_checked` entry include:
 - `gate_item`
@@ -119,6 +120,21 @@ Use the same self-check discipline as other lane types:
   - `high`
   - `medium`
   - `low`
+- `omission_entries` must be an explicit structured list. Use `[]` when no material omission remains actionable from skipped/thin return-review work.
+- For each omission entry include:
+  - `omission_id`
+  - `kind`
+    - `skipped-area`
+    - `thin-area`
+  - `area`
+  - `reason`
+  - `disposition`
+    - `ignore`
+    - `carry-thin`
+    - `spawn-follow-up`
+  - when `disposition` is `spawn-follow-up`, also include:
+    - `suggested_lane_type`
+    - `suggested_target`
 
 ## Final per-family return-review output
 
