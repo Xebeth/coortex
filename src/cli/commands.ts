@@ -303,7 +303,7 @@ export async function runRuntime(
           assignment,
           envelope: recovered.envelope,
           execution: recovered.execution,
-          recoveredOutcome: false,
+          recoveredOutcome: true,
           diagnostics
         };
       }

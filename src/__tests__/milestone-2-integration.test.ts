@@ -414,6 +414,7 @@ test("milestone-2 integration: run recovers a durable outcome even if the adapte
 
   assert.equal(run.execution.outcome.kind, "result");
   assert.equal(run.execution.outcome.capture.status, "completed");
+  assert.equal(run.recoveredOutcome, true);
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
   assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
   assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
