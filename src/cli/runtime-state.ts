@@ -302,18 +302,15 @@ async function emitWorkflowStaleReconciliation(
   sessionId: string,
   recovery: ReturnType<typeof buildWorkflowStaleRunRecovery>
 ): Promise<CommandDiagnostic[]> {
-  const diagnostics: CommandDiagnostic[] = [recovery.diagnostic];
-  const telemetry = await recordNormalizedTelemetry(
+  return emitWorkflowRunTelemetryDiagnostic(
     store,
-    adapter.normalizeTelemetry({
-      eventType: "host.run.stale_reconciled",
-      taskId: sessionId,
-      assignmentId: recovery.staleRecord.assignmentId,
-      metadata: recovery.telemetryMetadata
-    })
+    adapter,
+    sessionId,
+    "host.run.stale_reconciled",
+    recovery.staleRecord.assignmentId,
+    recovery.diagnostic,
+    recovery.telemetryMetadata
   );
-  diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
-  return diagnostics;
 }
 
 async function emitWorkflowHiddenRunCleanup(
@@ -322,14 +319,39 @@ async function emitWorkflowHiddenRunCleanup(
   sessionId: string,
   cleanup: ReturnType<typeof buildWorkflowHiddenRunCleanup>
 ): Promise<CommandDiagnostic[]> {
-  const diagnostics: CommandDiagnostic[] = [cleanup.diagnostic];
+  return emitWorkflowRunTelemetryDiagnostic(
+    store,
+    adapter,
+    sessionId,
+    "host.run.hidden_stale_cleaned",
+    cleanup.staleRecord.assignmentId,
+    cleanup.diagnostic,
+    cleanup.telemetryMetadata
+  );
+}
+
+async function emitWorkflowRunTelemetryDiagnostic(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  sessionId: string,
+  eventType: "host.run.stale_reconciled" | "host.run.hidden_stale_cleaned",
+  assignmentId: string,
+  diagnostic: CommandDiagnostic,
+  metadata: {
+    nativeRunId: string;
+    leaseExpiresAt: string;
+    heartbeatAt: string;
+    staleAt: string;
+  }
+): Promise<CommandDiagnostic[]> {
+  const diagnostics: CommandDiagnostic[] = [diagnostic];
   const telemetry = await recordNormalizedTelemetry(
     store,
     adapter.normalizeTelemetry({
-      eventType: "host.run.hidden_stale_cleaned",
+      eventType,
       taskId: sessionId,
-      assignmentId: cleanup.staleRecord.assignmentId,
-      metadata: cleanup.telemetryMetadata
+      assignmentId,
+      metadata
     })
   );
   diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
