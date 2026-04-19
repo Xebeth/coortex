@@ -45,19 +45,23 @@ export async function loadInspectRuntimeContext(
   }
 
   const workflowAssignmentId = loaded.projection.workflowProgress?.currentAssignmentId;
+  const inspectedLastRun = await adapter.inspectRun(store);
   const lastRun = selectWorkflowVisibleRunRecord(
     loaded.projection,
-    await adapter.inspectRun(store)
+    inspectedLastRun
   );
   const targetAssignmentId = workflowAssignmentId ?? lastRun?.assignmentId;
   const assignment = targetAssignmentId
     ? loaded.projection.assignments.get(targetAssignmentId)
     : undefined;
+  const inspectedTargetRun = targetAssignmentId && inspectedLastRun?.assignmentId === targetAssignmentId
+    ? inspectedLastRun
+    : targetAssignmentId
+      ? await adapter.inspectRun(store, targetAssignmentId)
+      : lastRun;
   const run = selectWorkflowVisibleRunRecord(
     loaded.projection,
-    targetAssignmentId
-      ? await adapter.inspectRun(store, targetAssignmentId)
-      : lastRun
+    inspectedTargetRun
   );
 
   if (!workflow && !assignment && !run) {
