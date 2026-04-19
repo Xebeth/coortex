@@ -351,6 +351,81 @@ test("host-run session matrix refreshes the lease before derived completion meta
   }
 });
 
+test("host-run session matrix preserves the running native id when completion does not restate it", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-native-id-success";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  let deriveCompletedNativeRunId: string | undefined;
+  const execution = await executeHostRunSession({
+    assignmentId,
+    startedAt,
+    taskId: "session-native-id-success",
+    runStore,
+    runRecord: claimedRun,
+    leaseMs: 30_000,
+    heartbeatMs: 5_000,
+    startRun: async ({ onNativeRunId }) => {
+      await onNativeRunId("native-success-1");
+      return {
+        result: Promise.resolve({ exitCode: 0 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      };
+    },
+    summarizeExecutionFailure: (error) => (error instanceof Error ? error.message : String(error)),
+    buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+      outcome: {
+        kind: "result",
+        capture: {
+          assignmentId: failedAssignmentId,
+          producerId: "matrix-host",
+          status: "failed",
+          summary,
+          changedFiles: [],
+          createdAt: completedAt
+        }
+      }
+    }),
+    deriveCompleted: async (_result, nativeRunId) => {
+      deriveCompletedNativeRunId = nativeRunId;
+      return {
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Successful completion kept the persisted native run id.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        }
+      };
+    },
+    setActiveRun: () => undefined,
+    setActiveExecutionSettled: () => undefined
+  });
+
+  const inspected = await runStore.inspect(assignmentId);
+
+  assert.equal(deriveCompletedNativeRunId, "native-success-1");
+  assert.equal(execution.run.adapterData?.nativeRunId, "native-success-1");
+  assert.equal(inspected?.adapterData?.nativeRunId, "native-success-1");
+  assert.equal(execution.telemetry?.metadata.nativeRunId, "native-success-1");
+  assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
+});
+
 test("host-run session matrix fails the run when heartbeat persistence stops working", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {

@@ -166,8 +166,9 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         nativeRunId?: string;
         usage?: HostTelemetryCapture["usage"];
       } = {};
-      if (completed.nativeRunId) {
-        completionOptions.nativeRunId = completed.nativeRunId;
+      const nativeRunId = completed.nativeRunId ?? getNativeRunId(runningRecord);
+      if (nativeRunId) {
+        completionOptions.nativeRunId = nativeRunId;
       }
       if (completed.usage) {
         completionOptions.usage = completed.usage;
