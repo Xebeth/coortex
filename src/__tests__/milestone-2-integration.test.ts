@@ -1414,9 +1414,13 @@ test("milestone-2 integration: hidden stale workflow cleanup is silent after the
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${hiddenAssignmentId}.json`, hiddenStaleRecord);
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${hiddenAssignmentId}.lease.json`, hiddenStaleRecord);
 
-  const firstLoad = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+  const firstLoad = await withSteppedClock(() =>
+    loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter)
+  );
   const secondLoad = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+  const inspectedHidden = await inspectRuntimeRun(setup.store, setup.adapter, hiddenAssignmentId);
   const telemetry = await setup.store.loadTelemetry();
+  const hiddenCleanupTelemetry = findLastTelemetry(telemetry, "host.run.hidden_stale_cleaned");
   const hiddenCleanupDiagnostic = firstLoad.diagnostics.find(
     (diagnostic) => diagnostic.code === "hidden-run-cleaned"
   );
@@ -1472,9 +1476,13 @@ test("milestone-2 integration: hidden stale workflow cleanup reports success onl
     await originalReconcile(store, record);
   };
 
-  const firstLoad = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+  const firstLoad = await withSteppedClock(() =>
+    loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter)
+  );
   const secondLoad = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+  const inspectedHidden = await inspectRuntimeRun(setup.store, setup.adapter, hiddenAssignmentId);
   const telemetry = await setup.store.loadTelemetry();
+  const hiddenCleanupTelemetry = findLastTelemetry(telemetry, "host.run.hidden_stale_cleaned");
 
   assert.ok(!firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "hidden-run-cleaned"));
   assert.ok(firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
@@ -1489,6 +1497,7 @@ test("milestone-2 integration: hidden stale workflow cleanup reports success onl
     0
   );
   assert.equal(reconcileAttempts, 2);
+  assert.equal(hiddenCleanupTelemetry?.metadata.staleAt, inspectedHidden?.staleAt);
   await assert.rejects(
     readFile(
       join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${hiddenAssignmentId}.lease.json`),
@@ -2665,4 +2674,50 @@ async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 500): Prom
     });
   }
   throw new Error("Timed out waiting for smoke state.");
+}
+
+async function withSteppedClock<T>(work: () => Promise<T>): Promise<T> {
+  const realDate = Date;
+  const baseMs = realDate.now();
+  let tick = 0;
+
+  class SteppedDate extends realDate {
+    constructor(value?: string | number | Date) {
+      if (arguments.length === 0) {
+        super(baseMs + tick * 1_000);
+        tick += 1;
+        return;
+      }
+      super(value as string | number | Date);
+    }
+
+    static override now(): number {
+      const value = baseMs + tick * 1_000;
+      tick += 1;
+      return value;
+    }
+
+    static override parse(value: string): number {
+      return realDate.parse(value);
+    }
+
+    static override UTC(
+      year: number,
+      monthIndex: number,
+      date?: number,
+      hours?: number,
+      minutes?: number,
+      seconds?: number,
+      ms?: number
+    ): number {
+      return realDate.UTC(year, monthIndex, date, hours, minutes, seconds, ms);
+    }
+  }
+
+  globalThis.Date = SteppedDate as unknown as DateConstructor;
+  try {
+    return await work();
+  } finally {
+    globalThis.Date = realDate;
+  }
 }

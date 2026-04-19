@@ -217,6 +217,14 @@ function buildWorkflowRunReconciliationPlan(
   const truth = deriveWorkflowRunTruth(projection, record, { hasLeaseArtifact });
   const handling = deriveWorkflowRunHandling(record, truth);
   const actions: WorkflowRunReconciliationAction[] = [];
+  const hiddenCleanup = handling.kind === "emit_hidden_cleanup"
+    ? buildWorkflowHiddenRunCleanup(record)
+    : undefined;
+  const staleRecovery = truth.staleCandidate &&
+    !truth.hasDurableCurrentOutcome &&
+    !truth.hasDurableStaleRecovery
+    ? buildWorkflowStaleRunRecovery(record)
+    : undefined;
 
   if (handling.kind === "active_lease") {
     actions.push({ kind: "report_active_lease", record });
@@ -224,10 +232,10 @@ function buildWorkflowRunReconciliationPlan(
   if (handling.kind === "recover_completed") {
     actions.push({ kind: "recover_completed", record });
   }
-  if (handling.kind === "emit_hidden_cleanup") {
+  if (hiddenCleanup) {
     actions.push({
       kind: "defer_hidden_cleanup",
-      cleanup: buildWorkflowHiddenRunCleanup(record)
+      cleanup: hiddenCleanup
     });
   }
   if (handling.kind === "recover_completed" ||
@@ -236,15 +244,12 @@ function buildWorkflowRunReconciliationPlan(
     actions.push({
       kind: "cleanup_run_artifacts",
       record,
-      cleanupRecord: handling.cleanupRecord ?? deriveWorkflowCleanupRecord(record)
+      cleanupRecord:
+        hiddenCleanup?.staleRecord ??
+        handling.cleanupRecord ??
+        deriveWorkflowCleanupRecord(record)
     });
   }
-
-  const staleRecovery = truth.staleCandidate &&
-    !truth.hasDurableCurrentOutcome &&
-    !truth.hasDurableStaleRecovery
-    ? buildWorkflowStaleRunRecovery(record)
-    : undefined;
 
   return {
     record,
