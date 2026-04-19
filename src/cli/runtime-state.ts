@@ -386,9 +386,15 @@ async function classifyWorkflowLeaseVisibility(
 }> {
   const activeLeases: string[] = [];
   const hiddenActiveLeases: string[] = [];
+  const recordHasLease = new Map<string, boolean>();
   for (const record of records) {
     const truth = deriveWorkflowRunTruth(projection, record, {
-      hasLeaseArtifact: await adapter.hasRunLease(store, record.assignmentId)
+      hasLeaseArtifact: await cacheRunLeasePresence(
+        store,
+        adapter,
+        recordHasLease,
+        record.assignmentId
+      )
     });
     if (!truth.activeLease) {
       continue;
@@ -856,49 +862,8 @@ function buildWorkflowRecoveredOutcomeEvents(
   sessionId: string,
   record: HostRunRecord
 ): import("../core/events.js").RuntimeEvent[] {
-  if (!record.terminalOutcome) {
-    return [];
-  }
-  const timestamp = nowIso();
-  if (record.terminalOutcome.kind === "result") {
-    const result: ResultPacket = {
-      resultId: record.terminalOutcome.result.resultId ?? randomUUID(),
-      assignmentId: record.assignmentId,
-      producerId: record.terminalOutcome.result.producerId,
-      status: record.terminalOutcome.result.status,
-      summary: record.terminalOutcome.result.summary,
-      changedFiles: [...record.terminalOutcome.result.changedFiles],
-      createdAt: record.terminalOutcome.result.createdAt
-    };
-    return [
-      {
-        eventId: randomUUID(),
-        sessionId,
-        timestamp,
-        type: "result.submitted",
-        payload: { result }
-      }
-    ];
-  }
-  const decision: DecisionPacket = {
-    decisionId: record.terminalOutcome.decision.decisionId ?? randomUUID(),
-    assignmentId: record.assignmentId,
-    requesterId: record.terminalOutcome.decision.requesterId,
-    blockerSummary: record.terminalOutcome.decision.blockerSummary,
-    options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
-    recommendedOption: record.terminalOutcome.decision.recommendedOption,
-    state: record.terminalOutcome.decision.state,
-    createdAt: record.terminalOutcome.decision.createdAt
-  };
-  return [
-    {
-      eventId: randomUUID(),
-      sessionId,
-      timestamp,
-      type: "decision.created",
-      payload: { decision }
-    }
-  ];
+  const event = buildRecoveredOutcomeEvent(sessionId, nowIso(), record);
+  return event ? [event] : [];
 }
 
 async function cleanupRunArtifacts(
