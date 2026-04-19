@@ -29,19 +29,14 @@ export function buildBlockedDecisionEvents(
 ): RuntimeEvent[] {
   const events: RuntimeEvent[] = [];
   if (currentAssignment.state !== "blocked") {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "assignment.updated",
-      payload: {
-        assignmentId: currentAssignment.id,
-        patch: {
-          state: "blocked",
-          updatedAt: timestamp
-        }
-      }
-    });
+    events.push(
+      buildAssignmentStateUpdatedEvent(
+        projection.sessionId,
+        currentAssignment.id,
+        "blocked",
+        timestamp
+      )
+    );
   }
   if (
     progress.lastGate?.moduleId !== progress.currentModuleId ||
@@ -151,19 +146,14 @@ export function buildSameModuleRerunEvents(
   const nextAttempt = progress.currentModuleAttempt + 1;
   const events: RuntimeEvent[] = [];
   if (currentAssignment.state !== "queued") {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "assignment.updated",
-      payload: {
-        assignmentId: currentAssignment.id,
-        patch: {
-          state: "queued",
-          updatedAt: timestamp
-        }
-      }
-    });
+    events.push(
+      buildAssignmentStateUpdatedEvent(
+        projection.sessionId,
+        currentAssignment.id,
+        "queued",
+        timestamp
+      )
+    );
   }
   events.push({
     eventId: randomUUID(),
@@ -205,19 +195,14 @@ export function buildModuleTransitionEvents(
   );
   const events: RuntimeEvent[] = [];
   if (currentAssignment.state !== completedState) {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "assignment.updated",
-      payload: {
-        assignmentId: currentAssignment.id,
-        patch: {
-          state: completedState,
-          updatedAt: timestamp
-        }
-      }
-    });
+    events.push(
+      buildAssignmentStateUpdatedEvent(
+        projection.sessionId,
+        currentAssignment.id,
+        completedState,
+        timestamp
+      )
+    );
   }
   if (!nextAssignmentResolution.reused) {
     events.push({
@@ -256,19 +241,12 @@ export function buildCompleteWorkflowEvents(
   timestamp: string
 ): RuntimeEvent[] {
   return [
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "assignment.updated",
-      payload: {
-        assignmentId: currentAssignment.id,
-        patch: {
-          state: completedState,
-          updatedAt: timestamp
-        }
-      }
-    },
+    buildAssignmentStateUpdatedEvent(
+      projection.sessionId,
+      currentAssignment.id,
+      completedState,
+      timestamp
+    ),
     {
       eventId: randomUUID(),
       sessionId: projection.sessionId,
@@ -287,6 +265,27 @@ export function buildCompleteWorkflowEvents(
       }
     }
   ];
+}
+
+function buildAssignmentStateUpdatedEvent(
+  sessionId: string,
+  assignmentId: string,
+  state: Assignment["state"],
+  timestamp: string
+): RuntimeEvent {
+  return {
+    eventId: randomUUID(),
+    sessionId,
+    timestamp,
+    type: "assignment.updated",
+    payload: {
+      assignmentId,
+      patch: {
+        state,
+        updatedAt: timestamp
+      }
+    }
+  };
 }
 
 function hasEquivalentGate(
