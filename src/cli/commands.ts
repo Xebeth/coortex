@@ -111,12 +111,11 @@ export async function initRuntime(
   projection = workflowAware.projection;
   diagnostics.push(...workflowAware.diagnostics);
   await adapter.initialize(store, projection);
-  const bootstrapBrief = buildRecoveryBrief(projection);
-  const bootstrapEnvelope = await buildAndPersistWorkflowEnvelope(
+  await buildAndPersistWorkflowEnvelope(
     store,
     adapter,
     projection,
-    bootstrapBrief
+    buildRecoveryBrief(projection)
   );
   diagnostics.push(...await recordCommandTelemetryWarning(
     store,
