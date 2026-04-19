@@ -89,9 +89,13 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     await persistRunningRecord(nextRecord, phase);
   };
 
-  const recordMetadataWarning = (error: unknown, context: string) => {
+  const describeMetadataFailure = (error: unknown, context: string) => {
     const message = error instanceof Error ? error.message : String(error);
-    metadataWarnings.push(`Host run metadata persistence failed during ${context}. ${message}`);
+    return `Host run metadata persistence failed during ${context}. ${message}`;
+  };
+
+  const recordMetadataWarning = (error: unknown, context: string) => {
+    metadataWarnings.push(describeMetadataFailure(error, context));
   };
 
   const failRunOnMetadataError = (error: unknown, context: string) => {
@@ -99,8 +103,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
       return;
     }
     metadataFailureRaised = true;
-    const message = error instanceof Error ? error.message : String(error);
-    metadataFailureReject(new Error(`Host run metadata persistence failed during ${context}. ${message}`));
+    metadataFailureReject(new Error(describeMetadataFailure(error, context)));
   };
 
   const collectWarnings = (...warnings: Array<string | undefined>) => {
