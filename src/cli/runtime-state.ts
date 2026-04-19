@@ -202,6 +202,13 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   };
 }
 
+export async function loadWorkflowAwareProjection(
+  store: RuntimeStore,
+  adapter: HostAdapter
+) {
+  return (await loadWorkflowAwareProjectionWithDiagnostics(store, adapter)).projection;
+}
+
 function buildWorkflowRunReconciliationPlan(
   projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>,
   record: HostRunRecord,

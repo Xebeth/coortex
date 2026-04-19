@@ -22,7 +22,10 @@ import {
   resumeRuntime,
   runRuntime
 } from "../cli/commands.js";
-import { loadWorkflowAwareProjectionWithDiagnostics } from "../cli/runtime-state.js";
+import {
+  loadWorkflowAwareProjection,
+  loadWorkflowAwareProjectionWithDiagnostics
+} from "../cli/runtime-state.js";
 import { nowIso } from "../utils/time.js";
 import { evaluateWorkflowProgression, workflowArtifactPath } from "../workflows/index.js";
 import type { WorkflowArtifactDocument } from "../workflows/types.js";
@@ -529,6 +532,26 @@ test("milestone-2 integration: inspect converges onto a pre-created review assig
   assert.equal(inspected.record?.assignment?.id, reviewAssignmentId);
   assert.equal(visibleRun?.assignmentId, reviewAssignmentId);
   assert.equal(visibleRun?.workflowAttempt?.moduleId, "review");
+});
+
+test("milestone-2 integration: loadWorkflowAwareProjection returns the converged projection", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in workflow-aware projection load smoke test");
+  });
+
+  const projection = await loadWorkflowAwareProjection(setup.store, setup.adapter);
+  const loaded = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+
+  assert.equal(projection.sessionId, loaded.projection.sessionId);
+  assert.deepEqual(projection.status, loaded.projection.status);
+  assert.equal(
+    projection.workflowProgress?.currentAssignmentId,
+    loaded.projection.workflowProgress?.currentAssignmentId
+  );
+  assert.equal(
+    projection.workflowProgress?.currentModuleId,
+    loaded.projection.workflowProgress?.currentModuleId
+  );
 });
 
 test("milestone-2 integration: interrupted advance recovers a completed run on the newly current assignment in the same load", async () => {
