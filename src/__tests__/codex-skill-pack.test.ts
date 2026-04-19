@@ -18,6 +18,7 @@ test("codex managed skill pack is self-contained", async () => {
   const managedSkills = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
 
   assert.deepEqual(managedSkills, [
+    "coortex-deslop",
     "coortex-review",
     "coortex-review-lane",
     "review-baseline",

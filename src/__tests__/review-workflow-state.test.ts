@@ -19,6 +19,10 @@ const seamWalkbackStateScript = resolve(
   process.cwd(),
   "src/hosts/codex/profile/skill-pack/seam-walkback-review/scripts/walkback_state.py"
 );
+const aiSlopCleanerStateScript = resolve(
+  process.cwd(),
+  "src/hosts/codex/profile/skill-pack/coortex-deslop/scripts/deslop_state.py"
+);
 
 async function runPythonJson(
   scriptPath: string,
@@ -174,6 +178,78 @@ test("seam walkback helper still classifies fix-shaped pivots without inline fil
   assert.deepEqual(json.commits[0]?.files, []);
   assert.equal(json.commits[0]?.likely_pivot, true);
   assert.deepEqual(json.commits[0]?.pivot_reasons, ["keyword:align", "type:fix-with-move"]);
+});
+
+
+test("coortex deslop helper resolves bounded scope from file lists and explicit paths", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-deslop-"));
+  await mkdir(join(tempDir, "src", "cli"), { recursive: true });
+  await mkdir(join(tempDir, "src", "tests"), { recursive: true });
+  await writeFile(join(tempDir, "src", "cli", "commands.ts"), "export {};\n", "utf8");
+  await writeFile(join(tempDir, "src", "tests", "cli.test.ts"), "export {};\n", "utf8");
+  const changedFilesPath = join(tempDir, "changed-files.txt");
+  await writeFile(
+    changedFilesPath,
+    [
+      "# changed files",
+      "src/cli/commands.ts",
+      "",
+      "src/tests/cli.test.ts",
+      "src/cli/commands.ts"
+    ].join("\n"),
+    "utf8"
+  );
+
+  const result = await runPythonJson(aiSlopCleanerStateScript, [
+    "resolve-scope",
+    "--project-root",
+    tempDir,
+    "--changed-files-path",
+    changedFilesPath,
+    "--path",
+    join(tempDir, "src", "cli", "commands.ts")
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  const json = result.json as { scope_files: string[]; file_count: number };
+  assert.equal(json.file_count, 2);
+  assert.deepEqual(json.scope_files, ["src/cli/commands.ts", "src/tests/cli.test.ts"]);
+});
+
+test("coortex deslop helper runs verification gates and records artifacts", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-deslop-"));
+  const artifactDir = join(tempDir, "artifacts");
+
+  const result = await runPythonJson(aiSlopCleanerStateScript, [
+    "run-gates",
+    "--project-root",
+    tempDir,
+    "--artifact-dir",
+    artifactDir,
+    "--gate",
+    `pass::python -c "print('ok')"`,
+    "--gate",
+    `fail::python -c "import sys; sys.exit(3)"`
+  ]);
+
+  assert.equal(result.exitCode, 1);
+  const json = result.json as {
+    all_passed: boolean;
+    artifact_dir: string;
+    gates: Array<{ label: string; ok: boolean; exit_code: number; log_path: string | null }>;
+  };
+  assert.equal(json.all_passed, false);
+  assert.equal(json.gates[0]?.label, "pass");
+  assert.equal(json.gates[0]?.ok, true);
+  assert.equal(json.gates[1]?.label, "fail");
+  assert.equal(json.gates[1]?.ok, false);
+  assert.equal(json.gates[1]?.exit_code, 3);
+  assert.equal(json.artifact_dir, artifactDir);
+  const passLog = await readFile(json.gates[0]!.log_path!, "utf8");
+  const failLog = await readFile(json.gates[1]!.log_path!, "utf8");
+  assert.match(passLog, /\$ python -c/);
+  assert.match(passLog, /\[stdout\][\s\S]*ok/);
+  assert.match(failLog, /\[stderr\]/);
 });
 
 test("return review helper marks scope-excluded non-started families as dormant and excludes them from the refreshed handoff by default", async () => {

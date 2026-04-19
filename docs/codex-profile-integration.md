@@ -33,7 +33,7 @@ The Codex adapter is responsible for:
 
 - generating or validating the Coortex Codex profile
 - generating the stable kernel instruction file for Codex
-- installing the Coortex-managed Codex review skill pack into project-local `.codex/skills`
+- installing the Coortex-managed Codex review and cleanup skill pack into project-local `.codex/skills`
 - building bounded task envelopes for Codex runs
 - mapping Codex-native execution results into Coortex runtime artifacts
 - normalizing Codex-native telemetry into the Coortex telemetry model
@@ -56,7 +56,11 @@ The Coortex-specific Codex profile may manage:
   settings and the inherited global top-level Codex config does not
   already provide at least that many worker threads for bounded
   multi-lane review
-- the Coortex-managed review skill pack installed into project-local `.codex/skills`, including the user-facing bounded reviewer, the lane-review dependency skill used by the review workflow, and the archaeology-driven seam walkback workflow skill for maintainability cleanup
+- the Coortex-managed review and cleanup skill pack installed into
+  project-local `.codex/skills`, including the user-facing bounded
+  reviewer, the lane-review dependency skill used by the review
+  workflow, the bounded anti-slop cleanup skill, and the archaeology-driven
+  seam walkback workflow skill for maintainability cleanup
 - Coortex-specific developer instructions if needed
 - Coortex-specific environment/config placeholders
 - later host-specific hooks or MCP registration if required

@@ -74,6 +74,7 @@ instead of redoing their jobs:
 - `$coortex-review` for one bounded slice that does not narrow cleanly through
   the baseline
 - `$review-fixer` when a structured review handoff already exists
+- `$coortex-deslop` for the mandatory post-fix cleanup pass on touched files only
 
 This skill decides **when** to use those bricks and in what order.
 
@@ -196,8 +197,10 @@ Otherwise perform one bounded repair slice on current `HEAD`.
 
 ### 7. Mandatory post-fix anti-slop pass
 
-After the code repair and before final verification, run a touched-files-only
-anti-slop cleanup pass.
+After the code repair and before final verification, run `$coortex-deslop` on
+touched files only. Use the bundled `scripts/deslop_state.py` helper from that
+skill to resolve the changed-files scope and execute the pre/post cleanup gates
+deterministically.
 
 Use it to:
 

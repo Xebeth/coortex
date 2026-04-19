@@ -7,6 +7,7 @@ import type { DoctorCheck, RuntimeArtifactStore } from "../../../adapters/contra
 import type { CodexSkillPackInstallation } from "./types.js";
 
 const MANAGED_SKILLS = [
+  "coortex-deslop",
   "coortex-review",
   "coortex-review-lane",
   "review-baseline",

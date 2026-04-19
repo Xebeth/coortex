@@ -1400,6 +1400,7 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     await readFile(join(projectRoot, ".coortex", "adapters", "codex", "skill-pack.json"), "utf8")
   ) as { managedSkills: string[] };
   assert.deepEqual(skillPackManifest.managedSkills, [
+    "coortex-deslop",
     "coortex-review",
     "coortex-review-lane",
     "review-baseline",
@@ -1410,9 +1411,11 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   for (const skillName of skillPackManifest.managedSkills) {
     await readFile(join(projectRoot, ".codex", "skills", skillName, "SKILL.md"), "utf8");
   }
+  const deslopSkill = await readFile(join(projectRoot, ".codex", "skills", "coortex-deslop", "SKILL.md"), "utf8");
   const reviewSkill = await readFile(join(projectRoot, ".codex", "skills", "coortex-review", "SKILL.md"), "utf8");
   const reviewFixerSkill = await readFile(join(projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"), "utf8");
   const reviewLaneSkill = await readFile(join(projectRoot, ".codex", "skills", "coortex-review-lane", "SKILL.md"), "utf8");
+  assert.match(deslopSkill, /Coortex Deslop/);
   assert.match(reviewSkill, /Coortex Review/);
   assert.match(reviewFixerSkill, /Review Fixer/);
   assert.match(reviewLaneSkill, /Coortex Review Lane/);
