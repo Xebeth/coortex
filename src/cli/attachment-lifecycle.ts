@@ -5,7 +5,7 @@ import type {
   HostExecutionOutcome,
   HostSessionIdentity
 } from "../adapters/contract.js";
-import { COORTEX_RECLAIM_LEASE_KEY } from "../core/run-state.js";
+import { COORTEX_RECLAIM_LEASE_KEY, getNativeRunId } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type {
   AssignmentClaim,
@@ -18,6 +18,7 @@ import { RuntimeStore } from "../persistence/store.js";
 import { nowIso } from "../utils/time.js";
 
 import { getActiveClaimForAssignment } from "../projections/attachment-claim-queries.js";
+import { buildRetryRuntimeStatus } from "../recovery/runtime-status.js";
 import { cleanupHostRunArtifactsWithLeaseVerification } from "./host-run-cleanup.js";
 import { persistProjectionEvents, type ProjectionWriteOptions } from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
@@ -46,6 +47,73 @@ function sanitizeAttachmentAdapterMetadata(
     ([key]) => key !== COORTEX_RECLAIM_LEASE_KEY
   );
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+async function cleanupHostRunArtifactsWarning(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId: string,
+  reason: string,
+  inspectedRecord?: HostRunRecord
+): Promise<string | undefined> {
+  const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
+    store,
+    adapter,
+    assignmentId,
+    {
+      staleAt: nowIso(),
+      staleReason: reason,
+      ...(inspectedRecord ? { inspectedRecord } : {})
+    }
+  );
+  return cleanupError
+    ? `Host run cleanup artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`
+    : undefined;
+}
+
+function buildTerminalAttachmentClaimPatch(
+  state: "released" | "orphaned",
+  reason: {
+    attachment: string;
+    claim: string;
+  },
+  timestamp: string
+): {
+  attachment: Partial<RuntimeAttachment>;
+  claim: Partial<AssignmentClaim>;
+} {
+  switch (state) {
+    case "released":
+      return {
+        attachment: {
+          state,
+          updatedAt: timestamp,
+          releasedAt: timestamp,
+          releasedReason: reason.attachment
+        },
+        claim: {
+          state,
+          updatedAt: timestamp,
+          releasedAt: timestamp,
+          releasedReason: reason.claim
+        }
+      };
+    case "orphaned":
+      return {
+        attachment: {
+          state,
+          updatedAt: timestamp,
+          orphanedAt: timestamp,
+          orphanedReason: reason.attachment
+        },
+        claim: {
+          state,
+          updatedAt: timestamp,
+          orphanedAt: timestamp,
+          orphanedReason: reason.claim
+        }
+      };
+  }
 }
 
 async function updateAttachmentState(
@@ -182,10 +250,7 @@ function buildRecoveredDetachedAuthorityRepairEvents(
     return [];
   }
 
-  const recoveredNativeSessionId =
-    typeof record.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
-      ? record.adapterData.nativeRunId
-      : activeBinding.attachment.nativeSessionId;
+  const recoveredNativeSessionId = getNativeRunId(record) ?? activeBinding.attachment.nativeSessionId;
   const adapterMetadata = sanitizeAttachmentAdapterMetadata(record.adapterData);
   const detachRepair: {
     kind: "detach";
@@ -394,20 +459,7 @@ export const AttachmentLifecycleService = {
       projection,
       attachmentId,
       claimId,
-      {
-        attachment: {
-          state: "released",
-          updatedAt: timestamp,
-          releasedAt: timestamp,
-          releasedReason: reason.attachment
-        },
-        claim: {
-          state: "released",
-          updatedAt: timestamp,
-          releasedAt: timestamp,
-          releasedReason: reason.claim
-        }
-      },
+      buildTerminalAttachmentClaimPatch("released", reason, timestamp),
       options
     );
   },
@@ -429,20 +481,7 @@ export const AttachmentLifecycleService = {
       projection,
       attachmentId,
       claimId,
-      {
-        attachment: {
-          state: "orphaned",
-          updatedAt: timestamp,
-          orphanedAt: timestamp,
-          orphanedReason: reason.attachment
-        },
-        claim: {
-          state: "orphaned",
-          updatedAt: timestamp,
-          orphanedAt: timestamp,
-          orphanedReason: reason.claim
-        }
-      },
+      buildTerminalAttachmentClaimPatch("orphaned", reason, timestamp),
       options
     );
   },
@@ -524,12 +563,7 @@ export const AttachmentLifecycleService = {
         timestamp,
         type: "status.updated",
         payload: {
-          status: {
-            ...projection.status,
-            currentObjective: `Retry assignment ${assignmentId}: ${objective}`,
-            lastDurableOutputAt: timestamp,
-            resumeReady: true
-          }
+          status: buildRetryRuntimeStatus(projection, assignmentId, objective, timestamp)
         }
       }
     ];
@@ -570,25 +604,55 @@ export const AttachmentLifecycleService = {
     projection: RuntimeProjection;
     diagnostics: CommandDiagnostic[];
   }> {
-    const timestamp = nowIso();
-    const diagnostics: CommandDiagnostic[] = [];
-    const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
+    const assignment = projection.assignments.get(claim.assignmentId);
+    const orphaned = await AttachmentLifecycleService.cleanupHostRunArtifactsAndOrphanClaim(
       store,
       adapter,
-      claim.assignmentId,
+      projection,
+      attachment,
+      claim,
+      reason,
       {
-        staleAt: timestamp,
-        staleReason: reason
-      }
+        ...(assignment ? { requeueObjective: assignment.objective } : {})
+      },
+      options
     );
-    if (cleanupError) {
-      diagnostics.push(
-        ...diagnosticsFromWarning(
-          `Host run cleanup artifacts could not be updated for assignment ${claim.assignmentId}. ${cleanupError.message}`,
-          "host-run-persist-failed"
+    return {
+      projection: orphaned.projection,
+      diagnostics: diagnosticsFromWarning(orphaned.cleanupWarning, "host-run-persist-failed")
+    };
+  },
+
+  async cleanupHostRunArtifactsAndOrphanClaim(
+    store: RuntimeStore,
+    adapter: HostAdapter,
+    projection: RuntimeProjection,
+    attachment: RuntimeAttachment,
+    claim: AssignmentClaim,
+    reason: string,
+    cleanup:
+      | {
+          cleanupOrder?: "before_orphan" | "after_orphan";
+          inspectedRecord?: HostRunRecord;
+          requeueObjective?: string;
+        }
+      | undefined,
+    options?: ProjectionWriteOptions
+  ): Promise<{
+    projection: RuntimeProjection;
+    cleanupWarning?: string;
+  }> {
+    const cleanupOrder = cleanup?.cleanupOrder ?? "before_orphan";
+    const cleanupBefore = cleanupOrder === "before_orphan";
+    const cleanupError = cleanupBefore
+      ? await cleanupHostRunArtifactsWarning(
+          store,
+          adapter,
+          claim.assignmentId,
+          reason,
+          cleanup?.inspectedRecord
         )
-      );
-    }
+      : undefined;
     let effectiveProjection = await AttachmentLifecycleService.orphanAttachmentClaim(
       store,
       projection,
@@ -600,19 +664,70 @@ export const AttachmentLifecycleService = {
       },
       options
     );
-    const assignment = effectiveProjection.assignments.get(claim.assignmentId);
-    if (assignment) {
+    const cleanupAfterError = cleanupBefore
+      ? undefined
+      : await cleanupHostRunArtifactsWarning(
+          store,
+          adapter,
+          claim.assignmentId,
+          reason,
+          cleanup?.inspectedRecord
+        );
+    if (typeof cleanup?.requeueObjective === "string" && cleanup.requeueObjective.length > 0) {
       effectiveProjection = await AttachmentLifecycleService.requeueAssignmentForRetry(
         store,
         effectiveProjection,
         claim.assignmentId,
-        assignment.objective,
+        cleanup.requeueObjective,
         options
       );
     }
+    const effectiveCleanupWarning = cleanupError ?? cleanupAfterError;
     return {
       projection: effectiveProjection,
-      diagnostics
+      ...(effectiveCleanupWarning ? { cleanupWarning: effectiveCleanupWarning } : {})
+    };
+  },
+
+  async cleanupHostRunArtifactsAndReleaseClaim(
+    store: RuntimeStore,
+    adapter: HostAdapter,
+    projection: RuntimeProjection,
+    attachment: RuntimeAttachment,
+    claim: AssignmentClaim,
+    releaseReason: {
+      attachment: string;
+      claim: string;
+    },
+    cleanupReason: string,
+    cleanup:
+      | {
+          inspectedRecord?: HostRunRecord;
+        }
+      | undefined,
+    options?: ProjectionWriteOptions
+  ): Promise<{
+    projection: RuntimeProjection;
+    cleanupWarning?: string;
+  }> {
+    const releasedProjection = await AttachmentLifecycleService.releaseAttachmentClaim(
+      store,
+      projection,
+      attachment.id,
+      claim.id,
+      releaseReason,
+      options
+    );
+    const cleanupWarning = await cleanupHostRunArtifactsWarning(
+      store,
+      adapter,
+      claim.assignmentId,
+      cleanupReason,
+      cleanup?.inspectedRecord
+    );
+    return {
+      projection: releasedProjection,
+      ...(cleanupWarning ? { cleanupWarning } : {})
     };
   },
 
@@ -758,9 +873,8 @@ export const AttachmentLifecycleService = {
     }
     const detachedNativeSessionId =
       verifiedNativeSessionId ??
-      (typeof execution.run.adapterData?.nativeRunId === "string"
-        ? execution.run.adapterData.nativeRunId
-        : attachment?.nativeSessionId);
+      getNativeRunId(execution.run) ??
+      attachment?.nativeSessionId;
     const finalizationEvents = AttachmentLifecycleService.buildAuthorityFinalizationEvents(
       projection,
       claim.assignmentId,

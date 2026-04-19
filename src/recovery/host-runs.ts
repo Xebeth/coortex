@@ -8,6 +8,7 @@ import {
   getRunInstanceId
 } from "../core/run-state.js";
 import { nowIso } from "../utils/time.js";
+import { buildRetryRuntimeStatus } from "./runtime-status.js";
 
 export interface RecoveryDiagnostic {
   level: "warning";
@@ -89,9 +90,6 @@ export function buildStaleRunReconciliation(
   const nativeRunId = getNativeRunId(record);
   const assignment = projection.assignments.get(assignmentId);
   const objective = assignment?.objective ?? projection.status.currentObjective;
-  const retryObjective = objective.startsWith("Retry assignment ")
-    ? objective
-    : `Retry assignment ${assignmentId}: ${objective}`;
   const events: RuntimeEvent[] = [
     {
       eventId: randomUUID(),
@@ -113,13 +111,9 @@ export function buildStaleRunReconciliation(
       timestamp,
       type: "status.updated",
       payload: {
-        status: {
-          ...projection.status,
-          currentObjective: retryObjective,
-          lastDurableOutputAt: timestamp,
-          resumeReady: true,
+        status: buildRetryRuntimeStatus(projection, assignmentId, objective, timestamp, {
           lastStaleRunInstanceId: runInstanceId
-        }
+        })
       }
     }
   ];

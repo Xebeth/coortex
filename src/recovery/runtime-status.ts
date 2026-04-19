@@ -36,6 +36,26 @@ export function buildNextRuntimeStatus(
   };
 }
 
+export function buildRetryRuntimeStatus(
+  projection: RuntimeProjection,
+  assignmentId: string,
+  objective: string,
+  timestamp: string,
+  options?: {
+    lastStaleRunInstanceId?: string;
+  }
+): RuntimeProjection["status"] {
+  return {
+    ...projection.status,
+    currentObjective: buildRetryObjective(assignmentId, objective),
+    lastDurableOutputAt: timestamp,
+    resumeReady: true,
+    ...(options?.lastStaleRunInstanceId !== undefined
+      ? { lastStaleRunInstanceId: options.lastStaleRunInstanceId }
+      : {})
+  };
+}
+
 function nextCurrentObjective(
   projection: RuntimeProjection,
   assignmentId: string,
@@ -102,6 +122,16 @@ function nextDecisionCurrentObjective(
 
 function blockerSummaryOrFallback(blockerSummary: string, fallback: string): string {
   return blockerSummary.trim().length > 0 ? blockerSummary : fallback;
+}
+
+function buildRetryObjective(
+  assignmentId: string,
+  objective: string
+): string {
+  const retryPrefix = `Retry assignment ${assignmentId}:`;
+  return objective.startsWith(retryPrefix)
+    ? objective
+    : `${retryPrefix} ${objective}`;
 }
 
 function statusObjectiveTracksAssignment(

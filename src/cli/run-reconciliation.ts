@@ -1,5 +1,5 @@
 import type { HostAdapter } from "../adapters/contract.js";
-import { getRunInstanceId, isRunLeaseExpired } from "../core/run-state.js";
+import { getNativeRunId, getRunInstanceId, isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { HostRunRecord, RuntimeProjection } from "../core/types.js";
 import { fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
@@ -22,7 +22,6 @@ import {
   listProvisionalAttachmentClaims
 } from "../projections/attachment-claim-queries.js";
 import {
-  cleanupHostRunArtifactsWithLeaseVerification,
   reconcileStaleRunWithLeaseVerification
 } from "./host-run-cleanup.js";
 import type { CommandDiagnostic } from "./types.js";
@@ -291,8 +290,7 @@ async function reconcileActiveRunsInContext(
     }
 
     if (!effectiveProjection.assignments.has(assignmentId)) {
-      if (!isRunLeaseExpired(record)) {
-      } else if (snapshotFallback && isStaleRunReconciliationCandidate(record)) {
+      if (!isLiveLeaseRecord(record) && snapshotFallback && isStaleRunReconciliationCandidate(record)) {
         await reconcileOutOfProjectionStaleRun(
           context,
           effectiveProjection,
@@ -358,15 +356,14 @@ async function reconcileActiveRunsInContext(
   effectiveProjection = provisionalReconciliation.projection;
   changed ||= provisionalReconciliation.changed;
   const finalLeaseRecords = await context.adapter.inspectRuns(context.store);
-  const finalActiveLeases = listLiveLeaseAssignments(finalLeaseRecords);
+  const finalLiveLeaseRecords = finalLeaseRecords.filter(isLiveLeaseRecord);
+  const finalActiveLeases = finalLiveLeaseRecords.map((record) => record.assignmentId);
 
   return {
     projection: changed ? effectiveProjection : projection,
     diagnostics: [
       ...diagnostics,
-      ...finalLeaseRecords
-        .filter((record) => record.state === "running" && !isRunLeaseExpired(record))
-        .map((record) => createActiveRunDiagnostic(record.assignmentId, record))
+      ...finalLiveLeaseRecords.map((record) => createActiveRunDiagnostic(record.assignmentId, record))
     ],
     activeLeases: finalActiveLeases
   };
@@ -390,11 +387,8 @@ async function reconcileProvisionalAttachmentClaims(
     const record =
       recordByAssignmentId.get(claim.assignmentId)
       ?? await context.adapter.inspectRun(context.store, claim.assignmentId);
-    const liveNativeSessionId =
-      typeof record?.adapterData?.nativeRunId === "string" && record.adapterData.nativeRunId.length > 0
-        ? record.adapterData.nativeRunId
-        : undefined;
-    const hasLiveLease = !!record && record.state === "running" && !isRunLeaseExpired(record);
+    const liveNativeSessionId = getNativeRunId(record);
+    const hasLiveLease = isLiveLeaseRecord(record);
 
     if (hasLiveLease && liveNativeSessionId) {
       effectiveProjection = await AttachmentLifecycleService.promoteProvisionalAttachment(
@@ -420,55 +414,42 @@ async function reconcileProvisionalAttachmentClaims(
     const cleanupReason = hasLiveLease
       ? "Wrapped launch left only unverifiable provisional session state."
       : "Wrapped launch ended before native session identity could be finalized.";
-    effectiveProjection = startedHostRun || shouldRequeue
-      ? await AttachmentLifecycleService.orphanAttachmentClaim(
-          context.store,
-          effectiveProjection,
-          attachment.id,
-          claim.id,
-          {
-            attachment: cleanupReason,
-            claim: cleanupReason
-          },
-          options
-        )
-      : await AttachmentLifecycleService.releaseAttachmentClaim(
-          context.store,
-          effectiveProjection,
-          attachment.id,
-          claim.id,
-          {
-            attachment: "Wrapped launch did not establish a durable host session.",
-            claim: "Wrapped launch did not establish a durable host session."
-          },
-          options
-        );
-    const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
-      context.store,
-      context.adapter,
-      claim.assignmentId,
-      {
-        staleAt: nowIso(),
-        staleReason: cleanupReason,
-        ...(record ? { inspectedRecord: record } : {})
-      }
-    );
-    if (cleanupError) {
-      diagnostics.push(
-        ...warningDiagnostics(
-          `Host run cleanup artifacts could not be updated for assignment ${claim.assignmentId}. ${cleanupError.message}`,
-          "host-run-persist-failed"
-        )
-      );
-    }
-    if (shouldRequeue && assignment) {
-      effectiveProjection = await AttachmentLifecycleService.requeueAssignmentForRetry(
+    if (startedHostRun || shouldRequeue) {
+      const clearedProvisional = await AttachmentLifecycleService.cleanupHostRunArtifactsAndOrphanClaim(
         context.store,
+        context.adapter,
         effectiveProjection,
-        claim.assignmentId,
-        assignment.objective,
+        attachment,
+        claim,
+        cleanupReason,
+        {
+          cleanupOrder: "after_orphan",
+          ...(record ? { inspectedRecord: record } : {}),
+          ...(shouldRequeue && assignment ? { requeueObjective: assignment.objective } : {})
+        },
         options
       );
+      effectiveProjection = clearedProvisional.projection;
+      diagnostics.push(...warningDiagnostics(clearedProvisional.cleanupWarning, "host-run-persist-failed"));
+    } else {
+      const releasedProvisional = await AttachmentLifecycleService.cleanupHostRunArtifactsAndReleaseClaim(
+        context.store,
+        context.adapter,
+        effectiveProjection,
+        attachment,
+        claim,
+        {
+          attachment: "Wrapped launch did not establish a durable host session.",
+          claim: "Wrapped launch did not establish a durable host session."
+        },
+        cleanupReason,
+        {
+          ...(record ? { inspectedRecord: record } : {})
+        },
+        options
+      );
+      effectiveProjection = releasedProvisional.projection;
+      diagnostics.push(...warningDiagnostics(releasedProvisional.cleanupWarning, "host-run-persist-failed"));
     }
     diagnostics.push({
       level: "warning",
@@ -844,8 +825,14 @@ function isStaleRunReconciliationCandidate(record: HostRunRecord): boolean {
 
 function listLiveLeaseAssignments(records: HostRunRecord[]): string[] {
   return records
-    .filter((record) => record.state === "running" && !isRunLeaseExpired(record))
+    .filter(isLiveLeaseRecord)
     .map((record) => record.assignmentId);
+}
+
+function isLiveLeaseRecord(
+  record: HostRunRecord | undefined
+): record is HostRunRecord & { state: "running" } {
+  return record?.state === "running" && !isRunLeaseExpired(record);
 }
 
 async function applyRecoveryProjectionEvents(
