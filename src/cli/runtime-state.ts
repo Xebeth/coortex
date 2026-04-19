@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { HostAdapter } from "../adapters/contract.js";
+import { isRunLeaseExpired } from "../core/run-state.js";
 import type {
   DecisionPacket,
   HostRunRecord,
@@ -13,9 +14,7 @@ import {
   createActiveRunDiagnostic,
   deriveWorkflowCleanupRecord,
   deriveWorkflowRunHandling,
-  deriveWorkflowRunTruth,
-  shouldCleanupWorkflowRunArtifacts,
-  shouldEmitCurrentWorkflowStaleReconciliation
+  deriveWorkflowRunTruth
 } from "../recovery/host-runs.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
@@ -29,6 +28,11 @@ import type { CommandDiagnostic } from "./types.js";
 
 type WorkflowHiddenCleanup = ReturnType<typeof buildWorkflowHiddenRunCleanup>;
 type WorkflowStaleRecovery = ReturnType<typeof buildWorkflowStaleRunRecovery>;
+
+interface WorkflowCleanupResult {
+  diagnostics: CommandDiagnostic[];
+  clearedLease: boolean;
+}
 
 type WorkflowRunReconciliationAction =
   | {
@@ -167,7 +171,7 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
     );
     projection = executed.projection;
     diagnostics.push(...executed.diagnostics);
-    pendingHiddenCleanups.push(...executed.deferredHiddenCleanups);
+    pendingHiddenCleanups.push(...executed.confirmedHiddenCleanups);
   }
 
   for (const cleanup of pendingHiddenCleanups) {
@@ -250,6 +254,37 @@ export function diagnosticsFromWarning(
   return warning ? [{ level: "warning", code, message: warning }] : [];
 }
 
+function isWorkflowStaleCleanupRecord(record: HostRunRecord): boolean {
+  return (
+    (record.state === "running" &&
+      record.staleReasonCode !== "malformed_lease_artifact" &&
+      isRunLeaseExpired(record)) ||
+    (record.state === "completed" && Boolean(record.staleReasonCode) && !record.terminalOutcome)
+  );
+}
+
+function shouldEmitCurrentWorkflowStaleSuccess(
+  projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>,
+  before: ReturnType<typeof deriveWorkflowRunTruth>,
+  record: HostRunRecord,
+  assignmentId: string,
+  cleanupResult: WorkflowCleanupResult | undefined,
+  recoveredStaleRunInThisPlan: boolean
+): boolean {
+  const currentAssignmentQueued =
+    projection.workflowProgress?.currentAssignmentId === assignmentId &&
+    projection.assignments.get(assignmentId)?.state === "queued";
+  if (!currentAssignmentQueued) {
+    return false;
+  }
+  if (recoveredStaleRunInThisPlan) {
+    return before.hasLeaseArtifact ? Boolean(cleanupResult?.clearedLease) : true;
+  }
+  return before.hasLeaseArtifact &&
+    Boolean(cleanupResult?.clearedLease) &&
+    isWorkflowStaleCleanupRecord(record);
+}
+
 async function emitWorkflowStaleReconciliation(
   store: RuntimeStore,
   adapter: HostAdapter,
@@ -294,14 +329,17 @@ async function cleanupRunArtifactsWithDiagnostics(
   store: RuntimeStore,
   adapter: HostAdapter,
   record: HostRunRecord
-): Promise<CommandDiagnostic[]> {
+): Promise<WorkflowCleanupResult> {
   const cleanupError = await cleanupRunArtifacts(store, adapter, record);
-  return cleanupError
-    ? diagnosticsFromWarning(
-        `Host run reconciliation artifacts could not be updated for assignment ${record.assignmentId}. ${cleanupError.message}`,
-        "host-run-persist-failed"
-      )
-    : [];
+  return {
+    diagnostics: cleanupError
+      ? diagnosticsFromWarning(
+          `Host run reconciliation artifacts could not be updated for assignment ${record.assignmentId}. ${cleanupError.message}`,
+          "host-run-persist-failed"
+        )
+      : [],
+    clearedLease: !cleanupError
+  };
 }
 
 async function classifyWorkflowLeaseVisibility(
@@ -343,7 +381,8 @@ async function reconcileWorkflowRunPlan(
 ): Promise<{
   projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
   diagnostics: CommandDiagnostic[];
-  deferredHiddenCleanups: WorkflowHiddenCleanup[];
+  confirmedHiddenCleanups: WorkflowHiddenCleanup[];
+  cleanupResults: Map<string, WorkflowCleanupResult>;
   recoveredRunRecord?: HostRunRecord;
   changed: boolean;
 }> {
@@ -371,45 +410,40 @@ async function reconcileWorkflowRunPlan(
     changed = changed || converged.changed;
   }
 
-  if (plan.staleRecovery) {
-    const currentTruthAfter = deriveWorkflowRunTruth(effectiveProjection, plan.record, {
-      hasLeaseArtifact:
-        recordHasLease.get(plan.record.assignmentId)
-          ?? await adapter.hasRunLease(store, plan.record.assignmentId)
-    });
-    if (shouldEmitCurrentWorkflowStaleReconciliation(plan.truth, currentTruthAfter)) {
-      diagnostics.push(
-        ...await emitWorkflowStaleReconciliation(
-          store,
-          adapter,
-          effectiveProjection.sessionId,
-          plan.staleRecovery
-        )
-      );
-      diagnostics.push(
-        ...await cleanupRunArtifactsWithDiagnostics(
-          store,
-          adapter,
-          plan.staleRecovery.staleRecord
-        )
-      );
-      recordHasLease.set(plan.record.assignmentId, false);
-    } else if (shouldCleanupWorkflowRunArtifacts(currentTruthAfter)) {
-      diagnostics.push(
-        ...await cleanupRunArtifactsWithDiagnostics(
-          store,
-          adapter,
-          plan.staleRecovery.staleRecord
-        )
-      );
-      recordHasLease.set(plan.record.assignmentId, false);
-    }
+  let cleanupResult = executed.cleanupResults.get(plan.record.assignmentId);
+  if (!cleanupResult && plan.staleRecovery) {
+    cleanupResult = await cleanupRunArtifactsWithDiagnostics(
+      store,
+      adapter,
+      plan.staleRecovery.staleRecord
+    );
+    diagnostics.push(...cleanupResult.diagnostics);
+    recordHasLease.set(plan.record.assignmentId, !cleanupResult.clearedLease);
+  }
+
+  if (shouldEmitCurrentWorkflowStaleSuccess(
+    effectiveProjection,
+    plan.truth,
+    plan.record,
+    plan.record.assignmentId,
+    cleanupResult,
+    Boolean(plan.staleRecovery)
+  )) {
+    diagnostics.push(
+      ...await emitWorkflowStaleReconciliation(
+        store,
+        adapter,
+        effectiveProjection.sessionId,
+        plan.staleRecovery ?? buildWorkflowStaleRunRecovery(plan.record)
+      )
+    );
   }
 
   return {
     projection: effectiveProjection,
     diagnostics,
-    deferredHiddenCleanups: executed.deferredHiddenCleanups,
+    confirmedHiddenCleanups: executed.confirmedHiddenCleanups,
+    cleanupResults: executed.cleanupResults,
     ...(executed.recoveredRunRecord ? { recoveredRunRecord: executed.recoveredRunRecord } : {}),
     changed
   };
@@ -425,15 +459,18 @@ async function executeWorkflowRunPlanActions(
 ): Promise<{
   projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
   diagnostics: CommandDiagnostic[];
-  deferredHiddenCleanups: WorkflowHiddenCleanup[];
+  confirmedHiddenCleanups: WorkflowHiddenCleanup[];
+  cleanupResults: Map<string, WorkflowCleanupResult>;
   recoveredRunRecord?: HostRunRecord;
   changed: boolean;
 }> {
   const diagnostics: CommandDiagnostic[] = [];
-  const deferredHiddenCleanups: WorkflowHiddenCleanup[] = [];
+  const confirmedHiddenCleanups: WorkflowHiddenCleanup[] = [];
+  const cleanupResults = new Map<string, WorkflowCleanupResult>();
   let effectiveProjection = projection;
   let recoveredRunRecord: HostRunRecord | undefined;
   let changed = false;
+  let pendingHiddenCleanup: WorkflowHiddenCleanup | undefined;
 
   for (const action of plan.actions) {
     switch (action.kind) {
@@ -465,18 +502,23 @@ async function executeWorkflowRunPlanActions(
         changed = true;
         break;
       }
-      case "cleanup_run_artifacts":
-        diagnostics.push(
-          ...await cleanupRunArtifactsWithDiagnostics(
-            store,
-            adapter,
-            action.cleanupRecord
-          )
+      case "cleanup_run_artifacts": {
+        const cleanupResult = await cleanupRunArtifactsWithDiagnostics(
+          store,
+          adapter,
+          action.cleanupRecord
         );
-        recordHasLease.set(action.record.assignmentId, false);
+        diagnostics.push(...cleanupResult.diagnostics);
+        cleanupResults.set(action.record.assignmentId, cleanupResult);
+        recordHasLease.set(action.record.assignmentId, !cleanupResult.clearedLease);
+        if (cleanupResult.clearedLease && pendingHiddenCleanup) {
+          confirmedHiddenCleanups.push(pendingHiddenCleanup);
+          pendingHiddenCleanup = undefined;
+        }
         break;
+      }
       case "defer_hidden_cleanup":
-        deferredHiddenCleanups.push(action.cleanup);
+        pendingHiddenCleanup = action.cleanup;
         break;
     }
   }
@@ -484,7 +526,8 @@ async function executeWorkflowRunPlanActions(
   return {
     projection: effectiveProjection,
     diagnostics,
-    deferredHiddenCleanups,
+    confirmedHiddenCleanups,
+    cleanupResults,
     ...(recoveredRunRecord ? { recoveredRunRecord } : {}),
     changed
   };
