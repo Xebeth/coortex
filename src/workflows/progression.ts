@@ -157,17 +157,7 @@ export async function evaluateWorkflowProgression(
         )
       };
     case "rerun_stale":
-      void lane.staleFact;
-      return {
-        events: buildSameModuleRerunEvents(
-          projection,
-          progress,
-          currentAssignment,
-          timestamp
-        )
-      };
     case "rerun_resolved_decision":
-      void lane.decision;
       return {
         events: buildSameModuleRerunEvents(projection, progress, currentAssignment, timestamp)
       };
