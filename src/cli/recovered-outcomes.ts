@@ -38,13 +38,21 @@ export async function synthesizeRecoveredExecutionFromReconciliation(
       projectionAfterReconciliation,
       recoveredDecision.assignment.id
     );
+    const execution = await recoverMatchingExecutionFromDurableRun(
+      store,
+      adapter,
+      recoveredDecision.assignment.id,
+      recoveredDecision.decision
+    );
     return {
       assignment: recoveredDecision.assignment,
       envelope,
-      execution: synthesizeRecoveredDecisionExecution(
-        recoveredDecision.assignment,
-        recoveredDecision.decision
-      )
+      execution:
+        execution ??
+        synthesizeRecoveredDecisionExecution(
+          recoveredDecision.assignment,
+          recoveredDecision.decision
+        )
     };
   }
 
@@ -65,14 +73,22 @@ export async function synthesizeRecoveredExecutionFromReconciliation(
     projectionAfterReconciliation,
     recoveredResult.assignment.id
   );
+  const execution = await recoverMatchingExecutionFromDurableRun(
+    store,
+    adapter,
+    recoveredResult.assignment.id,
+    recoveredResult.result
+  );
 
   return {
     assignment: recoveredResult.assignment,
     envelope,
-    execution: synthesizeRecoveredResultExecution(
-      recoveredResult.assignment,
-      recoveredResult.result
-    )
+    execution:
+      execution ??
+      synthesizeRecoveredResultExecution(
+        recoveredResult.assignment,
+        recoveredResult.result
+      )
   };
 }
 
@@ -246,6 +262,22 @@ function isRecoverableCompletedRunRecord(record: { state: string; terminalOutcom
   return record.state === "completed" && Boolean(record.terminalOutcome);
 }
 
+async function recoverMatchingExecutionFromDurableRun(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId: string,
+  packet: DecisionPacket | ResultPacket
+): Promise<HostExecutionOutcome | undefined> {
+  const execution = synthesizeRecoveredExecution(await adapter.inspectRun(store, assignmentId));
+  if (!execution) {
+    return undefined;
+  }
+  if (execution.outcome.kind === "decision") {
+    return matchesRecoveredDecisionExecution(execution, packet) ? execution : undefined;
+  }
+  return matchesRecoveredResultExecution(execution, packet) ? execution : undefined;
+}
+
 function findRecoveredDecisionCandidate(
   projectionBeforeReconciliation: LoadedProjection,
   projectionAfterReconciliation: LoadedProjection
@@ -369,6 +401,40 @@ function hasMatchingResult(
         candidate.summary === result.summary &&
         candidate.createdAt === result.createdAt
       )
+      )
+  );
+}
+
+function matchesRecoveredDecisionExecution(
+  execution: HostExecutionOutcome,
+  packet: DecisionPacket | ResultPacket
+): boolean {
+  if (execution.outcome.kind !== "decision" || "producerId" in packet) {
+    return false;
+  }
+  return execution.outcome.capture.assignmentId === packet.assignmentId && (
+    execution.outcome.capture.decisionId === packet.decisionId ||
+    (
+      execution.outcome.capture.blockerSummary === packet.blockerSummary &&
+      execution.outcome.capture.recommendedOption === packet.recommendedOption &&
+      execution.outcome.capture.createdAt === packet.createdAt
+    )
+  );
+}
+
+function matchesRecoveredResultExecution(
+  execution: HostExecutionOutcome,
+  packet: DecisionPacket | ResultPacket
+): boolean {
+  if (execution.outcome.kind !== "result" || !("producerId" in packet)) {
+    return false;
+  }
+  return execution.outcome.capture.assignmentId === packet.assignmentId && (
+    execution.outcome.capture.resultId === packet.resultId ||
+    (
+      execution.outcome.capture.status === packet.status &&
+      execution.outcome.capture.summary === packet.summary &&
+      execution.outcome.capture.createdAt === packet.createdAt
     )
   );
 }

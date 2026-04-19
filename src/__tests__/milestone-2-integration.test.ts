@@ -909,6 +909,7 @@ test("milestone-2 integration: recovered legacy outcomes use the shared bounded 
   assert.equal(run.execution.outcome.kind, "result");
   assert.equal(run.execution.outcome.capture.resultId, "legacy-recovered-result");
   assert.equal(run.execution.outcome.capture.summary, summary);
+  assert.equal(getNativeRunId(run.execution.run), "legacy-recovery-thread");
   assert.equal(run.envelope.metadata.recoveredOutcome, true);
   assert.ok(run.envelope.estimatedChars > 0);
   assert.equal(run.envelope.trimApplied, true);
@@ -916,6 +917,53 @@ test("milestone-2 integration: recovered legacy outcomes use the shared bounded 
   assert.equal(run.envelope.recentResults[0]?.reference, ".coortex/artifacts/results/legacy-recovered-result.txt");
   assert.equal(run.envelope.recoveryBrief.lastDurableResults[0]?.trimmed, true);
   assert.equal(artifact.trim(), summary);
+});
+
+test("milestone-2 integration: recovered legacy decisions preserve durable host run metadata", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used when a legacy recovered decision is synthesized");
+  });
+  await stripWorkflowStateFromRuntime(setup.store);
+
+  const completedAt = new Date(Date.now() - 20_000).toISOString();
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    adapterData: { nativeRunId: "legacy-decision-thread" },
+    startedAt: new Date(Date.now() - 30_000).toISOString(),
+    completedAt,
+    outcomeKind: "decision",
+    summary: "Need operator confirmation before continuing the legacy assignment.",
+    terminalOutcome: {
+      kind: "decision",
+      decision: {
+        decisionId: "legacy-decision-recovered",
+        requesterId: "codex",
+        blockerSummary: "Need operator confirmation before continuing the legacy assignment.",
+        options: [
+          { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+          { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+        ],
+        recommendedOption: "wait",
+        state: "open",
+        createdAt: completedAt
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(run.recoveredOutcome, true);
+  assert.equal(run.execution.outcome.kind, "decision");
+  assert.equal(run.execution.outcome.capture.decisionId, "legacy-decision-recovered");
+  assert.equal(
+    run.execution.outcome.capture.blockerSummary,
+    "Need operator confirmation before continuing the legacy assignment."
+  );
+  assert.equal(getNativeRunId(run.execution.run), "legacy-decision-thread");
+  assert.equal(run.envelope.metadata.recoveredOutcome, true);
 });
 
 test("milestone-2 integration: run surfaces a recovered verify completion after the workflow closes", async () => {
