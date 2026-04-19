@@ -146,8 +146,7 @@ export function buildSameModuleRerunEvents(
   projection: RuntimeProjection,
   progress: WorkflowProgressRecord,
   currentAssignment: Assignment,
-  timestamp: string,
-  previousGateOutcome?: string
+  timestamp: string
 ): RuntimeEvent[] {
   const nextAttempt = progress.currentModuleAttempt + 1;
   const events: RuntimeEvent[] = [];
@@ -183,7 +182,6 @@ export function buildSameModuleRerunEvents(
       appliedAt: timestamp
     }
   });
-  void previousGateOutcome;
   return events;
 }
 

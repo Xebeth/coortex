@@ -163,8 +163,7 @@ export async function evaluateWorkflowProgression(
           projection,
           progress,
           currentAssignment,
-          timestamp,
-          currentModule.gateOutcome === "blocked" ? undefined : currentModule.gateOutcome
+          timestamp
         )
       };
     case "rerun_resolved_decision":
@@ -210,8 +209,7 @@ export async function evaluateWorkflowProgression(
           projection,
           progress,
           currentAssignment,
-          timestamp,
-          gateEvaluation.gateOutcome
+          timestamp
         )
       );
       break;
