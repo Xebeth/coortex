@@ -148,12 +148,7 @@ export async function resumeRuntime(
   await ensureRuntimeInitialized(store);
 
   const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
-  const authoritativeLeaseAssignmentId = workflowAware.activeLeases[0];
-  if (authoritativeLeaseAssignmentId) {
-    throw new Error(
-      `Assignment ${authoritativeLeaseAssignmentId} already has an active host run lease.`
-    );
-  }
+  assertNoActiveWorkflowLease(workflowAware.activeLeases);
   const diagnostics = [...workflowAware.diagnostics];
   const effectiveProjection = workflowAware.projection;
   const brief = buildRecoveryBrief(effectiveProjection);
@@ -196,10 +191,7 @@ export async function runRuntime(
   const projectionBeforeResult = await loadOperatorProjectionWithDiagnostics(store);
   const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
   const projectionBefore = workflowAware.projection;
-  if (workflowAware.activeLeases.length > 0) {
-    const assignmentId = workflowAware.activeLeases[0]!;
-    throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
-  }
+  assertNoActiveWorkflowLease(workflowAware.activeLeases);
   let diagnostics: CommandDiagnostic[] = [...workflowAware.diagnostics];
   if (workflowAware.recoveredRunRecord) {
     const recoveredExecution = synthesizeRecoveredExecution(workflowAware.recoveredRunRecord);
@@ -352,4 +344,11 @@ export async function inspectRuntimeContext(
 ) {
   await ensureRuntimeInitialized(store);
   return loadInspectRuntimeContext(store, adapter, assignmentId);
+}
+
+function assertNoActiveWorkflowLease(activeLeases: string[]): void {
+  const assignmentId = activeLeases[0];
+  if (assignmentId) {
+    throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
+  }
 }
