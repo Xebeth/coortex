@@ -108,7 +108,6 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   const hiddenActiveLeases: string[] = [];
   const pendingHiddenCleanups: WorkflowHiddenCleanup[] = [];
   let recoveredRunRecord: HostRunRecord | undefined;
-  const initialCurrentAssignmentId = projection.workflowProgress!.currentAssignmentId;
   const inspectedRuns = await adapter.inspectRuns(store);
   const recordHasLease = new Map<string, boolean>();
   await Promise.all(
@@ -122,15 +121,6 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   const inspectedWorkflowRunsByAssignmentId = new Map(
     inspectedWorkflowRuns.map((record) => [record.assignmentId, record] as const)
   );
-  const currentRecord = initialCurrentAssignmentId
-    ? await resolveWorkflowRunRecord(
-        store,
-        adapter,
-        initialCurrentAssignmentId,
-        inspectedWorkflowRunsByAssignmentId,
-        recordHasLease
-      )
-    : undefined;
 
   const initialConvergence = await convergeWorkflowProjection(
     store,
