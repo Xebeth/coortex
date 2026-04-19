@@ -59,8 +59,7 @@ export class HostRunStore {
     }
 
     try {
-      await this.store.writeJsonArtifact(this.artifacts.runRecordPath(record.assignmentId), record);
-      await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), record);
+      await this.persistRunRecordMetadata(record);
     } catch (error) {
       const cleanupError = await this.cleanupClaimFailure(record.assignmentId);
       if (cleanupError) {
@@ -97,8 +96,7 @@ export class HostRunStore {
       } else {
         await this.store.deleteArtifact(this.artifacts.runLeasePath(record.assignmentId));
       }
-      await this.store.writeJsonArtifact(this.artifacts.runRecordPath(record.assignmentId), record);
-      await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), record);
+      await this.persistRunRecordMetadata(record);
     });
     this.writeQueue = writePromise.catch(() => undefined);
     await writePromise;
@@ -166,6 +164,11 @@ export class HostRunStore {
       return undefined;
     }
     return new Error(cleanupErrors.join(" "));
+  }
+
+  private async persistRunRecordMetadata(record: HostRunRecord): Promise<void> {
+    await this.store.writeJsonArtifact(this.artifacts.runRecordPath(record.assignmentId), record);
+    await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), record);
   }
 
   private async tryDeleteArtifact(relativePath: string, label: string): Promise<Error | undefined> {
