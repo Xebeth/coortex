@@ -17,6 +17,17 @@ export async function buildWorkflowAwareEnvelope(
   });
 }
 
+export async function buildAndPersistWorkflowEnvelope(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: LoadedProjection,
+  brief: ReturnType<typeof buildRecoveryBrief>
+): Promise<TaskEnvelope> {
+  const envelope = await buildWorkflowAwareEnvelope(store, adapter, projection, brief);
+  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
+  return envelope;
+}
+
 export async function buildRecoveredExecutionEnvelope(
   store: RuntimeStore,
   adapter: HostAdapter,

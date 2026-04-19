@@ -33,6 +33,7 @@ import {
   synthesizeRecoveredExecutionFromReconciliation
 } from "./recovered-outcomes.js";
 import {
+  buildAndPersistWorkflowEnvelope,
   buildRecoveredExecutionEnvelope,
   buildWorkflowAwareEnvelope
 } from "./workflow-envelope.js";
@@ -332,17 +333,6 @@ function assertNoActiveWorkflowLease(activeLeases: string[]): void {
   if (assignmentId) {
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
-}
-
-async function buildAndPersistWorkflowEnvelope(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  brief: ReturnType<typeof buildRecoveryBrief>
-): Promise<Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>> {
-  const envelope = await buildWorkflowAwareEnvelope(store, adapter, projection, brief);
-  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
-  return envelope;
 }
 
 function buildEnvelopeTelemetryMetadata(
