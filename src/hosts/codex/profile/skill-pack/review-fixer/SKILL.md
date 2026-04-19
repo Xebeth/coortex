@@ -8,6 +8,21 @@ description: Repair code from structured review output with root-cause-driven fi
 Turn review output into root-cause-driven fixes that close defect families at the
 owning seam rather than patching the nearest manifestation.
 
+## Conversation-visible plan
+
+Keep a short conversation-visible plan/progress list updated while this
+workflow runs so the user can tell which family or phase is active.
+
+- At the start, state the active family set (or current family) and the next
+  step.
+- After intake, after each family closeout, and before final verification,
+  update the in-conversation progress.
+- If you defer, split, or re-scope a family, say so explicitly before
+  continuing.
+- These updates are status signals, not approval gates. Unless the user
+  explicitly asks for a pause or the fixer is blocked on missing input,
+  continue after the update without waiting for acknowledgment.
+
 ## Workflow
 
 1. Load the review input.

@@ -1,4 +1,4 @@
 interface:
   display_name: "Seam Walkback Review"
   short_description: "Archaeology-driven seam cleanup workflow"
-  default_prompt: "Use $seam-walkback-review to walk back pivot commits, extract stable seams, refresh review baselines, run targeted seam reviews or bounded slice reviews, repair the owning seam on current HEAD, run $coortex-deslop on touched files only, verify, and commit each slice atomically."
+  default_prompt: "Use $seam-walkback-review to walk back pivot commits, extract stable seams, refresh review baselines, run targeted seam reviews or bounded slice reviews, repair the owning seam on current HEAD, run $coortex-deslop on touched files only, verify, and commit each slice atomically. Keep a short conversation-visible plan/progress list updated at phase boundaries so the user can see what is happening. Treat those updates as non-blocking status signals, not approval checkpoints; continue unless the user explicitly asks you to pause or you are genuinely blocked."

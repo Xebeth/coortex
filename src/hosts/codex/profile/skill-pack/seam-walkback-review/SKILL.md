@@ -20,6 +20,20 @@ This skill turns that work into a repeatable loop:
 6. mandatory post-fix anti-slop cleanup on touched files only
 7. targeted verification and atomic commit
 
+## Conversation-visible plan
+
+Keep a short conversation-visible plan/progress list updated while this skill
+runs so the user can tell what is happening.
+
+- At the start, state the current cluster or seam and the next planned step.
+- After each major phase boundary, update the in-conversation plan/progress
+  before diving back into execution.
+- If you re-scope, skip a phase, or discover a better next slice, say so
+  explicitly instead of silently changing course.
+- These updates are status signals, not approval checkpoints. Unless the user
+  explicitly asks you to pause or you are genuinely blocked, continue after the
+  update without waiting for acknowledgment.
+
 ## When to use it
 
 Good fits:

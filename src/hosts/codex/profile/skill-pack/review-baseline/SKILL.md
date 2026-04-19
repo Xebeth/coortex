@@ -11,6 +11,21 @@ Create or refresh a project-resident review baseline that a separate execution s
 Use broad architectural discovery when primary-baseline work is in scope, then let the user refine surfaces and lens configuration before writing the baseline.
 When a project has recurring narrow review modes, this skill may also write standalone alternative baseline files for those targeted checks.
 
+## Conversation-visible plan
+
+Keep a short conversation-visible plan/progress list updated while baseline work
+runs so the user can see which phase is in flight.
+
+- At the start, state whether you are refreshing the primary baseline or
+  creating an alternative baseline and what comes next.
+- After inventory, after surface drafting, and before writing the baseline,
+  update the in-conversation progress.
+- If you discover that the requested baseline shape is not viable, say so
+  explicitly before changing approach.
+- These updates are not approval checkpoints. Unless the user explicitly asks
+  you to pause or the baseline work is blocked on a missing decision, continue
+  after the update without waiting for acknowledgment.
+
 ## Workflow
 
 1. Determine whether this run is:

@@ -158,6 +158,19 @@ Report:
 - changed files
 - remaining risks or consciously deferred follow-ups
 
+## Conversation-visible progress
+
+Keep the user informed while the cleanup pass runs.
+
+- At the start, state the bounded scope, behavior lock, and first cleanup pass.
+- After each major cleanup pass or gate rerun, update the in-conversation
+  progress before continuing.
+- If you decide a smell is out of scope or unsafe to clean, say so explicitly
+  instead of silently skipping it.
+- These updates are progress notes, not approval checkpoints. Unless the user
+  explicitly asks you to pause or the cleanup is blocked on missing input,
+  continue after the update without waiting for acknowledgment.
+
 ## Output format
 
 ```text

@@ -62,6 +62,21 @@ In targeted return-review mode, stay family-local and review the completed fix a
 9. Append normalized family outcomes to the repository family ledger on disk.
 10. Use the bundled helper to query which families were reopened by the current run and surface those results explicitly in the final review output.
 
+## Conversation-visible plan
+
+Because orchestrated review can run for a while, keep a short
+conversation-visible plan/progress list updated so the user knows what phase is
+active.
+
+- At the start, state the review mode and the next phase.
+- After prep, after lane spawning, and before final synthesis, update the
+  in-conversation plan/progress.
+- If the review has to re-scope, wait on slow lanes, or relaunch work, say so
+  explicitly rather than going silent.
+- These updates are not pause points. Unless the user explicitly asks you to
+  stop or the workflow is blocked on missing input/evidence, continue after the
+  update without waiting for acknowledgment.
+
 ## Hard Rules
 
 - In full discovery review, refuse if the baseline is missing, unparseable, stale, or too underspecified for grounded execution.

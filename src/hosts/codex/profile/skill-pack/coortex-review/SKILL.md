@@ -77,6 +77,19 @@ These match the built-in lens ids configured by `review-baseline` and used by
    supports them and they materially affect correctness for this review.
 7. Return severity-rated findings with concrete file evidence.
 
+## Conversation-visible progress
+
+Even for a bounded review, keep the user informed with brief plan/progress
+updates when the review takes more than one phase.
+
+- At the start, state the bounded scope and next review step.
+- If you expand to inspect sibling paths or run executable evidence, mention
+  that before doing it.
+- Before delivering the verdict, briefly summarize the completed review steps.
+- These updates are progress notes, not pause points. Unless the user
+  explicitly asks you to stop or the review is blocked on missing input,
+  continue after the update without waiting for acknowledgment.
+
 ## Optional machine output
 
 When the user explicitly asks for a fixer-consumable one-family handoff, emit a

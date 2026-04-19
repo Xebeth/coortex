@@ -66,6 +66,50 @@ test("codex managed skill pack is self-contained", async () => {
   assert.deepEqual(Object.fromEntries(forbiddenHits), {});
 });
 
+test("managed workflow skills require conversation-visible progress guidance", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-baseline/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /conversation-visible plan|conversation-visible progress/i, path);
+  }
+});
+
+test("managed workflow skills treat progress updates as non-blocking", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-baseline/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /non-blocking|not approval checkpoints|not pause points|not approval gates/i, path);
+  }
+});
+
 async function walk(
   dir: string,
   visitFile: (path: string) => Promise<void>
