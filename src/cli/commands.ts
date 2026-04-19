@@ -112,13 +112,12 @@ export async function initRuntime(
   diagnostics.push(...workflowAware.diagnostics);
   await adapter.initialize(store, projection);
   const bootstrapBrief = buildRecoveryBrief(projection);
-  const bootstrapEnvelope = await buildWorkflowAwareEnvelope(
+  const bootstrapEnvelope = await buildAndPersistWorkflowEnvelope(
     store,
     adapter,
     projection,
     bootstrapBrief
   );
-  await store.writeJsonArtifact("runtime/last-resume-envelope.json", bootstrapEnvelope);
   diagnostics.push(...await recordCommandTelemetryWarning(
     store,
     adapter,
@@ -155,10 +154,14 @@ export async function resumeRuntime(
   if (brief.activeAssignments.length === 0) {
     throw new Error("No active assignment is available to resume.");
   }
-  const envelope = await buildWorkflowAwareEnvelope(store, adapter, effectiveProjection, brief);
+  const envelope = await buildAndPersistWorkflowEnvelope(
+    store,
+    adapter,
+    effectiveProjection,
+    brief
+  );
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(effectiveProjection));
-  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
   diagnostics.push(...await recordCommandTelemetryWarning(
     store,
     adapter,
@@ -357,4 +360,15 @@ async function recordCommandTelemetryWarning(
     adapter.normalizeTelemetry(capture)
   );
   return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
+}
+
+async function buildAndPersistWorkflowEnvelope(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  brief: ReturnType<typeof buildRecoveryBrief>
+): Promise<Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>> {
+  const envelope = await buildWorkflowAwareEnvelope(store, adapter, projection, brief);
+  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
+  return envelope;
 }
