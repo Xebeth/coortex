@@ -85,7 +85,9 @@ Every adapter must provide durable artifacts with these roles:
   not an exclusivity primitive.
 
 Adapters may realize those roles with different filenames or storage
-backends, but the role semantics must stay consistent.
+backends, including layouts where the assignment id lives in a
+directory segment instead of the basename, but the role semantics must
+stay consistent.
 
 Shared host-run infrastructure must depend on those artifact roles
 through the artifact-store contract, not by hardcoding a specific
@@ -157,9 +159,15 @@ rules:
 - Warning-only degradation is allowed only after lease cleanup is
   confirmed. If lease cleanup fails, the command must surface a stronger
   persistence failure than a normal warning.
-- Wrapped reclaim failure and provisional-authority cleanup may clear
-  runtime attachment truth before host cleanup finishes, but they must
-  not surface queued retry truth unless lease cleanup has been proved.
+- Wrapped reclaim failure must not clear authoritative attachment truth
+  before host cleanup has been proved.
+- Reclaimed terminal resume finalization must rebuild the full
+  operator-facing envelope from final projection truth, including top-
+  level recent-results and trim metadata, rather than patching a
+  pre-transition envelope.
+- Provisional-authority cleanup may clear provisional attachment truth
+  before host cleanup finishes, but it must not surface queued retry
+  truth unless lease cleanup has been proved.
 
 ---
 
@@ -190,6 +198,13 @@ stale host run to be requeued again.
 This idempotence applies to the same stale host-run instance. A later
 fresh retry claim that acquires a new lease epoch or run instance and
 then goes stale must emit a new stale reconciliation.
+
+If the adapter record has no durable per-attempt `runInstanceId`, stale
+reconciliation must mint one durable stale identity and persist it into
+the stale-completed record plus runtime stale markers before reusing it
+for idempotence. Native session ids, timestamps, and hashed record
+fingerprints are diagnostic only; they are not authoritative stale-run
+identities.
 
 Runtime events and snapshot updates must become durable before adapter
 artifacts are rewritten to their reconciled stale-completed form.
@@ -279,7 +294,9 @@ runtime truth on their own.
   degraded terminal-warning cleanup writes must prove that adopted
   fence instead of relying only on the initial takeover CAS. Terminal
   cleanup must not fall back to an unfenced plain delete once lease
-  ownership has been proved.
+  ownership has been proved. Freshly minted stale-run ids from degraded
+  reconciliation are valid for stale-run idempotence, but they do not
+  by themselves authorize deletion of a newer adopted live lease.
   Failure to acquire that boundary because another reclaim already owns
   it is duplicate blocking, not reclaim failure; it must not orphan or
   requeue the current authoritative attachment/claim.
@@ -374,13 +391,18 @@ truth is authoritative:
 3. multi-step transitions such as orphan-and-requeue, release-and-clear,
    or recover-and-update-status must preserve the earlier attachment,
    claim, assignment, and status mutations from the same command
+4. snapshot-only writes must preserve the latest durable `lastEventId`
+   boundary from `snapshot.json`; they must not mint a newer replay
+   boundary that does not exist in `events.ndjson`
 
 Snapshot-fallback durability must behave like one coherent state-machine
 transition, not a sequence of unrelated local rewrites.
 
 The same lock boundary must also be crash-recoverable. Event-log,
 snapshot, and lease callers may not be wedged forever by orphaned path
-locks from dead or reused process ids, and snapshot sync must derive its
+locks from dead or reused process ids. Unreadable owner metadata is not
+positive stale-owner proof: acquisition and cleanup must fail closed on
+that ambiguity instead of reaping the lock. Snapshot sync must derive its
 durable write payload while still holding the snapshot lock that guards
 the write. If a newer snapshot-only mutation lands before that final
 locked write begins, snapshot sync must preserve that newer durable

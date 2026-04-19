@@ -1,4 +1,4 @@
-import { basename, dirname } from "node:path";
+import { dirname } from "node:path";
 
 import type { RuntimeArtifactStore } from "./contract.js";
 import type { HostRunRecord } from "../core/types.js";
@@ -314,15 +314,17 @@ function createAssignmentArtifactPattern(
       suffix: string;
     }
   | undefined {
-  const fileName = basename(relativePath);
-  const markerIndex = fileName.indexOf(ASSIGNMENT_ID_TOKEN);
+  const normalizedPath = normalizeArtifactPath(relativePath);
+  const markerIndex = normalizedPath.indexOf(ASSIGNMENT_ID_TOKEN);
   if (markerIndex === -1) {
     return undefined;
   }
+  const prefix = normalizedPath.slice(0, markerIndex);
+  const lastSeparatorIndex = prefix.lastIndexOf("/");
   return {
-    directory: dirname(relativePath),
-    prefix: fileName.slice(0, markerIndex),
-    suffix: fileName.slice(markerIndex + ASSIGNMENT_ID_TOKEN.length)
+    directory: lastSeparatorIndex === -1 ? "" : prefix.slice(0, lastSeparatorIndex),
+    prefix,
+    suffix: normalizedPath.slice(markerIndex + ASSIGNMENT_ID_TOKEN.length)
   };
 }
 
@@ -333,11 +335,14 @@ function matchAssignmentId(
     suffix: string;
   }
 ): string | undefined {
-  const fileName = basename(relativePath);
-  if (!fileName.startsWith(pattern.prefix) || !fileName.endsWith(pattern.suffix)) {
+  const normalizedPath = normalizeArtifactPath(relativePath);
+  if (!normalizedPath.startsWith(pattern.prefix) || !normalizedPath.endsWith(pattern.suffix)) {
     return undefined;
   }
-  return fileName.slice(pattern.prefix.length, fileName.length - pattern.suffix.length);
+  return normalizedPath.slice(
+    pattern.prefix.length,
+    normalizedPath.length - pattern.suffix.length
+  );
 }
 
 async function listArtifacts(store: RuntimeArtifactStore, relativeDir: string): Promise<string[]> {
@@ -351,4 +356,8 @@ function hasArtifactListing(
   store: RuntimeArtifactStore
 ): store is RuntimeArtifactStore & { listArtifacts(relativeDir: string): Promise<string[]> } {
   return "listArtifacts" in store && typeof store.listArtifacts === "function";
+}
+
+function normalizeArtifactPath(relativePath: string): string {
+  return relativePath.replaceAll("\\", "/");
 }

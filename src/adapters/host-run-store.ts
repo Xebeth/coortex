@@ -8,6 +8,7 @@ import {
   type HostRunArtifactPaths
 } from "./host-run-lease-repository.js";
 import type { HostRunRecord } from "../core/types.js";
+import { COORTEX_MINTED_RUN_INSTANCE_ID_KEY } from "../core/run-state.js";
 
 export type { HostRunArtifactInspection, HostRunArtifactPaths, HostRunLeaseInspection } from "./host-run-lease-repository.js";
 
@@ -152,7 +153,12 @@ export class HostRunStore {
       await this.write(record);
       return undefined;
     } catch (error) {
-      if (record.state !== "running" && !ownerFence && !isHostRunOwnershipFenceError(error)) {
+      if (
+        record.state !== "running" &&
+        !ownerFence &&
+        !hasMintedStaleRunInstanceId(record) &&
+        !isHostRunOwnershipFenceError(error)
+      ) {
         const cleanupError = await this.tryDeleteLease(record.assignmentId);
         if (cleanupError) {
           const message = error instanceof Error ? error.message : String(error);
@@ -327,8 +333,46 @@ export class HostRunStore {
     if (!ownerFence) {
       if (record.state === "running") {
         await this.repository.writeLease(record);
-      } else {
+        return;
+      }
+
+      if (!hasMintedStaleRunInstanceId(record)) {
         await this.repository.deleteLease(record.assignmentId);
+        return;
+      }
+
+      const currentLease = await this.repository.readLease(record.assignmentId);
+      if (currentLease.state === "valid") {
+        ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+          record.assignmentId,
+          "completed lease finalization",
+          record,
+          currentLease.record
+        );
+        const deleted = await this.repository.deleteLeaseVersioned(record.assignmentId, currentLease.version);
+        if (!deleted.ok) {
+          throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
+        }
+      } else if (currentLease.state === "malformed") {
+        await this.repository.deleteLease(record.assignmentId);
+      }
+
+      const currentRunRecord = await this.repository.readRunRecord(record.assignmentId);
+      ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+        record.assignmentId,
+        "completed run persistence",
+        record,
+        currentRunRecord
+      );
+
+      const lastRun = await this.repository.readLastRunPointer();
+      if (lastRun.state === "valid" && lastRun.record.assignmentId === record.assignmentId) {
+        ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+          record.assignmentId,
+          "completed last-run persistence",
+          record,
+          lastRun.record
+        );
       }
       return;
     }
@@ -399,15 +443,37 @@ function withAdoptedOwnershipFence(
   };
 }
 
+function hasMintedStaleRunInstanceId(
+  record: Pick<HostRunRecord, "adapterData"> | undefined
+): boolean {
+  return record?.adapterData?.[COORTEX_MINTED_RUN_INSTANCE_ID_KEY] === true;
+}
+
+function ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+  assignmentId: string,
+  operation: string,
+  expectedRecord: Pick<HostRunRecord, "runInstanceId" | "adapterData">,
+  currentRecord: Pick<HostRunRecord, "runInstanceId" | "adapterData"> | undefined
+): void {
+  if (!hasMintedStaleRunInstanceId(expectedRecord)) {
+    return;
+  }
+  if (!currentRecord) {
+    return;
+  }
+  const currentFence = getRunOwnerFence(currentRecord);
+  if (currentFence || currentRecord.adapterData?.coortexReclaimLease === true) {
+    throw new HostRunOwnershipFenceError(assignmentId, operation);
+  }
+}
+
 function getRunOwnerFence(
-  record: Pick<HostRunRecord, "runInstanceId" | "state" | "staleReasonCode"> | undefined
+  record: Pick<HostRunRecord, "runInstanceId" | "adapterData"> | undefined
 ): string | undefined {
-  return typeof record?.runInstanceId === "string" &&
-    record.runInstanceId.length > 0 &&
-    (
-      record.state === "running" ||
-      (record.state === "completed" && !record.staleReasonCode)
-    )
+  if (hasMintedStaleRunInstanceId(record)) {
+    return undefined;
+  }
+  return typeof record?.runInstanceId === "string" && record.runInstanceId.length > 0
     ? record.runInstanceId
     : undefined;
 }
@@ -416,7 +482,7 @@ function ensureMatchingRunOwnerFence(
   assignmentId: string,
   operation: string,
   expectedFence: string,
-  record: Pick<HostRunRecord, "runInstanceId" | "state" | "staleReasonCode"> | undefined
+  record: Pick<HostRunRecord, "runInstanceId" | "adapterData"> | undefined
 ): void {
   const actualFence = getRunOwnerFence(record);
   if (actualFence && actualFence !== expectedFence) {

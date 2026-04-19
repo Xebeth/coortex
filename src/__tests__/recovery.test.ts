@@ -428,7 +428,217 @@ test("recovery brief rejects duplicate active claims for the same assignment", a
   );
 });
 
-test("recovery brief rejects ambiguous resumable attachments across active assignments", async () => {
+test("projection rebuild rejects one authoritative attachment with active claims across assignments", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-shared-authority-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+
+  const primaryAssignmentId = bootstrap.initialAssignmentId;
+  const secondAssignmentId = randomUUID();
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+
+  await store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "assignment.created",
+      payload: {
+        assignment: {
+          id: secondAssignmentId,
+          parentTaskId: "task-shared-authority-claim",
+          workflow: "milestone-2",
+          ownerType: "host",
+          ownerId: "codex",
+          objective: "Second assignment for shared authoritative attachment coverage.",
+          writeScope: ["README.md"],
+          requiredOutputs: ["result"],
+          state: "queued",
+          createdAt: timestamp,
+          updatedAt: timestamp
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: attachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId: "thread-shared-authority-claim",
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId: primaryAssignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId: secondAssignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
+
+  await assert.rejects(
+    store.rebuildProjection(),
+    /multiple active claims are present/
+  );
+});
+
+test("projection recovery rejects snapshots where one authoritative attachment has active claims across assignments", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-shared-authority-snapshot-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await store.syncSnapshotFromEvents();
+  const snapshot = (await store.loadSnapshot())!;
+  const secondAssignmentId = randomUUID();
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+
+  snapshot.attachments ??= [];
+  snapshot.claims ??= [];
+  snapshot.assignments.push({
+    id: secondAssignmentId,
+    parentTaskId: "task-shared-authority-snapshot",
+    workflow: "milestone-2",
+    ownerType: "host",
+    ownerId: "codex",
+    objective: "Second assignment for malformed shared-authority snapshot coverage.",
+    writeScope: ["README.md"],
+    requiredOutputs: ["result"],
+    state: "queued",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+  snapshot.attachments.push({
+    id: attachmentId,
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    detachedAt: timestamp,
+    nativeSessionId: "thread-shared-authority-snapshot",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+  snapshot.claims.push(
+    {
+      id: randomUUID(),
+      assignmentId: bootstrap.initialAssignmentId,
+      attachmentId,
+      state: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    },
+    {
+      id: randomUUID(),
+      assignmentId: secondAssignmentId,
+      attachmentId,
+      state: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    }
+  );
+  await store.writeSnapshot(snapshot);
+  await store.rewriteEventLog([]);
+
+  await assert.rejects(
+    store.loadProjectionWithRecovery(),
+    /multiple active claims are present/
+  );
+});
+
+test("projection rebuild rejects ambiguous resumable attachments across active assignments at the authority boundary", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-ambiguous-resume-"));
   const store = RuntimeStore.forProject(projectRoot);
   const sessionId = randomUUID();
@@ -577,10 +787,272 @@ test("recovery brief rejects ambiguous resumable attachments across active assig
     }
   ]);
 
-  const projection = await store.rebuildProjection();
+  await assert.rejects(
+    store.rebuildProjection(),
+    /multiple authoritative attachments are present/
+  );
+});
 
-  assert.throws(
-    () => buildRecoveryBrief(projection),
-    /multiple resumable attachments are present/
+test("projection rebuild rejects multiple authoritative attachments even when only one is wrapped-resumable", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-multi-authoritative-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+
+  const primaryAssignmentId = bootstrap.initialAssignmentId;
+  const secondAssignmentId = randomUUID();
+  const timestamp = nowIso();
+  const firstAttachmentId = randomUUID();
+  const secondAttachmentId = randomUUID();
+
+  await store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "assignment.created",
+      payload: {
+        assignment: {
+          id: secondAssignmentId,
+          parentTaskId: "task-authority-cardinality",
+          workflow: "milestone-2",
+          ownerType: "host",
+          ownerId: "codex",
+          objective: "Second assignment for authority-cardinality coverage.",
+          writeScope: ["README.md"],
+          requiredOutputs: ["result"],
+          state: "queued",
+          createdAt: timestamp,
+          updatedAt: timestamp
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...(await store.rebuildProjection()).status,
+          activeAssignmentIds: [primaryAssignmentId, secondAssignmentId],
+          lastDurableOutputAt: timestamp
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: firstAttachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "attached",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          attachedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: secondAttachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "detached_resumable",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          detachedAt: timestamp,
+          nativeSessionId: "thread-authority-cardinality",
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId: primaryAssignmentId,
+          attachmentId: firstAttachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId: secondAssignmentId,
+          attachmentId: secondAttachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
+
+  await assert.rejects(
+    store.rebuildProjection(),
+    /multiple authoritative attachments are present/
+  );
+});
+
+test("projection recovery rejects malformed snapshots with multiple authoritative attachments", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-recovery-multi-authoritative-snapshot-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await store.syncSnapshotFromEvents();
+  const snapshot = (await store.loadSnapshot())!;
+  snapshot.attachments ??= [];
+  snapshot.claims ??= [];
+  const secondAssignmentId = randomUUID();
+  const timestamp = nowIso();
+
+  snapshot.assignments.push({
+    id: secondAssignmentId,
+    parentTaskId: "task-snapshot-authority-cardinality",
+    workflow: "milestone-2",
+    ownerType: "host",
+    ownerId: "codex",
+    objective: "Second assignment for malformed snapshot authority coverage.",
+    writeScope: ["README.md"],
+    requiredOutputs: ["result"],
+    state: "queued",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+  snapshot.status = {
+    ...snapshot.status,
+    activeAssignmentIds: [bootstrap.initialAssignmentId, secondAssignmentId],
+    lastDurableOutputAt: timestamp
+  };
+  snapshot.attachments.push(
+    {
+      id: randomUUID(),
+      adapter: "codex",
+      host: "codex",
+      state: "attached",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      attachedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    },
+    {
+      id: randomUUID(),
+      adapter: "codex",
+      host: "codex",
+      state: "detached_resumable",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      detachedAt: timestamp,
+      nativeSessionId: "thread-snapshot-authority-cardinality",
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    }
+  );
+  snapshot.claims.push(
+    {
+      id: randomUUID(),
+      assignmentId: bootstrap.initialAssignmentId,
+      attachmentId: snapshot.attachments.at(-2)!.id,
+      state: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    },
+    {
+      id: randomUUID(),
+      assignmentId: secondAssignmentId,
+      attachmentId: snapshot.attachments.at(-1)!.id,
+      state: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    }
+  );
+  await store.writeSnapshot(snapshot);
+  await store.rewriteEventLog([]);
+
+  await assert.rejects(
+    store.loadProjectionWithRecovery(),
+    /multiple authoritative attachments are present/
   );
 });

@@ -205,6 +205,7 @@ Common optional fields:
 Milestone 2 keeps the claim rule narrow:
 
 - at most one active claim may exist per assignment
+- at most one active claim may reference a given attachment
 - at most one authoritative attached or detached-but-resumable
   attachment may exist per runtime
 - active claim graphs must be internally closed: a claim may not point
@@ -291,7 +292,10 @@ authoritative runtime state rather than replace it.
 
 `prepareResumeRuntime()` is part of that derived-artifact surface. It
 must not persist telemetry or rewrite the generated resume envelope, and
-it must not repair or normalize authoritative runtime truth.
+it must not repair or normalize authoritative runtime truth. Stateful
+resume finalization may rewrite `last-resume-envelope.json`, but only by
+rebuilding the full envelope from the final post-transition projection
+instead of patching pre-transition envelope fields in place.
 
 When recovery has to operate from snapshot truth because the event log is
 missing or unusable, recovery-side attachment repair or reclaim may
@@ -311,6 +315,16 @@ When one command performs multiple snapshot-fallback mutations, each
 later mutation must start from the projection produced by the earlier
 durable write rather than from the stale pre-write projection loaded at
 command start.
+
+Those snapshot-only writes still inherit the current durable event-log
+boundary. They may summarize newer state in `snapshot.json`, but they
+must not advance `lastEventId` beyond an event that actually exists in
+`events.ndjson`.
+
+Stale-run markers such as `lastStaleRunInstanceId` are durable runtime
+state. They must refer to a single per-attempt `runInstanceId`, minted
+if necessary during degraded stale reconciliation, rather than to a
+native session id or hashed artifact fingerprint.
 
 Malformed-line recovery is best-effort. Recovery may salvage replayable
 events in memory, and durable repair paths may rewrite the event log to

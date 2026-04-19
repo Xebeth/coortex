@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -13,6 +13,7 @@ import { createBootstrapRuntime } from "../core/runtime.js";
 import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { nowIso } from "../utils/time.js";
+import { persistProjectionEvents } from "../cli/projection-write.js";
 
 test("runtime store rebuilds projection from durable events and snapshots", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-"));
@@ -557,7 +558,7 @@ test("withPathLock times out instead of reaping a live holder", async () => {
   await firstHolder;
 });
 
-test("withPathLock reaps a stale holder from a dead owner process", async () => {
+test("withPathLock times out instead of reaping an identity-unavailable holder", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-stale-lock-"));
   const lockPath = join(projectRoot, "runtime", "events.ndjson");
   const lockDir = `${lockPath}.lock`;
@@ -573,11 +574,21 @@ test("withPathLock reaps a stale holder from a dead owner process", async () => 
   await new Promise((resolve) => setTimeout(resolve, 300));
 
   let entered = false;
-  await withPathLock(lockPath, async () => {
-    entered = true;
-  });
+  await assert.rejects(
+    withPathLock(
+      lockPath,
+      async () => {
+        entered = true;
+      },
+      {
+        retryMs: 5,
+        timeoutMs: 25
+      }
+    ),
+    /Timed out acquiring file lock/
+  );
 
-  assert.equal(entered, true);
+  assert.equal(entered, false);
 });
 
 test("withPathLock reaps a stale holder when the pid identity does not match", async () => {
@@ -602,6 +613,129 @@ test("withPathLock reaps a stale holder when the pid identity does not match", a
 
   assert.equal(entered, true);
 });
+
+test("withPathLock times out instead of reaping unreadable owner metadata", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-unreadable-lock-"));
+  const lockPath = join(projectRoot, "runtime", "events.ndjson");
+  const lockDir = `${lockPath}.lock`;
+  const ownerPath = join(lockDir, "owner.json");
+  await mkdir(lockDir, { recursive: true });
+  await writeFile(
+    ownerPath,
+    JSON.stringify({
+      pid: process.pid,
+      acquiredAt: new Date().toISOString(),
+      processIdentity: "unreadable-owner"
+    }),
+    "utf8"
+  );
+  await chmod(ownerPath, 0o000);
+
+  let entered = false;
+  try {
+    await assert.rejects(
+      withPathLock(
+        lockPath,
+        async () => {
+          entered = true;
+        },
+        {
+          retryMs: 5,
+          timeoutMs: 25
+        }
+      ),
+      /Timed out acquiring file lock/
+    );
+  } finally {
+    await chmod(ownerPath, 0o600).catch(() => undefined);
+  }
+
+  assert.equal(entered, false);
+});
+
+test("withPathLock cleanup does not delete a newer owner when successor metadata is unreadable", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-unreadable-successor-"));
+  const lockPath = join(projectRoot, "runtime", "events.ndjson");
+  const lockDir = `${lockPath}.lock`;
+  const ownerPath = join(lockDir, "owner.json");
+  let releaseHolder!: () => void;
+  const holderReleased = new Promise<void>((resolve) => {
+    releaseHolder = resolve;
+  });
+  let holderEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    holderEntered = resolve;
+  });
+
+  const firstHolder = withPathLock(lockPath, async () => {
+    holderEntered();
+    await holderReleased;
+  });
+
+  await entered;
+  await writeFile(
+    ownerPath,
+    JSON.stringify({
+      pid: 999_997,
+      acquiredAt: "2026-04-19T00:00:00.000Z",
+      processIdentity: "unreadable-newer-holder"
+    }),
+    "utf8"
+  );
+  await chmod(ownerPath, 0o000);
+
+  releaseHolder();
+  await firstHolder;
+
+  await chmod(ownerPath, 0o600);
+  const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { processIdentity?: string };
+  assert.equal(owner.processIdentity, "unreadable-newer-holder");
+});
+
+test("withPathLock cleanup does not delete a newer owner", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-owner-cleanup-"));
+  const lockPath = join(projectRoot, "runtime", "events.ndjson");
+  const lockDir = `${lockPath}.lock`;
+  const ownerPath = join(lockDir, "owner.json");
+  let releaseHolder!: () => void;
+  const holderReleased = new Promise<void>((resolve) => {
+    releaseHolder = resolve;
+  });
+  let holderEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    holderEntered = resolve;
+  });
+
+  const firstHolder = withPathLock(lockPath, async () => {
+    holderEntered();
+    await holderReleased;
+  });
+
+  await entered;
+  await mkdir(lockDir, { recursive: true }).catch(() => undefined);
+  await writeFile(
+    ownerPath,
+    JSON.stringify({
+      pid: 999_998,
+      acquiredAt: "2026-04-19T00:00:00.000Z",
+      processIdentity: "newer-holder"
+    }),
+    "utf8"
+  );
+
+  releaseHolder();
+  await firstHolder;
+
+  const owner = JSON.parse(await readFile(ownerPath, "utf8")) as { processIdentity?: string };
+  assert.equal(owner.processIdentity, "newer-holder");
+});
+
 
 test("runtime store lease CAS survives a stale path lock from a reused pid", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-stale-cas-lock-"));
@@ -1204,6 +1338,153 @@ test("runtime store does not rewrite a salvaged log that no longer projects clea
     store.syncSnapshotFromEventsWithRecovery(),
     /no longer starts at runtime\.initialized/
   );
+});
+
+test("runtime store snapshot-only mutations preserve the durable event boundary", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-boundary-preserve-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+  await store.syncSnapshotFromEvents();
+  const boundaryBefore = (await store.loadSnapshot())?.lastEventId;
+  assert.ok(boundaryBefore, "expected an event boundary before snapshot-only mutation");
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const snapshotOnlyTimestamp = nowIso();
+  await store.mutateSnapshotProjection((projection) => {
+    const assignment = projection.assignments.get(assignmentId)!;
+    const assignments = new Map(projection.assignments);
+    assignments.set(assignmentId, {
+      ...assignment,
+      state: "queued",
+      updatedAt: snapshotOnlyTimestamp
+    });
+    return {
+      ...projection,
+      assignments,
+      status: {
+        ...projection.status,
+        currentObjective: `Retry assignment ${assignmentId}: ${assignment.objective}`,
+        lastDurableOutputAt: snapshotOnlyTimestamp
+      }
+    };
+  });
+
+  assert.equal((await store.loadSnapshot())?.lastEventId, boundaryBefore);
+
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "result.submitted",
+    payload: {
+      result: {
+        resultId: randomUUID(),
+        assignmentId,
+        producerId: "worker-1",
+        status: "completed",
+        summary: "Later event-log suffix survived the snapshot-only mutation.",
+        changedFiles: ["src/persistence/store.ts"],
+        createdAt: nowIso()
+      }
+    }
+  });
+
+  const recovered = await store.loadProjectionWithRecovery();
+  assert.equal([...recovered.projection.results.values()].at(-1)?.summary, "Later event-log suffix survived the snapshot-only mutation.");
+});
+
+test("projection-write snapshot fallback preserves later real event suffixes", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-projection-write-boundary-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+  const initialProjection = await store.syncSnapshotFromEvents();
+  const boundaryBefore = (await store.loadSnapshot())?.lastEventId;
+  assert.ok(boundaryBefore, "expected an event boundary before snapshot-fallback write");
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const timestamp = nowIso();
+  const projectionAfterFallback = await persistProjectionEvents(
+    store,
+    initialProjection,
+    [
+      {
+        eventId: randomUUID(),
+        sessionId,
+        timestamp,
+        type: "assignment.updated",
+        payload: {
+          assignmentId,
+          patch: {
+            state: "queued",
+            updatedAt: timestamp
+          }
+        }
+      }
+    ],
+    { snapshotFallback: true }
+  );
+  assert.equal(projectionAfterFallback.projection.assignments.get(assignmentId)?.state, "queued");
+  assert.equal((await store.loadSnapshot())?.lastEventId, boundaryBefore);
+
+  await store.appendEvent({
+    eventId: randomUUID(),
+    sessionId,
+    timestamp: nowIso(),
+    type: "decision.created",
+    payload: {
+      decision: {
+        decisionId: randomUUID(),
+        assignmentId,
+        requesterId: "worker-1",
+        blockerSummary: "Later durable decision survived the snapshot-fallback write.",
+        options: [{ id: "wait", label: "Wait", summary: "Pause." }],
+        recommendedOption: "wait",
+        state: "open",
+        createdAt: nowIso()
+      }
+    }
+  });
+
+  const recovered = await store.loadProjectionWithRecovery();
+  assert.equal([...recovered.projection.decisions.values()].at(-1)?.blockerSummary, "Later durable decision survived the snapshot-fallback write.");
 });
 
 test("runtime store rebuilds from snapshot plus a structurally valid salvaged suffix", async () => {

@@ -79,7 +79,10 @@ The event log is authoritative. Projections are rebuildable.
 Serialized path locks that guard event-log, snapshot, and lease writes
 must be crash-recoverable so dead processes cannot wedge later recovery.
 Those locks must verify the holder's process identity, not just PID
-liveness, before treating an existing lock as still owned.
+liveness, before treating an existing lock as still owned. Missing
+owner metadata may be crash-recovered, but unreadable owner identity is
+not stale-owner proof: that case must fail closed or retry rather than
+reap a possibly live holder.
 
 ---
 

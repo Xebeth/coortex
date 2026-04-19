@@ -1014,6 +1014,189 @@ test("ctx inspect stays read-only when host metadata is stale", async () => {
   assert.notEqual(await readFileIfExists(leasePath), undefined);
 });
 
+test("ctx status and inspect fail closed on multiple authoritative attachments", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-multi-authoritative-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const store = RuntimeStore.forProject(projectRoot);
+  const projection = await store.loadProjection();
+  const snapshot = (await store.loadSnapshot())!;
+  const primaryAssignmentId = projection.status.activeAssignmentIds[0]!;
+  const secondAssignmentId = randomUUID();
+  const timestamp = new Date().toISOString();
+  const firstAttachmentId = randomUUID();
+  const secondAttachmentId = randomUUID();
+
+  snapshot.attachments ??= [];
+  snapshot.claims ??= [];
+  snapshot.assignments.push({
+    id: secondAssignmentId,
+    parentTaskId: "task-cli-authority-cardinality",
+    workflow: "milestone-2",
+    ownerType: "host",
+    ownerId: "codex",
+    objective: "Second assignment for CLI authority-cardinality coverage.",
+    writeScope: ["README.md"],
+    requiredOutputs: ["result"],
+    state: "queued",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+  snapshot.status = {
+    ...snapshot.status,
+    activeAssignmentIds: [primaryAssignmentId, secondAssignmentId],
+    lastDurableOutputAt: timestamp
+  };
+  snapshot.attachments.push(
+    {
+      id: firstAttachmentId,
+      adapter: "codex",
+      host: "codex",
+      state: "attached",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      attachedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    },
+    {
+      id: secondAttachmentId,
+      adapter: "codex",
+      host: "codex",
+      state: "detached_resumable",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      detachedAt: timestamp,
+      nativeSessionId: "thread-cli-authority-cardinality",
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    }
+  );
+  snapshot.claims.push({
+    id: randomUUID(),
+    assignmentId: primaryAssignmentId,
+    attachmentId: firstAttachmentId,
+    state: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+  await store.writeSnapshot(snapshot);
+  await store.rewriteEventLog([]);
+
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+
+  assert.equal(status.exitCode, 1);
+  assert.match(status.stderr, /multiple authoritative attachments are present/);
+  assert.equal(status.stdout.trim(), "");
+
+  assert.equal(inspect.exitCode, 1);
+  assert.match(inspect.stderr, /multiple authoritative attachments are present/);
+  assert.equal(inspect.stdout.trim(), "");
+});
+
+test("ctx status and inspect fail closed on one authoritative attachment claimed by multiple assignments", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-shared-authority-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const store = RuntimeStore.forProject(projectRoot);
+  const projection = await store.loadProjection();
+  const snapshot = (await store.loadSnapshot())!;
+  const primaryAssignmentId = projection.status.activeAssignmentIds[0]!;
+  const secondAssignmentId = randomUUID();
+  const timestamp = new Date().toISOString();
+  const attachmentId = randomUUID();
+
+  snapshot.attachments ??= [];
+  snapshot.claims ??= [];
+  snapshot.assignments.push({
+    id: secondAssignmentId,
+    parentTaskId: "task-cli-shared-authority",
+    workflow: "milestone-2",
+    ownerType: "host",
+    ownerId: "codex",
+    objective: "Second assignment for CLI shared-authority coverage.",
+    writeScope: ["README.md"],
+    requiredOutputs: ["result"],
+    state: "queued",
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+  snapshot.attachments.push({
+    id: attachmentId,
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    detachedAt: timestamp,
+    nativeSessionId: "thread-cli-shared-authority",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+  snapshot.claims.push(
+    {
+      id: randomUUID(),
+      assignmentId: primaryAssignmentId,
+      attachmentId,
+      state: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    },
+    {
+      id: randomUUID(),
+      assignmentId: secondAssignmentId,
+      attachmentId,
+      state: "active",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    }
+  );
+  await store.writeSnapshot(snapshot);
+  await store.rewriteEventLog([]);
+
+  const status = await runCliCommand(cliPath, "status", { cwd: projectRoot });
+  const inspect = await runCliCommand(cliPath, "inspect", { cwd: projectRoot });
+
+  assert.equal(status.exitCode, 1);
+  assert.match(status.stderr, /multiple active claims are present/);
+  assert.equal(status.stdout.trim(), "");
+
+  assert.equal(inspect.exitCode, 1);
+  assert.match(inspect.stderr, /multiple active claims are present/);
+  assert.equal(inspect.stdout.trim(), "");
+});
+
 test("ctx status reconciles stale host run leases before reporting active work", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-stale-status-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -2203,7 +2386,6 @@ test("ctx status, resume, and run preserve completed runtime decisions behind a 
     };
 
     assert.equal(commandResult.exitCode, testCase.expectedExitCode);
-    assert.doesNotMatch(commandResult.stderr, /WARNING completed-run-reconciled/);
     assert.doesNotMatch(commandResult.stderr, /WARNING stale-run-reconciled/);
     assert.doesNotMatch(commandResult.stderr, /Host run reconciliation failed to clear the active lease/);
     if (testCase.expectedError) {
@@ -2212,13 +2394,13 @@ test("ctx status, resume, and run preserve completed runtime decisions behind a 
       assert.match(commandResult.stdout, /Active assignments: 1/);
       assert.match(commandResult.stdout, /Open decisions: 1/);
     } else {
-      assert.match(commandResult.stdout, /Recovery brief generated for Resolve the recovered decision before continuing\./);
+      assert.match(commandResult.stdout, /Recovery brief generated for Recovered completed runtime decision despite malformed leftover lease\./);
     }
     assert.equal(repairedSnapshot.assignments[0]?.state, "blocked");
     assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [assignmentId]);
     assert.equal(
       repairedSnapshot.status.currentObjective,
-      "Resolve the recovered decision before continuing."
+      "Recovered completed runtime decision despite malformed leftover lease."
     );
     assert.equal(repairedSnapshot.decisions.length, 1);
     assert.deepEqual(repairedSnapshot.decisions[0], {

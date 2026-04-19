@@ -381,6 +381,23 @@ test("milestone-2 integration: wrapped resume rejects a foreign native session r
   });
 
   await runRuntime(setup.store, setup.adapter);
+  const originalBuildResumeEnvelope = setup.adapter.buildResumeEnvelope.bind(setup.adapter);
+  let poisonResumeEnvelope = true;
+  setup.adapter.buildResumeEnvelope = async (store, projection, brief) => {
+    const envelope = await originalBuildResumeEnvelope(store, projection, brief);
+    if (!poisonResumeEnvelope) {
+      return envelope;
+    }
+    poisonResumeEnvelope = false;
+    return {
+      ...envelope,
+      objective: "stale pre-reclaim objective",
+      recentResults: [{ resultId: "stale-result", summary: "stale recent result", trimmed: true }],
+      trimApplied: true,
+      trimmedFields: [{ label: "stale", originalChars: 999, keptChars: 1, reference: "stale.txt" }],
+      estimatedChars: 999
+    };
+  };
   const resumed = await resumeRuntime(setup.store, setup.adapter);
   const projection = await loadOperatorProjection(setup.store);
   const attachment = [...projection.attachments.values()][0];
@@ -589,13 +606,13 @@ test("milestone-2 integration: reclaim cleanup failure does not surface queued r
   const attachment = [...projection.attachments.values()][0];
   const claim = [...projection.claims.values()][0];
 
-  assert.equal(attachment?.state, "orphaned");
-  assert.equal(claim?.state, "orphaned");
+  assert.equal(attachment?.state, "detached_resumable");
+  assert.equal(claim?.state, "active");
   assert.equal(projection.assignments.get(setup.assignmentId)?.state, "in_progress");
   assert.ok(!projection.status.currentObjective.startsWith(`Retry assignment ${setup.assignmentId}:`));
   await assert.rejects(
     runRuntime(setup.store, setup.adapter),
-    /already has an active host run lease/
+    /already claimed by authoritative attachment/
   );
 });
 
@@ -1085,6 +1102,23 @@ test("milestone-2 integration: wrapped resume persists a terminal completed resu
   });
 
   await runRuntime(setup.store, setup.adapter);
+  const originalCompletedResumeEnvelope = setup.adapter.buildResumeEnvelope.bind(setup.adapter);
+  let poisonCompletedResumeEnvelope = true;
+  setup.adapter.buildResumeEnvelope = async (store, projection, brief) => {
+    const envelope = await originalCompletedResumeEnvelope(store, projection, brief);
+    if (!poisonCompletedResumeEnvelope) {
+      return envelope;
+    }
+    poisonCompletedResumeEnvelope = false;
+    return {
+      ...envelope,
+      objective: "stale pre-reclaim objective",
+      recentResults: [{ resultId: "stale-result", summary: "stale recent result", trimmed: true }],
+      trimApplied: true,
+      trimmedFields: [{ label: "stale", originalChars: 999, keptChars: 1, reference: "stale.txt" }],
+      estimatedChars: 999
+    };
+  };
   const resumed = await resumeRuntime(setup.store, setup.adapter);
   const projection = await loadOperatorProjection(setup.store);
   const attachment = [...projection.attachments.values()][0];
@@ -1092,6 +1126,15 @@ test("milestone-2 integration: wrapped resume persists a terminal completed resu
   const telemetry = await setup.store.loadTelemetry();
   const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    objective: string;
+    recentResults: Array<{ summary: string }>;
+    trimApplied: boolean;
+    trimmedFields: unknown[];
+    estimatedChars: number;
+  };
 
   assert.equal(resumed.mode, "reclaimed");
   assert.equal(resumed.execution.outcome.kind, "result");
@@ -1103,6 +1146,20 @@ test("milestone-2 integration: wrapped resume persists a terminal completed resu
   assert.equal(projection.assignments.get(setup.assignmentId)?.state, "completed");
   assert.deepEqual(projection.status.activeAssignmentIds, []);
   assert.equal(projection.status.currentObjective, "Await the next assignment.");
+  assert.equal(resumed.brief.activeObjective, "Await the next assignment.");
+  assert.equal(resumed.brief.activeAssignments.length, 0);
+  assert.equal(resumed.envelope.recoveryBrief.activeObjective, "Await the next assignment.");
+  assert.equal(resumed.envelope.recoveryBrief.activeAssignments.length, 0);
+  assert.equal(resumed.envelope.objective, "Await the next assignment.");
+  assert.equal(resumed.envelope.recentResults[0]?.summary, "Wrapped resume finished the assignment.");
+  assert.equal(resumed.envelope.trimApplied, false);
+  assert.deepEqual(resumed.envelope.trimmedFields, []);
+  assert.notEqual(resumed.envelope.estimatedChars, 999);
+  assert.equal(persistedEnvelope.objective, "Await the next assignment.");
+  assert.equal(persistedEnvelope.recentResults[0]?.summary, "Wrapped resume finished the assignment.");
+  assert.equal(persistedEnvelope.trimApplied, false);
+  assert.deepEqual(persistedEnvelope.trimmedFields, []);
+  assert.notEqual(persistedEnvelope.estimatedChars, 999);
   assert.equal(projection.results.size, 2);
   assert.equal([...projection.results.values()].at(-1)?.status, "completed");
   assert.equal([...projection.results.values()].at(-1)?.summary, "Wrapped resume finished the assignment.");
@@ -1156,6 +1213,23 @@ test("milestone-2 integration: wrapped resume persists a decision outcome and ke
   });
 
   await runRuntime(setup.store, setup.adapter);
+  const originalDecisionResumeEnvelope = setup.adapter.buildResumeEnvelope.bind(setup.adapter);
+  let poisonDecisionResumeEnvelope = true;
+  setup.adapter.buildResumeEnvelope = async (store, projection, brief) => {
+    const envelope = await originalDecisionResumeEnvelope(store, projection, brief);
+    if (!poisonDecisionResumeEnvelope) {
+      return envelope;
+    }
+    poisonDecisionResumeEnvelope = false;
+    return {
+      ...envelope,
+      objective: "stale decision objective",
+      recentResults: [{ resultId: "stale-result", summary: "stale recent result", trimmed: true }],
+      trimApplied: true,
+      trimmedFields: [{ label: "stale", originalChars: 999, keptChars: 1, reference: "stale.txt" }],
+      estimatedChars: 999
+    };
+  };
   const resumed = await resumeRuntime(setup.store, setup.adapter);
   const projection = await loadOperatorProjection(setup.store);
   const attachment = [...projection.attachments.values()][0];
@@ -1164,6 +1238,15 @@ test("milestone-2 integration: wrapped resume persists a decision outcome and ke
   const telemetry = await setup.store.loadTelemetry();
   const resumeCompletedTelemetry = findLastTelemetry(telemetry, "host.resume.completed");
   const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    objective: string;
+    recentResults: Array<{ summary: string }>;
+    trimApplied: boolean;
+    trimmedFields: unknown[];
+    estimatedChars: number;
+  };
 
   assert.equal(resumed.mode, "reclaimed");
   assert.equal(resumed.execution.outcome.kind, "decision");
@@ -1190,6 +1273,35 @@ test("milestone-2 integration: wrapped resume persists a decision outcome and ke
   );
   assert.equal(decision?.state, "open");
   assert.equal(decision?.blockerSummary, "Need operator guidance before continuing resumed work.");
+  assert.equal(resumed.brief.activeObjective, "Need operator guidance before continuing resumed work.");
+  assert.equal(resumed.brief.unresolvedDecisions[0]?.blockerSummary, "Need operator guidance before continuing resumed work.");
+  assert.equal(resumed.envelope.recoveryBrief.activeObjective, "Need operator guidance before continuing resumed work.");
+  assert.equal(
+    resumed.envelope.recoveryBrief.unresolvedDecisions[0]?.blockerSummary,
+    "Need operator guidance before continuing resumed work."
+  );
+  assert.equal(
+    resumed.envelope.objective,
+    projection.assignments.get(setup.assignmentId)?.objective
+  );
+  assert.equal(
+    resumed.envelope.recentResults[0]?.summary,
+    "Launch created resumable state before decision resume coverage."
+  );
+  assert.equal(resumed.envelope.trimApplied, false);
+  assert.deepEqual(resumed.envelope.trimmedFields, []);
+  assert.notEqual(resumed.envelope.estimatedChars, 999);
+  assert.equal(
+    persistedEnvelope.objective,
+    projection.assignments.get(setup.assignmentId)?.objective
+  );
+  assert.equal(
+    persistedEnvelope.recentResults[0]?.summary,
+    "Launch created resumable state before decision resume coverage."
+  );
+  assert.equal(persistedEnvelope.trimApplied, false);
+  assert.deepEqual(persistedEnvelope.trimmedFields, []);
+  assert.notEqual(persistedEnvelope.estimatedChars, 999);
   assert.equal(decision?.recommendedOption, "wait");
   assert.equal(inspected?.state, "completed");
   assert.equal(inspected?.outcomeKind, "decision");
@@ -1609,7 +1721,7 @@ test("milestone-2 integration: run rejects foreign resumable claims and prevents
   );
 });
 
-test("milestone-2 integration: resume fails deterministically when multiple resumable attachments exist", async () => {
+test("milestone-2 integration: resume fails closed when multiple authoritative attachments exist", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner should not be used when resumable attachment cardinality is invalid");
   });
@@ -1640,12 +1752,115 @@ test("milestone-2 integration: resume fails deterministically when multiple resu
   };
 
   await setup.store.appendEvent(secondAssignmentEvent);
-  for (const [assignmentId, nativeSessionId] of [
-    [setup.assignmentId, "smoke-thread-attachment-one"],
-    [secondAssignmentId, "smoke-thread-attachment-two"]
-  ] as const) {
-    const attachmentId = randomUUID();
-    await setup.store.appendEvent({
+  const firstAttachmentId = randomUUID();
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "attachment.created",
+    payload: {
+      attachment: {
+        id: firstAttachmentId,
+        adapter: "codex",
+        host: "codex",
+        state: "detached_resumable",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        detachedAt: timestamp,
+        nativeSessionId: "smoke-thread-attachment-one",
+        provenance: {
+          kind: "launch",
+          source: "ctx.run"
+        }
+      }
+    }
+  });
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "claim.created",
+    payload: {
+      claim: {
+        id: randomUUID(),
+        assignmentId: setup.assignmentId,
+        attachmentId: firstAttachmentId,
+        state: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        provenance: {
+          kind: "launch",
+          source: "ctx.run"
+        }
+      }
+    }
+  });
+  await setup.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "attachment.created",
+    payload: {
+      attachment: {
+        id: randomUUID(),
+        adapter: "codex",
+        host: "codex",
+        state: "detached_resumable",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        detachedAt: timestamp,
+        nativeSessionId: "smoke-thread-attachment-two",
+        provenance: {
+          kind: "launch",
+          source: "ctx.run"
+        }
+      }
+    }
+  });
+  await assert.rejects(
+    resumeRuntime(setup.store, setup.adapter),
+    /multiple authoritative attachments are present/
+  );
+
+  await assert.rejects(
+    loadOperatorProjection(setup.store),
+    /multiple authoritative attachments are present/
+  );
+});
+
+test("milestone-2 integration: resume fails closed when one authoritative attachment is claimed across assignments", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used when attachment-claim exclusivity is invalid");
+  });
+
+  const projection = await loadOperatorProjection(setup.store);
+  const secondAssignmentId = randomUUID();
+  const timestamp = nowIso();
+  const attachmentId = randomUUID();
+
+  await setup.store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "assignment.created",
+      payload: {
+        assignment: {
+          id: secondAssignmentId,
+          parentTaskId: "task-shared-authority-claims",
+          workflow: "milestone-2",
+          ownerType: "host",
+          ownerId: "codex",
+          objective: "Second assignment for shared-authority attachment claim coverage.",
+          writeScope: ["README.md"],
+          requiredOutputs: ["result"],
+          state: "queued",
+          createdAt: timestamp,
+          updatedAt: timestamp
+        }
+      }
+    },
+    {
       eventId: randomUUID(),
       sessionId: projection.sessionId,
       timestamp,
@@ -1659,15 +1874,15 @@ test("milestone-2 integration: resume fails deterministically when multiple resu
           createdAt: timestamp,
           updatedAt: timestamp,
           detachedAt: timestamp,
-          nativeSessionId,
+          nativeSessionId: "smoke-thread-shared-authority",
           provenance: {
             kind: "launch",
             source: "ctx.run"
           }
         }
       }
-    });
-    await setup.store.appendEvent({
+    },
+    {
       eventId: randomUUID(),
       sessionId: projection.sessionId,
       timestamp,
@@ -1675,7 +1890,7 @@ test("milestone-2 integration: resume fails deterministically when multiple resu
       payload: {
         claim: {
           id: randomUUID(),
-          assignmentId,
+          assignmentId: setup.assignmentId,
           attachmentId,
           state: "active",
           createdAt: timestamp,
@@ -1686,13 +1901,36 @@ test("milestone-2 integration: resume fails deterministically when multiple resu
           }
         }
       }
-    });
-  }
-  await setup.store.syncSnapshotFromEvents();
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: randomUUID(),
+          assignmentId: secondAssignmentId,
+          attachmentId,
+          state: "active",
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          provenance: {
+            kind: "launch",
+            source: "ctx.run"
+          }
+        }
+      }
+    }
+  ]);
 
   await assert.rejects(
     resumeRuntime(setup.store, setup.adapter),
-    /multiple resumable attachments are present/
+    /multiple active claims are present/
+  );
+  await assert.rejects(
+    loadOperatorProjection(setup.store),
+    /multiple active claims are present/
   );
 });
 
@@ -2405,8 +2643,10 @@ test("milestone-2 integration: resume uses the latest projection across multiple
   assert.equal(snapshot?.assignments.find((assignment) => assignment.id === setup.assignmentId)?.state, "queued");
   assert.equal(snapshot?.assignments.find((assignment) => assignment.id === secondAssignmentId)?.state, "queued");
   assert.deepEqual(snapshot?.status.activeAssignmentIds, [setup.assignmentId, secondAssignmentId]);
-  assert.match(snapshot?.status.currentObjective ?? "", new RegExp(setup.assignmentId));
-  assert.match(snapshot?.status.currentObjective ?? "", new RegExp(secondAssignmentId));
+  assert.equal(
+    snapshot?.status.currentObjective,
+    `Retry assignment ${setup.assignmentId}: ${projection.assignments.get(setup.assignmentId)?.objective}`
+  );
   await assert.rejects(
     readFile(
       join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
@@ -2899,11 +3139,11 @@ test("milestone-2 integration: stale reconciliation retries artifact cleanup aft
     (event) => event.eventType === "host.run.stale_reconciled"
   ).length;
 
-  assert.equal(snapshotAfterFirst?.assignments[0]?.state, "queued");
+  assert.equal(snapshotAfterFirst?.assignments[0]?.state, "in_progress");
   assert.equal(inspectedAfterFirst?.state, "completed");
   assert.equal(inspectedAfterFirst?.staleReasonCode, "expired_lease");
-  assert.equal(secondStatusProjection.assignments.get(setup.assignmentId)?.state, "queued");
-  assert.ok(!secondResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(secondStatusProjection.assignments.get(setup.assignmentId)?.state, "in_progress");
+  assert.ok(secondResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(inspectedAfterSecond?.state, "completed");
   await assert.rejects(
     readFile(

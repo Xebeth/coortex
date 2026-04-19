@@ -571,17 +571,6 @@ export const AttachmentLifecycleService = {
     diagnostics: CommandDiagnostic[];
   }> {
     const timestamp = nowIso();
-    let effectiveProjection = await AttachmentLifecycleService.orphanAttachmentClaim(
-      store,
-      projection,
-      attachment.id,
-      claim.id,
-      {
-        attachment: reason,
-        claim: reason
-      },
-      options
-    );
     const diagnostics: CommandDiagnostic[] = [];
     const cleanupError = await cleanupHostRunArtifactsWithLeaseVerification(
       store,
@@ -600,6 +589,17 @@ export const AttachmentLifecycleService = {
         )
       );
     }
+    let effectiveProjection = await AttachmentLifecycleService.orphanAttachmentClaim(
+      store,
+      projection,
+      attachment.id,
+      claim.id,
+      {
+        attachment: reason,
+        claim: reason
+      },
+      options
+    );
     const assignment = effectiveProjection.assignments.get(claim.assignmentId);
     if (assignment) {
       effectiveProjection = await AttachmentLifecycleService.requeueAssignmentForRetry(

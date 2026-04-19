@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import type { RuntimeEvent } from "../core/events.js";
 import type { HostRunRecord, RuntimeProjection } from "../core/types.js";
-import { getNativeRunId, getRunInstanceId } from "../core/run-state.js";
+import {
+  COORTEX_MINTED_RUN_INSTANCE_ID_KEY,
+  getNativeRunId,
+  getRunInstanceId
+} from "../core/run-state.js";
 import { nowIso } from "../utils/time.js";
 
 export interface RecoveryDiagnostic {
@@ -64,18 +68,30 @@ export function buildStaleRunReconciliation(
 ): StaleRunReconciliation {
   const staleReasonCode = record.staleReasonCode ?? describeStaleRunReasonCode(record);
   const staleReason = record.staleReason ?? describeStaleRunReason(record);
-  const runInstanceId = getRunInstanceId(record);
+  const existingRunInstanceId = getRunInstanceId(record);
+  const runInstanceId = existingRunInstanceId ?? randomUUID();
   const staleRecord: HostRunRecord = {
     ...record,
     state: "completed",
-    ...(runInstanceId ? { runInstanceId } : {}),
+    runInstanceId,
     staleAt: timestamp,
     staleReasonCode,
-    staleReason
+    staleReason,
+    ...(!existingRunInstanceId
+      ? {
+          adapterData: {
+            ...(record.adapterData ?? {}),
+            [COORTEX_MINTED_RUN_INSTANCE_ID_KEY]: true
+          }
+        }
+      : {})
   };
   const nativeRunId = getNativeRunId(record);
   const assignment = projection.assignments.get(assignmentId);
   const objective = assignment?.objective ?? projection.status.currentObjective;
+  const retryObjective = objective.startsWith("Retry assignment ")
+    ? objective
+    : `Retry assignment ${assignmentId}: ${objective}`;
   const events: RuntimeEvent[] = [
     {
       eventId: randomUUID(),
@@ -86,7 +102,7 @@ export function buildStaleRunReconciliation(
         assignmentId,
         patch: {
           state: "queued",
-          ...(runInstanceId ? { lastStaleRunInstanceId: runInstanceId } : {}),
+          lastStaleRunInstanceId: runInstanceId,
           updatedAt: timestamp
         }
       }
@@ -99,10 +115,10 @@ export function buildStaleRunReconciliation(
       payload: {
         status: {
           ...projection.status,
-          currentObjective: `Retry assignment ${assignmentId}: ${objective}`,
+          currentObjective: retryObjective,
           lastDurableOutputAt: timestamp,
           resumeReady: true,
-          ...(runInstanceId ? { lastStaleRunInstanceId: runInstanceId } : {})
+          lastStaleRunInstanceId: runInstanceId
         }
       }
     }

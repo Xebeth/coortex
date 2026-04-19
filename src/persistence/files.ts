@@ -6,13 +6,16 @@ import { promisify } from "node:util";
 import { parseJson, toPrettyJson } from "../utils/json.js";
 
 const execFileAsync = promisify(execFile);
-const UNVERIFIED_LOCK_GRACE_MS = 250;
-
 type LockOwner = {
   pid: number;
   acquiredAt: string;
   processIdentity?: string;
 };
+type LockOwnerState =
+  | { state: "valid"; owner: LockOwner }
+  | { state: "missing" }
+  | { state: "malformed" }
+  | { state: "unreadable" };
 
 export async function ensureDir(path: string): Promise<void> {
   await mkdir(path, { recursive: true });
@@ -77,39 +80,30 @@ export async function withPathLock<T>(
   const ownerPath = join(lockPath, "owner.json");
   const deadline = Date.now() + timeoutMs;
   const currentProcessIdentity = await readProcessIdentity(process.pid);
+  const acquiredOwner: LockOwner = {
+    pid: process.pid,
+    acquiredAt: new Date().toISOString(),
+    ...(currentProcessIdentity ? { processIdentity: currentProcessIdentity } : {})
+  };
 
   await ensureDir(dirname(lockPath));
   while (true) {
-    try {
-      await mkdir(lockPath);
-      await writeFile(
-        ownerPath,
-        JSON.stringify({
-          pid: process.pid,
-          acquiredAt: new Date().toISOString(),
-          ...(currentProcessIdentity ? { processIdentity: currentProcessIdentity } : {})
-        }),
-        "utf8"
-      );
+    if (await claimPathLock(lockPath, acquiredOwner)) {
       break;
-    } catch (error) {
-      if (!isAlreadyExists(error)) {
-        throw error;
-      }
-      if (await reapStaleLock(lockPath, ownerPath)) {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out acquiring file lock ${lockPath}.`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, retryMs));
     }
+    if (await reapStaleLock(lockPath, ownerPath)) {
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out acquiring file lock ${lockPath}.`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, retryMs));
   }
 
   try {
     return await action();
   } finally {
-    await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+    await releaseOwnedLock(lockPath, ownerPath, acquiredOwner);
   }
 }
 
@@ -142,69 +136,110 @@ function isMissing(error: unknown): boolean {
 }
 
 function isAlreadyExists(error: unknown): boolean {
-  return !!error && typeof error === "object" && "code" in error && error.code === "EEXIST";
+  return (
+    !!error &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error.code === "EEXIST" || error.code === "ENOTEMPTY")
+  );
 }
 
 async function reapStaleLock(lockPath: string, ownerPath: string): Promise<boolean> {
-  const owner = await readLockOwner(ownerPath);
-  if (owner) {
-    const lockHolderState = await classifyLockHolder(owner);
-    if (lockHolderState === "live") {
-      return false;
-    }
-    if (lockHolderState === "stale") {
-      await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
-      return true;
-    }
-  }
-
-  return reapUnverifiedLock(lockPath);
-}
-
-async function reapUnverifiedLock(lockPath: string): Promise<boolean> {
-  const metadata = await stat(lockPath).catch((error) => {
-    if (isMissing(error)) {
-      return undefined;
-    }
-    throw error;
-  });
-  if (!metadata) {
+  const ownerState = await readLockOwner(ownerPath);
+  if (ownerState.state === "missing" || ownerState.state === "malformed") {
+    await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
     return true;
   }
-  if (Date.now() - metadata.mtimeMs < UNVERIFIED_LOCK_GRACE_MS) {
+  if (ownerState.state === "unreadable") {
     return false;
   }
+
+  const lockHolderState = await classifyLockHolder(ownerState.owner);
+  if (lockHolderState !== "stale") {
+    return false;
+  }
+
   await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
   return true;
 }
 
 async function readLockOwner(
   ownerPath: string
-): Promise<LockOwner | undefined> {
+): Promise<LockOwnerState> {
+  let raw: string;
   try {
-    const raw = await readFile(ownerPath, "utf8");
+    raw = await readFile(ownerPath, "utf8");
+  } catch (error) {
+    if (isMissing(error)) {
+      return { state: "missing" };
+    }
+    return { state: "unreadable" };
+  }
+  try {
     const owner = parseJson<LockOwner>(raw, `lock owner ${ownerPath}`);
     return typeof owner.pid === "number" && Number.isInteger(owner.pid) && owner.pid > 0
       ? {
-          pid: owner.pid,
-          acquiredAt: typeof owner.acquiredAt === "string" ? owner.acquiredAt : "",
-          ...(typeof owner.processIdentity === "string" && owner.processIdentity.length > 0
-            ? { processIdentity: owner.processIdentity }
-            : {})
+          state: "valid",
+          owner: {
+            pid: owner.pid,
+            acquiredAt: typeof owner.acquiredAt === "string" ? owner.acquiredAt : "",
+            ...(typeof owner.processIdentity === "string" && owner.processIdentity.length > 0
+              ? { processIdentity: owner.processIdentity }
+              : {})
+          }
         }
-      : undefined;
-  } catch (error) {
-    if (isMissing(error)) {
-      return undefined;
-    }
-    return undefined;
+      : { state: "malformed" };
+  } catch {
+    return { state: "malformed" };
   }
+}
+
+async function claimPathLock(lockPath: string, owner: LockOwner): Promise<boolean> {
+  const tempLockPath = `${lockPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+  const tempOwnerPath = join(tempLockPath, "owner.json");
+  try {
+    await mkdir(tempLockPath);
+    await writeFile(tempOwnerPath, JSON.stringify(owner), "utf8");
+    await rename(tempLockPath, lockPath);
+    return true;
+  } catch (error) {
+    await rm(tempLockPath, { recursive: true, force: true }).catch(() => undefined);
+    if (isAlreadyExists(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function releaseOwnedLock(
+  lockPath: string,
+  ownerPath: string,
+  expectedOwner: LockOwner
+): Promise<void> {
+  const currentOwner = await readLockOwner(ownerPath);
+  if (currentOwner.state === "unreadable") {
+    return;
+  }
+  if (currentOwner.state !== "valid") {
+    await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
+  if (!matchesLockOwner(currentOwner.owner, expectedOwner)) {
+    return;
+  }
+  await rm(lockPath, { recursive: true, force: true }).catch(() => undefined);
+}
+
+function matchesLockOwner(actual: LockOwner, expected: LockOwner): boolean {
+  return actual.pid === expected.pid &&
+    actual.acquiredAt === expected.acquiredAt &&
+    actual.processIdentity === expected.processIdentity;
 }
 
 async function classifyLockHolder(owner: LockOwner): Promise<"live" | "stale" | "unverified"> {
   const processIdentity = await readProcessIdentity(owner.pid);
   if (!processIdentity) {
-    return "stale";
+    return "unverified";
   }
   if (!owner.processIdentity) {
     return "unverified";

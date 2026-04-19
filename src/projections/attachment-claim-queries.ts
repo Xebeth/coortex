@@ -37,6 +37,7 @@ export function getActiveClaimForAssignment(
 
 export function assertAttachmentClaimGraphIntegrity(projection: RuntimeProjection): void {
   assertUniqueActiveClaims(projection);
+  assertSingleAuthoritativeAttachment(projection);
 
   const missingAttachments = [...projection.claims.values()].filter(
     (claim) => !projection.attachments.has(claim.attachmentId)
@@ -63,6 +64,7 @@ export function assertAttachmentClaimGraphIntegrity(projection: RuntimeProjectio
 
 export function assertUniqueActiveClaims(projection: RuntimeProjection): void {
   const activeClaimsByAssignment = new Map<string, string[]>();
+  const activeClaimsByAttachment = new Map<string, AssignmentClaim[]>();
   for (const claim of projection.claims.values()) {
     if (claim.state !== "active") {
       continue;
@@ -71,14 +73,54 @@ export function assertUniqueActiveClaims(projection: RuntimeProjection): void {
       ...(activeClaimsByAssignment.get(claim.assignmentId) ?? []),
       claim.id
     ]);
+    activeClaimsByAttachment.set(claim.attachmentId, [
+      ...(activeClaimsByAttachment.get(claim.attachmentId) ?? []),
+      claim
+    ]);
   }
-  const duplicates = [...activeClaimsByAssignment.entries()].filter(([, ids]) => ids.length > 1);
-  if (duplicates.length === 0) {
+  const assignmentDuplicates = [...activeClaimsByAssignment.entries()].filter(([, ids]) => ids.length > 1);
+  const attachmentDuplicates = [...activeClaimsByAttachment.entries()].filter(([, claims]) => claims.length > 1);
+  if (assignmentDuplicates.length === 0 && attachmentDuplicates.length === 0) {
+    return;
+  }
+  const details: string[] = [];
+  if (assignmentDuplicates.length > 0) {
+    details.push(
+      `assignments ${assignmentDuplicates
+        .map(([assignmentId, ids]) => `${assignmentId}: ${ids.join(", ")}`)
+        .join("; ")}`
+    );
+  }
+  if (attachmentDuplicates.length > 0) {
+    details.push(
+      `attachments ${attachmentDuplicates
+        .map(([attachmentId, claims]) => `${attachmentId}: ${claims.map((claim) => `${claim.assignmentId}/${claim.id}`).join(", ")}`)
+        .join("; ")}`
+    );
+  }
+  throw new RuntimeAuthorityIntegrityError(
+    `Invalid runtime state: multiple active claims are present (${details.join("; ")}).`
+  );
+}
+
+export function assertSingleAuthoritativeAttachment(projection: RuntimeProjection): void {
+  const activeClaimByAttachmentId = new Map(
+    [...projection.claims.values()]
+      .filter((claim) => claim.state === "active")
+      .map((claim) => [claim.attachmentId, claim] as const)
+  );
+  const authoritativeAttachments = [...projection.attachments.values()].filter((attachment) =>
+    AUTHORITATIVE_ATTACHMENT_STATES.has(attachment.state)
+  );
+  if (authoritativeAttachments.length <= 1) {
     return;
   }
   throw new RuntimeAuthorityIntegrityError(
-    `Invalid runtime state: multiple active claims are present (${duplicates
-      .map(([assignmentId, ids]) => `${assignmentId}: ${ids.join(", ")}`)
+    `Invalid runtime state: multiple authoritative attachments are present (${authoritativeAttachments
+      .map((attachment) => {
+        const claim = activeClaimByAttachmentId.get(attachment.id);
+        return `${attachment.id} -> ${claim?.assignmentId ?? "unclaimed"}`;
+      })
       .join("; ")}).`
   );
 }

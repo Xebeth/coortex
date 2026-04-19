@@ -3,7 +3,7 @@ import {
   type RuntimeProjection
 } from "../core/types.js";
 import {
-  assertUniqueActiveClaims,
+  assertAttachmentClaimGraphIntegrity,
   selectSingleResumableAttachmentClaim
 } from "../projections/attachment-claim-queries.js";
 
@@ -15,7 +15,7 @@ export function buildRecoveryBrief(
   projection: RuntimeProjection,
   options: RecoveryBriefOptions = {}
 ): RecoveryBrief {
-  assertUniqueActiveClaims(projection);
+  assertAttachmentClaimGraphIntegrity(projection);
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );

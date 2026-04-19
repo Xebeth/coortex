@@ -117,3 +117,20 @@ When building an adapter, start with:
 5. capability reporting
 
 Do not start by trying to port every optional host feature.
+
+## Host-run ownership and stale recovery
+
+Adapters that persist live run metadata must treat the active lease as
+the ownership boundary for host execution.
+
+- Reclaim or adopt flows must mint or preserve one durable
+  `runInstanceId` fence for the live owner.
+- Later heartbeat, completion, rollback, and destructive cleanup writes
+  must prove that same fence instead of deleting by path alone.
+- Degraded stale reconciliation may mint a fresh `runInstanceId` so the
+  runtime can key stale-run idempotence durably.
+- That minted stale identity is not a substitute for a live adopted
+  ownership fence; completed stale cleanup must not let it delete or
+  overwrite a newer reclaimed lease, run record, or last-run pointer
+  that belongs to a different live owner.
+

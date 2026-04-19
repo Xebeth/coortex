@@ -97,6 +97,20 @@ export class RuntimeStore implements ProjectionRecoveryStore {
     await writeJsonAtomic(this.snapshotPath, snapshot);
   }
 
+  async writeProjectionSnapshot(
+    projection: RuntimeProjection,
+    options?: {
+      boundaryEventId?: string | undefined;
+    }
+  ): Promise<RuntimeProjection> {
+    const snapshotProjection = preserveSnapshotBoundaryEventId(
+      projection,
+      options?.boundaryEventId
+    );
+    await this.writeSnapshot(toSnapshot(snapshotProjection));
+    return snapshotProjection;
+  }
+
   async mutateSnapshotProjection(
     mutate: (projection: RuntimeProjection) => RuntimeProjection | Promise<RuntimeProjection>
   ): Promise<RuntimeProjection> {
@@ -106,8 +120,9 @@ export class RuntimeStore implements ProjectionRecoveryStore {
         ? fromSnapshot(snapshot)
         : await this.createEmptyProjectionFromConfig();
       const nextProjection = await mutate(fromSnapshot(toSnapshot(baseProjection)));
-      await this.writeSnapshot(toSnapshot(nextProjection));
-      return nextProjection;
+      return this.writeProjectionSnapshot(nextProjection, {
+        boundaryEventId: snapshot?.lastEventId
+      });
     });
   }
 
@@ -180,7 +195,7 @@ export class RuntimeStore implements ProjectionRecoveryStore {
     _label: string
   ): Promise<VersionedTextArtifact> {
     const fullPath = join(this.rootDir, relativePath);
-    return withPathLock(fullPath, async () => readVersionedTextFile(fullPath));
+    return readVersionedTextFile(fullPath);
   }
 
   async claimTextArtifact(relativePath: string, content: string): Promise<string> {
@@ -237,11 +252,9 @@ export class RuntimeStore implements ProjectionRecoveryStore {
 
   async listArtifacts(relativeDir: string): Promise<string[]> {
     try {
-      const entries = await readdir(join(this.rootDir, relativeDir), { withFileTypes: true });
-      return entries
-        .filter((entry) => entry.isFile())
-        .map((entry) => join(relativeDir, entry.name))
-        .sort((left, right) => left.localeCompare(right));
+      return (
+        await listArtifactFiles(join(this.rootDir, relativeDir), relativeDir)
+      ).sort((left, right) => left.localeCompare(right));
     } catch (error) {
       if (isMissingError(error)) {
         return [];
@@ -289,4 +302,38 @@ async function readVersionedTextFile(path: string): Promise<VersionedTextArtifac
 
 function isMissingError(error: unknown): boolean {
   return !!error && typeof error === "object" && "code" in error && error.code === "ENOENT";
+}
+
+async function listArtifactFiles(fullDir: string, relativeDir: string): Promise<string[]> {
+  const entries = await readdir(fullDir, { withFileTypes: true });
+  const files: string[] = [];
+  for (const entry of entries) {
+    const childRelativePath = join(relativeDir, entry.name);
+    const childFullPath = join(fullDir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await listArtifactFiles(childFullPath, childRelativePath)));
+      continue;
+    }
+    if (entry.isFile()) {
+      files.push(childRelativePath);
+    }
+  }
+  return files;
+}
+
+function preserveSnapshotBoundaryEventId(
+  projection: RuntimeProjection,
+  boundaryEventId: string | undefined
+): RuntimeProjection {
+  if (!boundaryEventId) {
+    if (!projection.lastEventId) {
+      return projection;
+    }
+    const { lastEventId: _discard, ...rest } = projection;
+    return rest;
+  }
+  return {
+    ...projection,
+    lastEventId: boundaryEventId
+  };
 }

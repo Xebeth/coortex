@@ -190,6 +190,70 @@ async function prepareResumeRuntimeInternal(
   );
 }
 
+function buildInactiveResumeEnvelope(
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  brief: ReturnType<typeof buildRecoveryBrief>,
+  fallbackEnvelope: Pick<TaskEnvelope, "host" | "adapter">
+): TaskEnvelope {
+  const recentResults = brief.lastDurableResults.map((result) => ({
+    resultId: result.resultId,
+    summary: result.summary,
+    trimmed: false
+  }));
+  const envelope: TaskEnvelope = {
+    host: fallbackEnvelope.host,
+    adapter: fallbackEnvelope.adapter,
+    objective: projection.status.currentObjective,
+    writeScope: [],
+    requiredOutputs: [],
+    recoveryBrief: brief,
+    recentResults,
+    metadata: {
+      activeMode: projection.status.activeMode,
+      activeAssignmentId: "",
+      unresolvedDecisionCount: brief.unresolvedDecisions.length
+    },
+    estimatedChars: 0,
+    trimApplied: false,
+    trimmedFields: []
+  };
+  return {
+    ...envelope,
+    estimatedChars: JSON.stringify(envelope).length
+  };
+}
+
+async function buildResumeArtifactsFromProjection(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
+  options: {
+    fallbackEnvelope?: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>;
+  } = {}
+): Promise<{
+  brief: ReturnType<typeof buildRecoveryBrief>;
+  envelope?: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>;
+}> {
+  const brief = buildRecoveryBrief(projection, {
+    allowAttachmentResumeAction:
+      adapter.getCapabilities().supportsNativeSessionResume === true && !!adapter.resumeSession
+  });
+  if (brief.activeAssignments.length === 0) {
+    if (!options.fallbackEnvelope) {
+      return { brief };
+    }
+    return {
+      brief,
+      envelope: buildInactiveResumeEnvelope(projection, brief, options.fallbackEnvelope)
+    };
+  }
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  return {
+    brief,
+    envelope
+  };
+}
+
 async function prepareResumeFromProjection(
   store: RuntimeStore,
   adapter: HostAdapter,
@@ -197,14 +261,14 @@ async function prepareResumeFromProjection(
   seedDiagnostics: CommandDiagnostic[]
 ): Promise<PrepareResumeRuntimeResult> {
   const diagnostics = [...seedDiagnostics];
-  const brief = buildRecoveryBrief(effectiveProjection, {
-    allowAttachmentResumeAction:
-      adapter.getCapabilities().supportsNativeSessionResume === true && !!adapter.resumeSession
-  });
-  if (brief.activeAssignments.length === 0) {
+  const { brief, envelope } = await buildResumeArtifactsFromProjection(
+    store,
+    adapter,
+    effectiveProjection
+  );
+  if (brief.activeAssignments.length === 0 || !envelope) {
     throw new Error("No active assignment is available to resume.");
   }
-  const envelope = await adapter.buildResumeEnvelope(store, effectiveProjection, brief);
 
   return {
     projection: effectiveProjection,
@@ -445,11 +509,23 @@ export async function resumeRuntime(
           `Attachment ${target.attachment.id} or claim ${target.claim.id} disappeared during recovered resume finalization.`
         );
       }
+      const finalArtifacts = await buildResumeArtifactsFromProjection(store, adapter, effectiveProjection, {
+        fallbackEnvelope: resumeEnvelope
+      });
+      diagnostics.push(
+        ...(await persistResumeEnvelopeAndTelemetry(
+          store,
+          adapter,
+          effectiveProjection,
+          finalArtifacts.envelope ?? resumeEnvelope,
+          undefined
+        ))
+      );
       return {
         mode: "reclaimed",
         projection: effectiveProjection,
-        brief: resumeBrief,
-        envelope: resumeEnvelope,
+        brief: finalArtifacts.brief,
+        envelope: finalArtifacts.envelope ?? resumeEnvelope,
         envelopePath,
         diagnostics,
         execution: recoveredResume.execution,
@@ -546,11 +622,23 @@ export async function resumeRuntime(
     );
   }
 
+  const finalArtifacts = await buildResumeArtifactsFromProjection(store, adapter, effectiveProjection, {
+    fallbackEnvelope: resumeEnvelope
+  });
+  diagnostics.push(
+    ...(await persistResumeEnvelopeAndTelemetry(
+      store,
+      adapter,
+      effectiveProjection,
+      finalArtifacts.envelope ?? resumeEnvelope,
+      undefined
+    ))
+  );
   return {
     mode: "reclaimed",
     projection: effectiveProjection,
-    brief: resumeBrief,
-    envelope: resumeEnvelope,
+    brief: finalArtifacts.brief,
+    envelope: finalArtifacts.envelope ?? resumeEnvelope,
     envelopePath,
     diagnostics,
     execution: {

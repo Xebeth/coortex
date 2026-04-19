@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   HostRunStore,
@@ -9,6 +12,8 @@ import {
 import { HostRunLeaseRepository } from "../adapters/host-run-lease-repository.js";
 import type { RuntimeArtifactStore } from "../adapters/contract.js";
 import type { HostRunRecord } from "../core/types.js";
+import { COORTEX_MINTED_RUN_INSTANCE_ID_KEY } from "../core/run-state.js";
+import { RuntimeStore } from "../persistence/store.js";
 
 class MemoryArtifactStore implements RuntimeArtifactStore {
   readonly rootDir = "/memory";
@@ -194,6 +199,55 @@ test("host run store uses adapter-provided artifact roles instead of codex paths
   assert.deepEqual(await runStore.inspect("assignment-1"), completedRecord);
   await runStore.release("assignment-1");
   assert.equal(await runStore.inspect("assignment-1"), undefined);
+});
+
+test("host run store enumerates directory-scoped artifact roles on filesystem stores", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-host-run-layout-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `custom/runs/${assignmentId}/record.json`,
+    runLeasePath: (assignmentId) => `custom/leases/${assignmentId}/lease.json`,
+    lastRunPath: () => "custom/pointers/current-run.json"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const completedRecord: HostRunRecord = {
+    assignmentId: "assignment-run-only",
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Completed run stored in a directory-scoped role layout.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "custom-host",
+        status: "completed",
+        summary: "Completed run stored in a directory-scoped role layout.",
+        changedFiles: [],
+        createdAt: "2026-04-11T10:01:00.000Z"
+      }
+    }
+  };
+  const leaseOnlyRecord: HostRunRecord = {
+    assignmentId: "assignment-lease-only",
+    state: "running",
+    startedAt: "2026-04-11T10:02:00.000Z",
+    heartbeatAt: "2026-04-11T10:02:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:02:30.000Z"
+  };
+
+  await store.writeJsonArtifact(artifacts.runRecordPath(completedRecord.assignmentId), completedRecord);
+  await store.writeJsonArtifact(artifacts.runLeasePath(leaseOnlyRecord.assignmentId), leaseOnlyRecord);
+
+  const inspectedAll = await runStore.inspectAll();
+
+  assert.deepEqual(
+    inspectedAll.map((record) => record.assignmentId),
+    ["assignment-lease-only", "assignment-run-only"]
+  );
+  assert.deepEqual(await runStore.inspect(completedRecord.assignmentId), completedRecord);
+  assert.deepEqual(await runStore.inspect(leaseOnlyRecord.assignmentId), leaseOnlyRecord);
 });
 
 test("host run store clears leftover leases without deleting the durable run record", async () => {
@@ -401,6 +455,79 @@ test("host run store blocks stale owner heartbeats after reclaim adoption", asyn
   assert.equal(lastRun?.runInstanceId, "run-instance-owner-2");
   assert.equal(lease?.heartbeatAt, "2026-04-11T10:00:05.000Z");
   assert.equal(runRecord?.heartbeatAt, "2026-04-11T10:00:05.000Z");
+});
+
+test("host run store minted stale ids do not clear a newer adopted live boundary", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const assignmentId = "assignment-minted-stale-boundary";
+  const legacyRecord: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-minted-stale-boundary"
+    }
+  };
+
+  await runStore.claim(legacyRecord);
+  const adopted = await runStore.claimOrAdopt(
+    {
+      ...legacyRecord,
+      runInstanceId: "run-instance-owner-2"
+    },
+    (current) => current.adapterData?.nativeRunId === "thread-minted-stale-boundary",
+    (current) => ({
+      ...current,
+      heartbeatAt: "2026-04-11T10:00:05.000Z",
+      leaseExpiresAt: "2999-04-11T10:00:35.000Z",
+      adapterData: {
+        ...(current.adapterData ?? {}),
+        nativeRunId: "thread-minted-stale-boundary",
+        coortexReclaimLease: true
+      }
+    })
+  );
+
+  await assert.rejects(
+    runStore.write({
+      assignmentId,
+      state: "completed",
+      startedAt: legacyRecord.startedAt,
+      runInstanceId: "minted-stale-id",
+      completedAt: "2026-04-11T10:01:00.000Z",
+      staleAt: "2026-04-11T10:01:00.000Z",
+      staleReasonCode: "expired_lease",
+      staleReason: "Run lease expired at 2000-01-01T00:00:00.000Z.",
+      adapterData: {
+        nativeRunId: "thread-minted-stale-boundary",
+        [COORTEX_MINTED_RUN_INSTANCE_ID_KEY]: true
+      }
+    }),
+    /lost host run ownership/
+  );
+
+  const inspected = await runStore.inspect(assignmentId);
+  const lease = await store.readJsonArtifact<HostRunRecord>(artifacts.runLeasePath(assignmentId), "lease");
+  const runRecord = await store.readJsonArtifact<HostRunRecord>(artifacts.runRecordPath(assignmentId), "record");
+  const lastRun = await store.readJsonArtifact<HostRunRecord>(artifacts.lastRunPath(), "last-run");
+
+  assert.equal(adopted.runInstanceId, "run-instance-owner-2");
+  assert.equal(inspected?.state, "running");
+  assert.equal(inspected?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lease?.runInstanceId, "run-instance-owner-2");
+  assert.equal(runRecord?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lastRun?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+  assert.equal(runRecord?.adapterData?.coortexReclaimLease, true);
+  assert.equal(lastRun?.adapterData?.coortexReclaimLease, true);
 });
 
 test("host run store keeps a newer adopted lease when stale owner completion degrades to a warning", async () => {

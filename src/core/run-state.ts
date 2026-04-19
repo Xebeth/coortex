@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
-
 import type { HostRunRecord } from "./types.js";
 
 export const COORTEX_RECLAIM_LEASE_KEY = "coortexReclaimLease";
+export const COORTEX_MINTED_RUN_INSTANCE_ID_KEY = "coortexMintedRunInstanceId";
 
 export function getNativeRunId(record: HostRunRecord | undefined): string | undefined {
   const nativeRunId = record?.adapterData?.nativeRunId;
@@ -10,31 +9,9 @@ export function getNativeRunId(record: HostRunRecord | undefined): string | unde
 }
 
 export function getRunInstanceId(record: HostRunRecord | undefined): string | undefined {
-  if (typeof record?.runInstanceId === "string" && record.runInstanceId.length > 0) {
-    return record.runInstanceId;
-  }
-  const nativeRunId = getNativeRunId(record);
-  if (nativeRunId) {
-    return nativeRunId;
-  }
-  if (!record) {
-    return undefined;
-  }
-  const fingerprint = createHash("sha256")
-    .update(
-      JSON.stringify({
-        assignmentId: record.assignmentId,
-        state: record.state,
-        startedAt: record.startedAt,
-        heartbeatAt: record.heartbeatAt ?? "",
-        leaseExpiresAt: record.leaseExpiresAt ?? "",
-        completedAt: record.completedAt ?? "",
-        outcomeKind: record.outcomeKind ?? "",
-        staleReasonCode: record.staleReasonCode ?? ""
-      })
-    )
-    .digest("hex");
-  return `legacy-${fingerprint}`;
+  return typeof record?.runInstanceId === "string" && record.runInstanceId.length > 0
+    ? record.runInstanceId
+    : undefined;
 }
 
 export function isCoortexReclaimLease(record: HostRunRecord | undefined): boolean {

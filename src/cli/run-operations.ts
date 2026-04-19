@@ -25,6 +25,7 @@ import {
   type ProjectionWriteOptions
 } from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
+import { buildNextRuntimeStatus } from "./runtime-status.js";
 import { diagnosticsFromWarning, loadOperatorProjection } from "./runtime-state.js";
 
 export interface WrappedExecutionRecoveryResult {
@@ -47,26 +48,43 @@ export async function markAssignmentInProgress(
   }
 
   const timestamp = nowIso();
-  const event: RuntimeEvent = {
-    eventId: randomUUID(),
-    sessionId: projection.sessionId,
-    timestamp,
-    type: "assignment.updated",
-    payload: {
-      assignmentId,
-      patch: {
-        state: "in_progress",
-        lastStaleRunInstanceId: undefined,
-        updatedAt: timestamp
+  const events: RuntimeEvent[] = [
+    {
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "assignment.updated",
+      payload: {
+        assignmentId,
+        patch: {
+          state: "in_progress",
+          lastStaleRunInstanceId: undefined,
+          updatedAt: timestamp
+        }
       }
     }
-  };
+  ];
+  if (projection.status.lastStaleRunInstanceId) {
+    events.push({
+      eventId: randomUUID(),
+      sessionId: projection.sessionId,
+      timestamp,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...projection.status,
+          lastStaleRunInstanceId: undefined,
+          lastDurableOutputAt: timestamp
+        }
+      }
+    });
+  }
   if (!options?.snapshotFallback) {
-    await store.appendEvent(event);
+    await store.appendEvents(events);
     return (await store.syncSnapshotFromEventsWithRecovery()).projection;
   }
   return store.mutateSnapshotProjection((latestProjection) =>
-    applyRuntimeEventsToProjection(latestProjection, [event])
+    applyRuntimeEventsToProjection(latestProjection, events)
   );
 }
 
@@ -246,7 +264,6 @@ export function buildOutcomeEvents(
 ): RuntimeEvent[] {
   const timestamp = nowIso();
   const assignmentId = execution.run.assignmentId;
-  const status = nextRuntimeStatus(projection, execution);
   const events: RuntimeEvent[] = [];
 
   if (execution.outcome.kind === "decision") {
@@ -282,6 +299,22 @@ export function buildOutcomeEvents(
       }
     }
   });
+  const postTransitionProjection = applyRuntimeEventsToProjection(projection, events);
+  const status = buildNextRuntimeStatus(
+    postTransitionProjection,
+    assignmentId,
+    execution.outcome.kind === "decision"
+      ? {
+          kind: "decision",
+          blockerSummary: execution.outcome.capture.blockerSummary,
+          state: execution.outcome.capture.state ?? "open"
+        }
+      : {
+          kind: "result",
+          status: execution.outcome.capture.status
+        },
+    timestamp
+  );
   events.push({
     eventId: randomUUID(),
     sessionId: projection.sessionId,
@@ -345,75 +378,4 @@ function nextAssignmentState(execution: Pick<HostExecutionOutcome, "outcome" | "
     default:
       return "in_progress" as const;
   }
-}
-
-function nextRuntimeStatus(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  execution: Pick<HostExecutionOutcome, "outcome" | "run">
-) {
-  const assignmentId = execution.run.assignmentId;
-  const terminal =
-    execution.outcome.kind === "result" &&
-    (execution.outcome.capture.status === "completed" || execution.outcome.capture.status === "failed");
-  const activeAssignmentIds = terminal
-    ? projection.status.activeAssignmentIds.filter((id) => id !== assignmentId)
-    : projection.status.activeAssignmentIds;
-
-  return {
-    ...projection.status,
-    activeMode: activeAssignmentIds.length === 0 ? "idle" : projection.status.activeMode,
-    currentObjective:
-      activeAssignmentIds.length === 0
-        ? execution.outcome.kind === "result" && execution.outcome.capture.status === "failed"
-          ? `Review failed assignment ${assignmentId}.`
-          : "Await the next assignment."
-        : execution.outcome.kind === "decision"
-          ? nextDecisionCurrentObjective(
-              projection,
-              assignmentId,
-              execution.outcome.capture.blockerSummary,
-              execution.outcome.capture.state ?? "open"
-            )
-          : projection.status.currentObjective,
-    activeAssignmentIds,
-    lastDurableOutputAt: nowIso(),
-    resumeReady: true,
-    lastStaleRunInstanceId: undefined
-  };
-}
-
-function nextDecisionCurrentObjective(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string,
-  blockerSummary: string,
-  decisionState: "open" | "resolved"
-): string {
-  if (decisionState === "resolved") {
-    return projection.assignments.get(assignmentId)?.objective ?? projection.status.currentObjective;
-  }
-  const latestDecision = [...projection.decisions.values()]
-    .filter((decision) => decision.assignmentId === assignmentId)
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .at(-1);
-  if (!latestDecision) {
-    return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
-  }
-  if (latestDecision.state === "resolved") {
-    return projection.status.currentObjective;
-  }
-  if (!statusObjectiveTracksAssignment(projection, assignmentId)) {
-    return projection.status.currentObjective;
-  }
-  return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
-}
-
-function statusObjectiveTracksAssignment(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignmentId: string
-): boolean {
-  const assignmentObjective = projection.assignments.get(assignmentId)?.objective;
-  if (assignmentObjective && projection.status.currentObjective === assignmentObjective) {
-    return true;
-  }
-  return projection.status.currentObjective.startsWith(`Retry assignment ${assignmentId}:`);
 }

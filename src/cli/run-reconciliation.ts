@@ -19,6 +19,7 @@ import { RuntimeStore } from "../persistence/store.js";
 import { buildStaleRunReconciliation, createActiveRunDiagnostic } from "../recovery/host-runs.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
+import { buildNextRuntimeStatus } from "./runtime-status.js";
 import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
 import {
   getActiveClaimForAssignment,
@@ -320,17 +321,6 @@ async function reconcileActiveRunsInContext(
         const recoveryEvents = [...pendingEvents, ...authorityRepairEvents];
         if (recoveryEvents.length === 0) {
           changed = true;
-          if (snapshotFallback) {
-            effectiveProjection = await mutateSnapshotFallbackProjection(
-              context,
-              (latestProjection) => applyRuntimeEventsToProjection(latestProjection, reconciliation.events)
-            );
-          } else {
-            const syncResult = await context.projectionRecovery.syncSnapshotFromEventsWithRecovery();
-            effectiveProjection = syncResult.projection;
-            diagnostics.push(...warningDiagnostics(syncResult.warning, "event-log-repaired"));
-          }
-          diagnostics.push(reconciliation.diagnostic);
           const cleanupError = await reconcileStaleRunWithLeaseVerification(
             context.store,
             context.adapter,
@@ -344,10 +334,33 @@ async function reconcileActiveRunsInContext(
               )
             );
           }
+          if (snapshotFallback) {
+            effectiveProjection = await mutateSnapshotFallbackProjection(
+              context,
+              (latestProjection) => applyRuntimeEventsToProjection(latestProjection, reconciliation.events)
+            );
+          } else {
+            const syncResult = await context.projectionRecovery.syncSnapshotFromEventsWithRecovery();
+            effectiveProjection = syncResult.projection;
+            diagnostics.push(...warningDiagnostics(syncResult.warning, "event-log-repaired"));
+          }
           continue;
         }
 
         changed = true;
+        const cleanupError = await reconcileStaleRunWithLeaseVerification(
+          context.store,
+          context.adapter,
+          reconciliation.staleRecord
+        );
+        if (cleanupError) {
+          diagnostics.push(
+            ...warningDiagnostics(
+              `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
+              "host-run-persist-failed"
+            )
+          );
+        }
         effectiveProjection = await applyRecoveryProjectionEvents(
           context,
           effectiveProjection,
@@ -371,19 +384,6 @@ async function reconcileActiveRunsInContext(
           })
         );
         diagnostics.push(...warningDiagnostics(telemetry.warning, "telemetry-write-failed"));
-        const cleanupError = await reconcileStaleRunWithLeaseVerification(
-          context.store,
-          context.adapter,
-          reconciliation.staleRecord
-        );
-        if (cleanupError) {
-          diagnostics.push(
-            ...warningDiagnostics(
-              `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-              "host-run-persist-failed"
-            )
-          );
-        }
         continue;
       }
 
@@ -454,29 +454,6 @@ async function reconcileActiveRunsInContext(
     const recoveryEvents = [...pendingEvents, ...authorityRepairEvents];
     if (recoveryEvents.length === 0) {
       changed = true;
-      effectiveProjection = await applyRecoveryProjectionEvents(
-        context,
-        effectiveProjection,
-        snapshotFallback ? reconciliation.events : [],
-        diagnostics,
-        {
-          snapshotFallback,
-          replayableEvents,
-          snapshotBoundaryEventId
-        }
-      );
-      diagnostics.push(reconciliation.diagnostic);
-
-      const telemetry = await recordNormalizedTelemetry(
-        context.store,
-        context.adapter.normalizeTelemetry({
-          eventType: "host.run.stale_reconciled",
-          taskId: projection.sessionId,
-          assignmentId,
-          metadata: reconciliation.telemetryMetadata
-        })
-      );
-      diagnostics.push(...warningDiagnostics(telemetry.warning, "telemetry-write-failed"));
       const cleanupError = await reconcileStaleRunWithLeaseVerification(
         context.store,
         context.adapter,
@@ -490,10 +467,34 @@ async function reconcileActiveRunsInContext(
           )
         );
       }
+      effectiveProjection = await applyRecoveryProjectionEvents(
+        context,
+        effectiveProjection,
+        snapshotFallback ? reconciliation.events : [],
+        diagnostics,
+        {
+          snapshotFallback,
+          replayableEvents,
+          snapshotBoundaryEventId
+        }
+      );
       continue;
     }
 
     changed = true;
+    const cleanupError = await reconcileStaleRunWithLeaseVerification(
+      context.store,
+      context.adapter,
+      reconciliation.staleRecord
+    );
+    if (cleanupError) {
+      diagnostics.push(
+        ...warningDiagnostics(
+          `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
+          "host-run-persist-failed"
+        )
+      );
+    }
     effectiveProjection = await applyRecoveryProjectionEvents(
       context,
       effectiveProjection,
@@ -517,19 +518,6 @@ async function reconcileActiveRunsInContext(
       })
     );
     diagnostics.push(...warningDiagnostics(telemetry.warning, "telemetry-write-failed"));
-    const cleanupError = await reconcileStaleRunWithLeaseVerification(
-      context.store,
-      context.adapter,
-      reconciliation.staleRecord
-    );
-    if (cleanupError) {
-      diagnostics.push(
-        ...warningDiagnostics(
-          `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-          "host-run-persist-failed"
-        )
-      );
-    }
   }
 
   const record = await context.adapter.inspectRun(context.store);
@@ -972,8 +960,8 @@ function getStaleRunRecoveryState(
   assignmentId: string,
   record: HostRunRecord
 ): StaleRunRecoveryState {
-  const runInstanceId = getRunInstanceId(record);
   const assignment = projection.assignments.get(assignmentId);
+  const runInstanceId = getRunInstanceId(record);
 
   return {
     runInstanceId,
@@ -1057,18 +1045,13 @@ function buildCompletedRunReconciliation(
     findRecoveredCompletedDecision(projection, record) ??
     findRecoveredCompletedDecisionEvent(replayableEvents ?? [], record);
   const recoveredDecisionState = recoveredDecision?.state;
-  const expectedStatus = nextRuntimeStatusFromRecord(
-    projection,
-    record,
-    timestamp,
-    recoveredDecisionState
-  );
   const events = buildRecoveredOutcomeEvents(
     projection,
     record,
     timestamp,
     recoveredDecisionState
   );
+  const expectedStatus = (events[2] as Extract<RuntimeEvent, { type: "status.updated" }>).payload.status;
   const pendingEvents = selectPendingCompletedRecoveryEvents(
     projection,
     record,
@@ -1487,12 +1470,6 @@ function buildRecoveredOutcomeEvents(
   if (!record.terminalOutcome) {
     throw new Error(`Completed host run for assignment ${record.assignmentId} is missing terminal outcome data.`);
   }
-  const status = nextRuntimeStatusFromRecord(
-    projection,
-    record,
-    timestamp,
-    recoveredDecisionState
-  );
   const events: RuntimeEvent[] = [];
 
   if (record.terminalOutcome.kind === "decision") {
@@ -1548,6 +1525,22 @@ function buildRecoveredOutcomeEvents(
       }
     }
   });
+  const postTransitionProjection = applyRuntimeEventsToProjection(projection, events);
+  const status = buildNextRuntimeStatus(
+    postTransitionProjection,
+    record.assignmentId,
+    record.terminalOutcome.kind === "decision"
+      ? {
+          kind: "decision",
+          blockerSummary: record.terminalOutcome.decision.blockerSummary,
+          state: recoveredDecisionState ?? record.terminalOutcome.decision.state
+        }
+      : {
+          kind: "result",
+          status: record.terminalOutcome.result.status
+        },
+    timestamp
+  );
   events.push({
     eventId: randomUUID(),
     sessionId: projection.sessionId,
@@ -1577,83 +1570,6 @@ function nextAssignmentStateFromRecord(record: HostRunRecord, recoveredDecisionS
   }
 }
 
-function nextRuntimeStatusFromRecord(
-  projection: RuntimeProjection,
-  record: HostRunRecord,
-  timestamp: string,
-  recoveredDecisionState?: "open" | "resolved"
-) {
-  const terminal =
-    record.terminalOutcome?.kind === "result" &&
-    (record.terminalOutcome.result.status === "completed" ||
-      record.terminalOutcome.result.status === "failed");
-  const activeAssignmentIds = terminal
-    ? projection.status.activeAssignmentIds.filter((id) => id !== record.assignmentId)
-    : projection.status.activeAssignmentIds;
-
-  return {
-    ...projection.status,
-    activeMode: activeAssignmentIds.length === 0 ? "idle" : projection.status.activeMode,
-    currentObjective:
-      activeAssignmentIds.length === 0
-        ? record.terminalOutcome?.kind === "result" &&
-          record.terminalOutcome.result.status === "failed"
-          ? `Review failed assignment ${record.assignmentId}.`
-          : "Await the next assignment."
-        : record.terminalOutcome?.kind === "decision"
-          ? nextDecisionCurrentObjective(
-              projection,
-              record.assignmentId,
-              record.terminalOutcome.decision.blockerSummary,
-              recoveredDecisionState ?? record.terminalOutcome.decision.state
-            )
-          : projection.status.currentObjective,
-    activeAssignmentIds,
-    lastDurableOutputAt: timestamp,
-    resumeReady: true
-  };
-}
-
-function nextDecisionCurrentObjective(
-  projection: RuntimeProjection,
-  assignmentId: string,
-  blockerSummary: string,
-  decisionState: "open" | "resolved"
-): string {
-  if (decisionState === "resolved") {
-    const assignmentObjective = projection.assignments.get(assignmentId)?.objective;
-    if (assignmentObjective && projection.status.currentObjective === blockerSummary) {
-      return assignmentObjective;
-    }
-    return projection.status.currentObjective;
-  }
-  const latestDecision = [...projection.decisions.values()]
-    .filter((decision) => decision.assignmentId === assignmentId)
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .at(-1);
-  if (!latestDecision) {
-    return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
-  }
-  if (latestDecision.state === "resolved") {
-    return projection.status.currentObjective;
-  }
-  if (!statusObjectiveTracksAssignment(projection, assignmentId)) {
-    return projection.status.currentObjective;
-  }
-  return blockerSummary.trim().length > 0 ? blockerSummary : projection.status.currentObjective;
-}
-
-function statusObjectiveTracksAssignment(
-  projection: RuntimeProjection,
-  assignmentId: string
-): boolean {
-  const assignmentObjective = projection.assignments.get(assignmentId)?.objective;
-  if (assignmentObjective && projection.status.currentObjective === assignmentObjective) {
-    return true;
-  }
-  return projection.status.currentObjective.startsWith(`Retry assignment ${assignmentId}:`);
-}
-
 async function mutateSnapshotFallbackProjection(
   context: RunReconciliationContext,
   mutate: (projection: RuntimeProjection) => RuntimeProjection | Promise<RuntimeProjection>
@@ -1671,8 +1587,9 @@ async function mutateSnapshotFallbackProjection(
         latestSnapshot.lastEventId
       );
       const nextProjection = await mutate(hydrated.projection);
-      await context.store.writeSnapshot(toSnapshot(nextProjection));
-      return nextProjection;
+      return context.store.writeProjectionSnapshot(nextProjection, {
+        boundaryEventId: latestSnapshot.lastEventId
+      });
     })
   );
 }
