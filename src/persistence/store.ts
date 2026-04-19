@@ -182,8 +182,8 @@ export class RuntimeStore {
     }
     if (snapshot) {
       return warning
-        ? { projection: fromSnapshot(snapshot), warning, snapshotFallback: false }
-        : { projection: fromSnapshot(snapshot), snapshotFallback: false };
+        ? { projection: fromSnapshot(snapshot), warning, snapshotFallback: true }
+        : { projection: fromSnapshot(snapshot), snapshotFallback: true };
     }
     throw new Error(`No persisted runtime state found at ${this.rootDir}`);
   }

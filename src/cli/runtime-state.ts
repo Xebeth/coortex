@@ -735,13 +735,16 @@ async function persistWorkflowEvents(
   diagnostics: CommandDiagnostic[];
 }> {
   const effectiveProjection = cloneProjectionForPersistence(projection);
+  if (snapshotFallback) {
+    for (const event of events) {
+      applyRuntimeEvent(effectiveProjection, event);
+    }
+    await store.writeSnapshot(toSnapshot(effectiveProjection));
+    return { projection: effectiveProjection, diagnostics: [] };
+  }
   for (const event of events) {
     await store.appendEvent(event);
     applyRuntimeEvent(effectiveProjection, event);
-  }
-  if (snapshotFallback) {
-    await store.writeSnapshot(toSnapshot(effectiveProjection));
-    return { projection: effectiveProjection, diagnostics: [] };
   }
   return syncProjectionWithDiagnostics(store);
 }
