@@ -265,7 +265,6 @@ surfaces:
     primary_anchors:
       - "src/hosts/codex/adapter/index.ts"
       - "src/hosts/codex/adapter/cli.ts"
-      - "src/hosts/codex/adapter/run-records.ts"
       - "src/hosts/codex/adapter/types.ts"
       - "src/hosts/codex/kernel/**"
       - "src/hosts/codex/profile/**"

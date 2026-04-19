@@ -377,9 +377,9 @@ surfaces:
   primary_anchors:
   - src/hosts/codex/adapter/index.ts
   - src/hosts/codex/adapter/cli.ts
-  - src/hosts/codex/adapter/run-records.ts
   - src/hosts/codex/adapter/types.ts
   supporting_anchors:
+  - src/hosts/codex/adapter/execution.ts
   - src/__tests__/adapter-contract.test.ts
   - src/__tests__/codex-cli-runner.test.ts
   - src/__tests__/milestone-2-live-harness.test.ts
