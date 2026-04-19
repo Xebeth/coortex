@@ -2,11 +2,13 @@ import { createHash } from "node:crypto";
 import { basename, dirname } from "node:path";
 
 import type { RuntimeArtifactStore } from "./contract.js";
+import { withRunNativeId } from "./host-run-records.js";
 import type { HostRunRecord } from "../core/types.js";
 import { parseJson, toPrettyJson } from "../utils/json.js";
 import {
   describeStaleRunReason,
   describeStaleRunReasonCode,
+  getNativeRunId,
   isRunLeaseExpired,
   selectAuthoritativeRunRecord
 } from "../core/run-state.js";
@@ -298,12 +300,13 @@ function preserveMalformedLeaseRunContext(
   ) {
     return leaseRecord;
   }
-  return {
+  const preserved: HostRunRecord = {
     ...leaseRecord,
     startedAt: runRecord.startedAt,
-    ...(runRecord.workflowAttempt ? { workflowAttempt: runRecord.workflowAttempt } : {}),
-    ...(runRecord.adapterData ? { adapterData: runRecord.adapterData } : {})
+    ...(runRecord.workflowAttempt ? { workflowAttempt: runRecord.workflowAttempt } : {})
   };
+  const nativeRunId = getNativeRunId(runRecord);
+  return nativeRunId ? withRunNativeId(preserved, nativeRunId) : preserved;
 }
 
 function malformedLeaseStartedAt(leaseIdentity: string): string {

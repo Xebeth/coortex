@@ -322,6 +322,40 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
       expected: completedRecord("assignment-completed-over-malformed", "Completed record wins")
     },
     {
+      name: "malformed lease preserves shared identity without copying arbitrary adapter metadata",
+      assignmentId: "assignment-malformed-shared-context",
+      runRecord: {
+        ...runningRecord("assignment-malformed-shared-context"),
+        workflowAttempt: {
+          workflowId: "default",
+          workflowCycle: 2,
+          moduleId: "review",
+          moduleAttempt: 3
+        },
+        adapterData: {
+          nativeRunId: "native-malformed-shared-context",
+          threadUrl: "https://example.invalid/thread/123"
+        }
+      },
+      leaseContent: "{",
+      expected: {
+        assignmentId: "assignment-malformed-shared-context",
+        state: "running",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        staleReasonCode: "malformed_lease_artifact",
+        staleReason: "malformed lease file",
+        workflowAttempt: {
+          workflowId: "default",
+          workflowCycle: 2,
+          moduleId: "review",
+          moduleAttempt: 3
+        },
+        adapterData: {
+          nativeRunId: "native-malformed-shared-context"
+        }
+      }
+    },
+    {
       name: "lease-less running record becomes stale completed state",
       assignmentId: "assignment-missing-lease",
       runRecord: runningRecord("assignment-missing-lease", "2026-04-11T10:00:30.000Z"),
