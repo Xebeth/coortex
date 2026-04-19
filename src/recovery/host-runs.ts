@@ -185,11 +185,11 @@ export function deriveWorkflowRunTruth(
   };
 }
 
-export function shouldRecoverWorkflowCompletedRun(truth: WorkflowRunTruth): boolean {
+function shouldRecoverWorkflowCompletedRun(truth: WorkflowRunTruth): boolean {
   return truth.recoverableCompletedOutcome;
 }
 
-export function shouldCleanupWorkflowRunArtifacts(truth: WorkflowRunTruth): boolean {
+function shouldCleanupWorkflowRunArtifacts(truth: WorkflowRunTruth): boolean {
   return truth.hasLeaseArtifact && (
     truth.beforeCurrentAttempt ||
     truth.missingAttemptIdentity ||
@@ -219,15 +219,8 @@ export function selectWorkflowVisibleRunRecord(
     : record;
 }
 
-export function shouldEmitHiddenWorkflowCleanup(truth: WorkflowRunTruth): boolean {
+function shouldEmitHiddenWorkflowCleanup(truth: WorkflowRunTruth): boolean {
   return truth.hiddenStaleCandidate;
-}
-
-export function shouldEmitCurrentWorkflowStaleReconciliation(
-  before: WorkflowRunTruth,
-  after: WorkflowRunTruth
-): boolean {
-  return before.staleCandidate && !before.hasDurableStaleRecovery && after.hasDurableStaleRecovery;
 }
 
 export function deriveWorkflowCleanupRecord(record: HostRunRecord): HostRunRecord {
