@@ -168,11 +168,7 @@ export async function resumeRuntime(
     {
       eventType: "resume.requested",
       taskId: effectiveProjection.sessionId,
-      metadata: {
-        envelopeChars: envelope.estimatedChars,
-        trimApplied: envelope.trimApplied,
-        trimmedFields: envelope.trimmedFields.length
-      }
+      metadata: buildEnvelopeTelemetryMetadata(envelope)
     }
   ));
 
@@ -260,11 +256,7 @@ export async function runRuntime(
         eventType: "host.run.started",
         taskId: launchedProjection.sessionId,
         assignmentId: assignment.id,
-        metadata: {
-          envelopeChars: envelope.estimatedChars,
-          trimApplied: envelope.trimApplied,
-          trimmedFields: envelope.trimmedFields.length
-        }
+        metadata: buildEnvelopeTelemetryMetadata(envelope)
       }
     ));
 
@@ -365,6 +357,20 @@ async function buildAndPersistWorkflowEnvelope(
   const envelope = await buildWorkflowAwareEnvelope(store, adapter, projection, brief);
   await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
   return envelope;
+}
+
+function buildEnvelopeTelemetryMetadata(
+  envelope: Awaited<ReturnType<HostAdapter["buildResumeEnvelope"]>>
+): {
+  envelopeChars: number;
+  trimApplied: boolean;
+  trimmedFields: number;
+} {
+  return {
+    envelopeChars: envelope.estimatedChars,
+    trimApplied: envelope.trimApplied,
+    trimmedFields: envelope.trimmedFields.length
+  };
 }
 
 async function recoverPersistedRunAfterEventFailure(
