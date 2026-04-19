@@ -180,48 +180,62 @@ async function compactWorkflowSummary(
   };
   const originalBlockerReason = workflow.blockerReason;
 
-  if (workflow.blockerReason) {
-    const trimmed = await trimTextToArtifact(
-      store,
-      workflowTextArtifactPath(workflow, "blocker-reason"),
-      workflow.blockerReason,
-      300,
-      workflowTextReference(workflow, "blocker-reason")
-    );
-    if (trimmed.trimmed) {
-      compacted.blockerReason = trimmed.value;
-      trimmedFields.push({
-        label: "workflow:blockerReason",
-        originalChars: trimmed.originalChars,
-        keptChars: trimmed.value.length,
-        reference: trimmed.reference
-      });
-    }
-  }
+  await trimWorkflowSummaryTextField(
+    store,
+    workflow,
+    compacted,
+    "blockerReason",
+    "workflow:blockerReason",
+    "blocker-reason",
+    trimmedFields
+  );
 
-  if (workflow.lastDurableAdvancement) {
-    const trimmed = await trimTextToArtifact(
-      store,
-      workflowTextArtifactPath(workflow, "last-durable-advancement"),
-      workflow.lastDurableAdvancement,
-      300,
-      workflowTextReference(workflow, "last-durable-advancement")
-    );
-    if (trimmed.trimmed) {
-      compacted.lastDurableAdvancement = trimmed.value;
-      trimmedFields.push({
-        label: "workflow:lastDurableAdvancement",
-        originalChars: trimmed.originalChars,
-        keptChars: trimmed.value.length,
-        reference: trimmed.reference
-      });
-    }
-  }
+  await trimWorkflowSummaryTextField(
+    store,
+    workflow,
+    compacted,
+    "lastDurableAdvancement",
+    "workflow:lastDurableAdvancement",
+    "last-durable-advancement",
+    trimmedFields
+  );
 
   return {
     workflow: compacted,
     originalBlockerReason
   };
+}
+
+async function trimWorkflowSummaryTextField(
+  store: RuntimeArtifactStore,
+  workflow: WorkflowSummary,
+  compacted: WorkflowSummary,
+  key: "blockerReason" | "lastDurableAdvancement",
+  label: string,
+  suffix: "blocker-reason" | "last-durable-advancement",
+  trimmedFields: TrimmedField[]
+): Promise<void> {
+  const value = workflow[key];
+  if (!value) {
+    return;
+  }
+  const trimmed = await trimTextToArtifact(
+    store,
+    workflowTextArtifactPath(workflow, suffix),
+    value,
+    300,
+    workflowTextReference(workflow, suffix)
+  );
+  if (!trimmed.trimmed) {
+    return;
+  }
+  compacted[key] = trimmed.value;
+  trimmedFields.push({
+    label,
+    originalChars: trimmed.originalChars,
+    keptChars: trimmed.value.length,
+    reference: trimmed.reference
+  });
 }
 
 async function trimTextToArtifact(
