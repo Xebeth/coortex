@@ -262,7 +262,9 @@ though the cleared lease were still present.
 
 When workflow mode is active, workflow-derived status is authoritative
 over later ad hoc status drift. The shared load path must re-sync
-operator-facing status from workflow truth when those views diverge.
+operator-facing status from workflow truth when those views diverge,
+including `lastDurableOutputAt`; workflow status drift must not become
+the new durable-output timestamp.
 
 ### Command consistency
 

@@ -2753,7 +2753,7 @@ test("ctx status recovers a completed host run and requeues the workflow module"
   ) as {
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
-    status: { activeAssignmentIds: string[]; currentObjective: string };
+    status: { activeAssignmentIds: string[]; currentObjective: string; lastDurableOutputAt: string };
     workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
@@ -2794,6 +2794,12 @@ test("ctx status and resume keep workflow-derived status after completed-result 
   const firstStatus = await execFileAsync(process.execPath, [cliPath, "status"], {
     cwd: projectRoot
   });
+  const firstSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    status: { lastDurableOutputAt: string };
+  };
+  const authoritativeLastDurableOutputAt = firstSnapshot.status.lastDurableOutputAt;
   assert.match(firstStatus.stderr, /WARNING completed-run-reconciled/);
   assert.match(firstStatus.stdout, new RegExp(`Objective: Start plan assignment ${assignmentId}:`));
 
@@ -2810,7 +2816,7 @@ test("ctx status and resume keep workflow-derived status after completed-result 
   ) as {
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
-    status: { activeAssignmentIds: string[]; currentObjective: string };
+    status: { activeAssignmentIds: string[]; currentObjective: string; lastDurableOutputAt: string };
     workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
@@ -2822,6 +2828,10 @@ test("ctx status and resume keep workflow-derived status after completed-result 
   assert.match(secondSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
   assert.equal(secondSnapshot.workflowProgress.currentModuleId, "plan");
   assert.equal(secondSnapshot.workflowProgress.currentModuleAttempt, 2);
+  assert.equal(
+    secondSnapshot.status.lastDurableOutputAt,
+    authoritativeLastDurableOutputAt
+  );
   assert.equal(secondSnapshot.results.length, 1);
   assert.deepEqual(secondSnapshot.results[0], {
     resultId: "result-cli-completed-recovery",
@@ -2847,13 +2857,17 @@ test("ctx status and resume keep workflow-derived status after completed-result 
   ) as {
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ resultId: string; assignmentId: string; status: string; summary: string }>;
-    status: { activeAssignmentIds: string[]; currentObjective: string };
+    status: { activeAssignmentIds: string[]; currentObjective: string; lastDurableOutputAt: string };
     workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
   };
 
   assert.equal(finalSnapshot.assignments[0]?.state, "queued");
   assert.deepEqual(finalSnapshot.status.activeAssignmentIds, [assignmentId]);
   assert.match(finalSnapshot.status.currentObjective, new RegExp(`Start plan assignment ${assignmentId}:`));
+  assert.equal(
+    finalSnapshot.status.lastDurableOutputAt,
+    authoritativeLastDurableOutputAt
+  );
   assert.equal(finalSnapshot.workflowProgress.currentModuleId, "plan");
   assert.equal(finalSnapshot.workflowProgress.currentModuleAttempt, 2);
   assert.equal(finalSnapshot.results.length, 1);
@@ -2909,7 +2923,7 @@ test("ctx status and resume repair a completed result despite older matching sta
     changedFiles: ["src/cli/ctx.ts"],
     createdAt: completedAt
   });
-  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 1);
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "result.submitted"), 0);
 
   const resume = await runCliCommand(cliPath, "resume", {
     cwd: projectRoot

@@ -836,7 +836,6 @@ function deriveWorkflowStatusTimestamp(
   projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>
 ): string {
   const timestamps = [
-    projection.status.lastDurableOutputAt,
     ...[...projection.assignments.values()].flatMap((assignment) => [
       assignment.createdAt,
       assignment.updatedAt
@@ -848,7 +847,7 @@ function deriveWorkflowStatusTimestamp(
     projection.workflowProgress?.lastGate?.evaluatedAt ?? "",
     projection.workflowProgress?.lastTransition?.appliedAt ?? ""
   ].filter((value) => value.length > 0);
-  return timestamps.sort().at(-1) ?? "";
+  return timestamps.sort().at(-1) ?? projection.status.lastDurableOutputAt;
 }
 
 function buildWorkflowRecoveredOutcomeEvents(
