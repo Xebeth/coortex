@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   buildCompletedRunRecord,
   createRunningRunRecord,
+  buildRecoveredOutcomeEvent,
   normalizeHostDecisionCapture,
   normalizeHostResultCapture
 } from "../adapters/host-run-records.js";
@@ -97,4 +98,57 @@ test("host run record normalization mints ids and timestamps for host captures",
   assert.equal(normalizedDecision.decisionId.length > 0, true);
   assert.equal(normalizedDecision.state, "open");
   assert.equal(typeof normalizedDecision.createdAt, "string");
+});
+
+
+test("host run record recovered outcome event builder mints missing ids", () => {
+  const timestamp = "2026-04-19T12:00:00.000Z";
+  const resultEvent = buildRecoveredOutcomeEvent("session-1", timestamp, {
+    assignmentId: "assignment-result",
+    state: "completed",
+    startedAt: "2026-04-19T11:59:00.000Z",
+    completedAt: timestamp,
+    outcomeKind: "result",
+    summary: "done",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "codex",
+        status: "completed",
+        summary: "done",
+        changedFiles: [],
+        createdAt: timestamp
+      }
+    }
+  });
+  assert.equal(resultEvent?.type, "result.submitted");
+  if (resultEvent?.type === "result.submitted") {
+    assert.equal(typeof resultEvent.payload.result.resultId, "string");
+    assert.equal(resultEvent.payload.result.assignmentId, "assignment-result");
+  }
+
+  const decisionEvent = buildRecoveredOutcomeEvent("session-1", timestamp, {
+    assignmentId: "assignment-decision",
+    state: "completed",
+    startedAt: "2026-04-19T11:58:00.000Z",
+    completedAt: timestamp,
+    outcomeKind: "decision",
+    summary: "Need approval",
+    terminalOutcome: {
+      kind: "decision",
+      decision: {
+        requesterId: "codex",
+        blockerSummary: "Need approval",
+        options: [{ id: "yes", label: "Yes", summary: "approve" }],
+        recommendedOption: "yes",
+        state: "open",
+        createdAt: timestamp
+      }
+    }
+  });
+  assert.equal(decisionEvent?.type, "decision.created");
+  if (decisionEvent?.type === "decision.created") {
+    assert.equal(typeof decisionEvent.payload.decision.decisionId, "string");
+    assert.equal(decisionEvent.payload.decision.assignmentId, "assignment-decision");
+  }
 });

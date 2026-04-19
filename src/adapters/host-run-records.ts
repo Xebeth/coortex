@@ -10,6 +10,7 @@ import type {
   RuntimeProjection,
   WorkflowRunAttemptIdentity
 } from "../core/types.js";
+import type { RuntimeEvent } from "../core/events.js";
 import { nowIso } from "../utils/time.js";
 import { randomUUID } from "node:crypto";
 
@@ -41,6 +42,57 @@ export function normalizeHostDecisionCapture(capture: HostDecisionCapture): Deci
     recommendedOption: capture.recommendedOption,
     state: capture.state ?? "open",
     createdAt: capture.createdAt ?? nowIso()
+  };
+}
+
+export function buildRecoveredOutcomeEvent(
+  sessionId: string,
+  timestamp: string,
+  record: HostRunRecord
+): RuntimeEvent | undefined {
+  if (!record.terminalOutcome) {
+    return undefined;
+  }
+  if (record.terminalOutcome.kind === "decision") {
+    return {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "decision.created",
+      payload: {
+        decision: normalizeHostDecisionCapture({
+          assignmentId: record.assignmentId,
+          requesterId: record.terminalOutcome.decision.requesterId,
+          blockerSummary: record.terminalOutcome.decision.blockerSummary,
+          options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
+          recommendedOption: record.terminalOutcome.decision.recommendedOption,
+          state: record.terminalOutcome.decision.state,
+          createdAt: record.terminalOutcome.decision.createdAt,
+          ...(record.terminalOutcome.decision.decisionId
+            ? { decisionId: record.terminalOutcome.decision.decisionId }
+            : {})
+        })
+      }
+    };
+  }
+  return {
+    eventId: randomUUID(),
+    sessionId,
+    timestamp,
+    type: "result.submitted",
+    payload: {
+      result: normalizeHostResultCapture({
+        assignmentId: record.assignmentId,
+        producerId: record.terminalOutcome.result.producerId,
+        status: record.terminalOutcome.result.status,
+        summary: record.terminalOutcome.result.summary,
+        changedFiles: [...record.terminalOutcome.result.changedFiles],
+        createdAt: record.terminalOutcome.result.createdAt,
+        ...(record.terminalOutcome.result.resultId
+          ? { resultId: record.terminalOutcome.result.resultId }
+          : {})
+      })
+    }
   };
 }
 

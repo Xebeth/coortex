@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 
 import type { HostAdapter } from "../adapters/contract.js";
-import { deriveWorkflowRunAttemptIdentity } from "../adapters/host-run-records.js";
+import {
+  buildRecoveredOutcomeEvent,
+  deriveWorkflowRunAttemptIdentity
+} from "../adapters/host-run-records.js";
 import { isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord } from "../core/types.js";
@@ -1324,43 +1327,13 @@ function buildRecoveredOutcomeEvents(
   const status = nextRuntimeStatusFromRecord(projection, record, timestamp);
   const events: RuntimeEvent[] = [];
 
-  if (record.terminalOutcome.kind === "decision") {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "decision.created",
-      payload: {
-        decision: {
-          decisionId: record.terminalOutcome.decision.decisionId ?? randomUUID(),
-          assignmentId: record.assignmentId,
-          requesterId: record.terminalOutcome.decision.requesterId,
-          blockerSummary: record.terminalOutcome.decision.blockerSummary,
-          options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
-          recommendedOption: record.terminalOutcome.decision.recommendedOption,
-          state: record.terminalOutcome.decision.state,
-          createdAt: record.terminalOutcome.decision.createdAt
-        }
-      }
-    });
-  } else {
-    events.push({
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "result.submitted",
-      payload: {
-        result: {
-          resultId: record.terminalOutcome.result.resultId ?? randomUUID(),
-          assignmentId: record.assignmentId,
-          producerId: record.terminalOutcome.result.producerId,
-          status: record.terminalOutcome.result.status,
-          summary: record.terminalOutcome.result.summary,
-          changedFiles: [...record.terminalOutcome.result.changedFiles],
-          createdAt: record.terminalOutcome.result.createdAt
-        }
-      }
-    });
+  const recoveredOutcomeEvent = buildRecoveredOutcomeEvent(
+    projection.sessionId,
+    timestamp,
+    record
+  );
+  if (recoveredOutcomeEvent) {
+    events.push(recoveredOutcomeEvent);
   }
 
   events.push({

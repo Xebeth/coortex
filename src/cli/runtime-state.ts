@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { HostAdapter } from "../adapters/contract.js";
+import { buildRecoveredOutcomeEvent } from "../adapters/host-run-records.js";
 import { isRunLeaseExpired } from "../core/run-state.js";
 import type {
   DecisionPacket,
