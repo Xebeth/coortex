@@ -20,9 +20,18 @@ export function materializeInspectableRunRecord(
   if (!inspection) {
     return undefined;
   }
+  const runRecord =
+    inspection.runRecord?.assignmentId === inspection.assignmentId
+      ? inspection.runRecord
+      : undefined;
+  const leaseRecord =
+    inspection.lease.state === "valid" &&
+      inspection.lease.record.assignmentId === inspection.assignmentId
+      ? inspection.lease.record
+      : undefined;
   const authoritative = selectAuthoritativeRunRecord(
-    inspection.runRecord,
-    inspection.lease.state === "valid" ? inspection.lease.record : undefined
+    runRecord,
+    leaseRecord
   );
   if (authoritative) {
     return normalizeInspectableRunRecord(authoritative);

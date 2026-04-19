@@ -74,11 +74,14 @@ Every adapter must provide durable artifacts with these roles:
   is malformed or incomplete.
 
 - per-assignment run record
-  Durable host-run metadata for inspection and reconciliation.
+  Durable host-run metadata for inspection and reconciliation. The
+  payload assignment id must match the assignment identity implied by
+  the artifact path.
 
 - per-assignment active lease
   Exclusivity primitive for active host execution. It is authoritative
-  only while the run is actually active.
+  only while the run is actually active. The payload assignment id must
+  match the assignment identity implied by the artifact path.
 
 - last-run pointer
   Convenience pointer for the most recently inspected host run. It is
@@ -177,12 +180,14 @@ rules:
 
 When an active lease is stale, reconciliation must:
 
-1. rewrite the host run record to a non-running stale-completed state
-2. remove the active lease
-3. orphan any active attachment and claim authority for that assignment
-4. move the assignment back to `queued`
-5. update runtime status from the latest projection, not the original
+1. orphan any active attachment and claim authority for that assignment
+2. move the assignment back to `queued`
+3. update runtime status from the latest projection, not the original
    one from the beginning of reconciliation
+4. durably persist that runtime recovery state before clearing host-run
+   artifacts
+5. rewrite the host run record to a non-running stale-completed state
+   and remove the active lease
 6. emit stale-run reconciliation telemetry
 
 The operation must be idempotent. Re-running `status`, `resume`, or
@@ -245,6 +250,10 @@ absorbed the terminal result or decision, later commands must not
 replay it again. Later runtime progression, including resolved
 decisions and updated status text, must not regenerate a previously
 absorbed `result.submitted` or `decision.created`.
+When a recovered terminal decision is already resolved, the recovered
+decision packet must preserve its durable resolution metadata
+(`resolvedAt` and `resolutionSummary`) instead of degrading that
+history to a bare resolved flag.
 
 Completed run records without durable `terminalOutcome` data are
 degraded metadata only. `inspect` may surface them, but `status`,

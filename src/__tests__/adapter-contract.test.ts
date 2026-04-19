@@ -17,6 +17,7 @@ import { nowIso } from "../utils/time.js";
 
 test("codex adapter normalizes host result, decision, and telemetry captures", () => {
   const adapter = new CodexAdapter();
+  const decisionResolvedAt = "2026-04-03T10:02:00.000Z";
 
   const result = adapter.normalizeResult({
     assignmentId: "assignment-1",
@@ -46,7 +47,10 @@ test("codex adapter normalizes host result, decision, and telemetry captures", (
       { id: "skip", label: "Skip", summary: "Proceed without the secret-dependent step." }
     ],
     recommendedOption: "wait",
+    state: "resolved",
     createdAt: "2026-04-03T10:01:00.000Z",
+    resolvedAt: decisionResolvedAt,
+    resolutionSummary: "Operator approved a safe fallback path.",
     decisionId: "decision-1"
   });
   assert.deepEqual(decision, {
@@ -59,8 +63,10 @@ test("codex adapter normalizes host result, decision, and telemetry captures", (
       { id: "skip", label: "Skip", summary: "Proceed without the secret-dependent step." }
     ],
     recommendedOption: "wait",
-    state: "open",
-    createdAt: "2026-04-03T10:01:00.000Z"
+    state: "resolved",
+    createdAt: "2026-04-03T10:01:00.000Z",
+    resolvedAt: decisionResolvedAt,
+    resolutionSummary: "Operator approved a safe fallback path."
   });
 
   const telemetry = adapter.normalizeTelemetry({

@@ -424,6 +424,7 @@ async function reconcileProvisionalAttachmentClaims(
         cleanupReason,
         {
           cleanupOrder: "after_orphan",
+          provenanceKind: "recovery",
           ...(record ? { inspectedRecord: record } : {}),
           ...(shouldRequeue && assignment ? { requeueObjective: assignment.objective } : {})
         },
@@ -444,6 +445,7 @@ async function reconcileProvisionalAttachmentClaims(
         },
         cleanupReason,
         {
+          provenanceKind: "recovery",
           ...(record ? { inspectedRecord: record } : {})
         },
         options
@@ -657,12 +659,6 @@ async function reconcileInProjectionStaleRun(
   );
   const recoveryEvents = [...pendingEvents, ...authorityRepairEvents];
 
-  await addHostRunPersistFailureWarnings(
-    context,
-    diagnostics,
-    reconciliation.staleRecord
-  );
-
   const nextProjection = await applyRecoveryProjectionEvents(
     context,
     projection,
@@ -671,6 +667,12 @@ async function reconcileInProjectionStaleRun(
       : recoveryEvents,
     diagnostics,
     recoveryOptions
+  );
+
+  await addHostRunPersistFailureWarnings(
+    context,
+    diagnostics,
+    reconciliation.staleRecord
   );
 
   if (recoveryEvents.length === 0) {
@@ -723,6 +725,7 @@ function selectCompletedRunCleanupRecord(
 interface StaleRunRecoveryState {
   assignmentRecovered: boolean;
   statusRecovered: boolean;
+  degradedRecoveryPersisted: boolean;
 }
 
 function getStaleRunRecoveryState(
@@ -732,6 +735,13 @@ function getStaleRunRecoveryState(
 ): StaleRunRecoveryState {
   const assignment = projection.assignments.get(assignmentId);
   const runInstanceId = getRunInstanceId(record);
+  const persistedStaleRunInstanceId =
+    assignment?.state === "queued" &&
+    typeof assignment.lastStaleRunInstanceId === "string" &&
+    assignment.lastStaleRunInstanceId.length > 0 &&
+    assignment.lastStaleRunInstanceId === projection.status.lastStaleRunInstanceId
+      ? assignment.lastStaleRunInstanceId
+      : undefined;
 
   return {
     assignmentRecovered:
@@ -740,7 +750,9 @@ function getStaleRunRecoveryState(
       assignment.lastStaleRunInstanceId === runInstanceId,
     statusRecovered:
       typeof runInstanceId === "string" &&
-      projection.status.lastStaleRunInstanceId === runInstanceId
+      projection.status.lastStaleRunInstanceId === runInstanceId,
+    degradedRecoveryPersisted:
+      typeof runInstanceId !== "string" && typeof persistedStaleRunInstanceId === "string"
   };
 }
 
@@ -807,8 +819,9 @@ function isStaleRunAlreadyReconciled(
   recoveryState: StaleRunRecoveryState
 ): boolean {
   return (
-    recoveryState.assignmentRecovered &&
-    recoveryState.statusRecovered &&
+    (recoveryState.degradedRecoveryPersisted || (
+      recoveryState.assignmentRecovered && recoveryState.statusRecovered
+    )) &&
     !getActiveClaimForAssignment(projection, assignmentId) &&
     projection.assignments.get(assignmentId)?.state === "queued"
   );

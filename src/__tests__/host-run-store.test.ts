@@ -157,6 +157,24 @@ test("host run lease repository preserves malformed last-run pointers as typed f
   assert.equal(await repository.inspect(), undefined);
 });
 
+test("host run lease repository treats parseable invalid last-run pointers as malformed facts", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const repository = new HostRunLeaseRepository(store, "custom", artifacts);
+
+  await store.writeJsonArtifact(artifacts.lastRunPath(), {});
+
+  const pointer = await repository.readLastRunPointer();
+
+  assert.equal(pointer.state, "malformed");
+  assert.equal(pointer.raw, "{}");
+  assert.equal(await repository.inspect(), undefined);
+});
+
 test("host run store uses adapter-provided artifact roles instead of codex paths", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -519,6 +537,166 @@ test("host run store minted stale ids do not clear a newer adopted live boundary
   const runRecord = await store.readJsonArtifact<HostRunRecord>(artifacts.runRecordPath(assignmentId), "record");
   const lastRun = await store.readJsonArtifact<HostRunRecord>(artifacts.lastRunPath(), "last-run");
 
+  assert.equal(adopted.runInstanceId, "run-instance-owner-2");
+  assert.equal(inspected?.state, "running");
+  assert.equal(inspected?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lease?.runInstanceId, "run-instance-owner-2");
+  assert.equal(runRecord?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lastRun?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+  assert.equal(runRecord?.adapterData?.coortexReclaimLease, true);
+  assert.equal(lastRun?.adapterData?.coortexReclaimLease, true);
+});
+
+test("host run store legacy completion does not clear a newer adopted live boundary", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const assignmentId = "assignment-legacy-terminal-boundary";
+  const legacyRecord: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-legacy-terminal-boundary"
+    }
+  };
+
+  await runStore.claim(legacyRecord);
+  const adopted = await runStore.claimOrAdopt(
+    {
+      ...legacyRecord,
+      runInstanceId: "run-instance-owner-2"
+    },
+    (current) => current.adapterData?.nativeRunId === "thread-legacy-terminal-boundary",
+    (current) => ({
+      ...current,
+      heartbeatAt: "2026-04-11T10:00:05.000Z",
+      leaseExpiresAt: "2999-04-11T10:00:35.000Z",
+      adapterData: {
+        ...(current.adapterData ?? {}),
+        nativeRunId: "thread-legacy-terminal-boundary",
+        coortexReclaimLease: true
+      }
+    })
+  );
+
+  await assert.rejects(
+    runStore.write({
+      assignmentId,
+      state: "completed",
+      startedAt: legacyRecord.startedAt,
+      completedAt: "2026-04-11T10:01:00.000Z",
+      outcomeKind: "result",
+      resultStatus: "completed",
+      summary: "Legacy completion must not clear the adopted lease.",
+      terminalOutcome: {
+        kind: "result",
+        result: {
+          producerId: "custom-host",
+          status: "completed",
+          summary: "Legacy completion must not clear the adopted lease.",
+          changedFiles: [],
+          createdAt: "2026-04-11T10:01:00.000Z"
+        }
+      },
+      adapterData: {
+        nativeRunId: "thread-legacy-terminal-boundary"
+      }
+    }),
+    /lost host run ownership/
+  );
+
+  const inspected = await runStore.inspect(assignmentId);
+  const lease = await store.readJsonArtifact<HostRunRecord>(artifacts.runLeasePath(assignmentId), "lease");
+  const runRecord = await store.readJsonArtifact<HostRunRecord>(artifacts.runRecordPath(assignmentId), "record");
+  const lastRun = await store.readJsonArtifact<HostRunRecord>(artifacts.lastRunPath(), "last-run");
+
+  assert.equal(adopted.runInstanceId, "run-instance-owner-2");
+  assert.equal(inspected?.state, "running");
+  assert.equal(inspected?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lease?.runInstanceId, "run-instance-owner-2");
+  assert.equal(runRecord?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lastRun?.runInstanceId, "run-instance-owner-2");
+  assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+  assert.equal(runRecord?.adapterData?.coortexReclaimLease, true);
+  assert.equal(lastRun?.adapterData?.coortexReclaimLease, true);
+});
+
+test("host run store legacy persistWarning does not clear a newer adopted live boundary", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const assignmentId = "assignment-legacy-warning-boundary";
+  const legacyRecord: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-legacy-warning-boundary"
+    }
+  };
+
+  await runStore.claim(legacyRecord);
+  const adopted = await runStore.claimOrAdopt(
+    {
+      ...legacyRecord,
+      runInstanceId: "run-instance-owner-2"
+    },
+    (current) => current.adapterData?.nativeRunId === "thread-legacy-warning-boundary",
+    (current) => ({
+      ...current,
+      heartbeatAt: "2026-04-11T10:00:05.000Z",
+      leaseExpiresAt: "2999-04-11T10:00:35.000Z",
+      adapterData: {
+        ...(current.adapterData ?? {}),
+        nativeRunId: "thread-legacy-warning-boundary",
+        coortexReclaimLease: true
+      }
+    })
+  );
+
+  const warning = await runStore.persistWarning({
+    assignmentId,
+    state: "completed",
+    startedAt: legacyRecord.startedAt,
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Legacy warning path must not clear the adopted lease.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "custom-host",
+        status: "completed",
+        summary: "Legacy warning path must not clear the adopted lease.",
+        changedFiles: [],
+        createdAt: "2026-04-11T10:01:00.000Z"
+      }
+    },
+    adapterData: {
+      nativeRunId: "thread-legacy-warning-boundary"
+    }
+  });
+
+  const inspected = await runStore.inspect(assignmentId);
+  const lease = await store.readJsonArtifact<HostRunRecord>(artifacts.runLeasePath(assignmentId), "lease");
+  const runRecord = await store.readJsonArtifact<HostRunRecord>(artifacts.runRecordPath(assignmentId), "record");
+  const lastRun = await store.readJsonArtifact<HostRunRecord>(artifacts.lastRunPath(), "last-run");
+
+  assert.match(warning ?? "", /lost host run ownership/i);
   assert.equal(adopted.runInstanceId, "run-instance-owner-2");
   assert.equal(inspected?.state, "running");
   assert.equal(inspected?.runInstanceId, "run-instance-owner-2");
@@ -1578,6 +1756,63 @@ test("host run store ignores a parseable but invalid last-run pointer during ins
   assert.equal(await runStore.inspect(), undefined);
   assert.deepEqual(await runStore.inspectAll(), [runningRecord]);
   assert.deepEqual(await runStore.inspect(runningRecord.assignmentId), runningRecord);
+});
+
+test("host run store ignores a parseable but invalid run record during inspection", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+
+  await store.writeJsonArtifact(artifacts.runRecordPath("assignment-invalid"), {});
+  await store.writeJsonArtifact(artifacts.lastRunPath(), {
+    assignmentId: "assignment-invalid",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  });
+
+  assert.equal(await runStore.inspect("assignment-invalid"), undefined);
+  assert.deepEqual(await runStore.inspectAll(), []);
+});
+
+test("host run store ignores a run record whose payload assignment does not match its path", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+
+  await store.writeJsonArtifact(artifacts.runRecordPath("assignment-a"), {
+    assignmentId: "assignment-b",
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Finished elsewhere.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "custom",
+        status: "completed",
+        summary: "Finished elsewhere.",
+        changedFiles: [],
+        createdAt: "2026-04-11T10:01:00.000Z"
+      }
+    }
+  });
+
+  assert.equal(await runStore.inspectArtifacts("assignment-a"), undefined);
+  assert.equal(await runStore.inspect("assignment-a"), undefined);
+  assert.deepEqual(await runStore.inspectAllArtifacts(), []);
+  assert.deepEqual(await runStore.inspectAll(), []);
 });
 
 test("host run store inspection materializes malformed lease blockers by default", async () => {

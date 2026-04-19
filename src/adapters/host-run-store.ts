@@ -355,49 +355,19 @@ export class HostRunStore {
         await this.repository.writeLease(record);
         return;
       }
-
-      if (!hasMintedStaleRunInstanceId(record)) {
-        await this.repository.deleteLease(record.assignmentId);
-        return;
-      }
-
       const currentLease = await this.repository.readLease(record.assignmentId);
       if (currentLease.state === "valid") {
-        ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
+        ensureTerminalWriteBoundary(
           record.assignmentId,
           "completed lease finalization",
           record,
           currentLease.record
         );
-        const deleted = await this.repository.deleteLeaseVersioned(record.assignmentId, currentLease.version);
-        if (!deleted.ok) {
-          throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
-        }
+        await this.repository.deleteLease(record.assignmentId);
       } else if (currentLease.state === "malformed") {
         await this.repository.deleteLease(record.assignmentId);
       }
-
-      const currentRunRecord = await this.repository.readRunRecord(record.assignmentId);
-      ensureTerminalWriteBoundary(
-        record.assignmentId,
-        "completed run persistence",
-        record,
-        currentRunRecord
-      );
-
-      const lastRun = await this.repository.readLastRunPointer();
-      if (lastRun.state === "valid" && lastRun.record.assignmentId === record.assignmentId) {
-        ensureTerminalWriteBoundary(
-          record.assignmentId,
-          "completed last-run persistence",
-          record,
-          lastRun.record
-        );
-      }
-      return;
-    }
-
-    if (record.state === "running") {
+    } else if (record.state === "running") {
       const currentLease = await this.repository.readLease(record.assignmentId);
       if (currentLease.state !== "valid") {
         throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
@@ -412,7 +382,12 @@ export class HostRunStore {
 
     const currentLease = await this.repository.readLease(record.assignmentId);
     if (currentLease.state === "valid") {
-      ensureMatchingRunOwnerFence(record.assignmentId, "completed lease finalization", ownerFence, currentLease.record);
+      ensureMatchingRunOwnerFence(
+        record.assignmentId,
+        "completed lease finalization",
+        ownerFence!,
+        currentLease.record
+      );
       const refreshed = await this.repository.swapLease(
         record.assignmentId,
         currentLease.version,
@@ -432,6 +407,10 @@ export class HostRunStore {
       throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
     }
 
+    await this.ensureCompletedMetadataBoundaries(record);
+  }
+
+  private async ensureCompletedMetadataBoundaries(record: HostRunRecord): Promise<void> {
     const currentRunRecord = await this.repository.readRunRecord(record.assignmentId);
     ensureTerminalWriteBoundary(
       record.assignmentId,
@@ -484,9 +463,6 @@ function ensureUnfencedTerminalWriteDoesNotCrossNewerBoundary(
   expectedRecord: Pick<HostRunRecord, "runInstanceId" | "adapterData">,
   currentRecord: Pick<HostRunRecord, "runInstanceId" | "adapterData"> | undefined
 ): void {
-  if (!hasMintedStaleRunInstanceId(expectedRecord)) {
-    return;
-  }
   if (!currentRecord) {
     return;
   }

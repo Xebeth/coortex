@@ -213,6 +213,42 @@ test("host-run session coordinator tracks active handles and settled state", asy
   }
 });
 
+test("host-run session coordinator stops later startup tasks after the first failure", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-coordinator-startup-failure";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  const coordinator = new HostRunSessionCoordinator<{ exitCode: number }>({
+    runStore,
+    runRecord: claimedRun,
+    leaseMs: 30_000,
+    heartbeatMs: 5_000,
+    setActiveRun: () => undefined,
+    setActiveExecutionSettled: () => undefined
+  });
+
+  const startupSteps: string[] = [];
+  coordinator.queueStartupTask(async () => {
+    startupSteps.push("first");
+    throw new Error("simulated first startup task failure");
+  }, "first startup task");
+  coordinator.queueStartupTask(async () => {
+    startupSteps.push("second");
+  }, "second startup task");
+
+  await coordinator.waitForStartupTasks();
+
+  assert.deepEqual(startupSteps, ["first"]);
+});
+
 test("host-run session terminates a spawned launch when session identity handling fails before the handle returns", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -961,6 +997,90 @@ test("host-run session does not surface launch identity when metadata persistenc
   }
 });
 
+test("host-run session surfaces launch identity when the native run id is already durable", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-launch-preexisting-identity";
+  const nativeRunId = "native-launch-preexisting-identity-1";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, nativeRunId);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  const seenIdentities: string[] = [];
+  try {
+    const execution = await executeHostRunSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-launch-preexisting-identity",
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async ({ onNativeRunId }) => {
+        await onNativeRunId(nativeRunId);
+        return {
+          result: Promise.resolve({ exitCode: 0 }),
+          terminate: async () => undefined,
+          waitForExit: async () => ({ code: 0 })
+        };
+      },
+      onSessionIdentity: async (identity) => {
+        seenIdentities.push(identity.nativeSessionId);
+      },
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+        outcome: {
+          kind: "result",
+          capture: {
+            assignmentId: failedAssignmentId,
+            producerId: "matrix-host",
+            status: "failed",
+            summary,
+            changedFiles: [],
+            createdAt: completedAt
+          }
+        }
+      }),
+      deriveCompleted: async (_execution, persistedNativeRunId) => ({
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Completed after reusing a durable launch identity.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        },
+        ...(persistedNativeRunId ? { nativeRunId: persistedNativeRunId } : {})
+      }),
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.deepEqual(seenIdentities, [nativeRunId]);
+    assert.equal(execution.run.adapterData?.nativeRunId, nativeRunId);
+    assert.equal(execution.warning, undefined);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
 test("host-run resume preserves shared proof fields after reclaimed success", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -1151,6 +1271,7 @@ test("host-run resume keeps a foreign verified session id unverified on post-exi
       result.warning ?? "",
       /simulated resume post-exit failure with foreign verified session/
     );
+    assert.match(result.warning ?? "", /resume verification stayed foreign/);
   } finally {
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;

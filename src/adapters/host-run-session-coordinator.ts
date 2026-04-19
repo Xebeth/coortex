@@ -53,6 +53,7 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
   private readonly runningRecord: RunningRecordController;
   private readonly metadataWarnings: string[] = [];
   private readonly metadataFailure: Promise<never>;
+  private readonly handledSessionIdentityIds = new Set<string>();
   private startupTaskQueue: Promise<void> = Promise.resolve();
   private metadataFailureReject!: (error: Error) => void;
   private metadataFailureRaised = false;
@@ -91,8 +92,34 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
     }
   }
 
+  async ensureNativeRunId(nativeRunId: string, context = "thread-start handling"): Promise<boolean> {
+    const phase = this.runningRecord.phase();
+    try {
+      const updated = await this.runningRecord.update(phase, (current) =>
+        getNativeRunId(current) === nativeRunId ? current : withRunNativeId(current, nativeRunId)
+      );
+      return updated.applied;
+    } catch (error) {
+      this.recordMetadataWarning(error, context);
+      return false;
+    }
+  }
+
+  noteSessionIdentityHandled(nativeSessionId: string): boolean {
+    if (this.handledSessionIdentityIds.has(nativeSessionId)) {
+      return false;
+    }
+    this.handledSessionIdentityIds.add(nativeSessionId);
+    return true;
+  }
+
   queueStartupTask(task: () => Promise<void>, context: string): void {
-    const taskPromise = this.startupTaskQueue.catch(() => undefined).then(task);
+    const taskPromise = this.startupTaskQueue.catch(() => undefined).then(async () => {
+      if (this.metadataFailureRaised) {
+        return;
+      }
+      await task();
+    });
     this.startupTaskQueue = taskPromise.catch((error) => {
       this.failRunOnStartupError(error, context);
     });

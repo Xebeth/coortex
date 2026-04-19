@@ -2266,10 +2266,15 @@ test("host-run command matrix prefers a new open decision over older resolved hi
 test("host-run recovery matrix keeps resolved decision recoveries runnable", async () => {
   const adapter = new BriefingMatrixAdapter();
   const ctx = await createMatrixContext(adapter);
+  const resolvedAt = new Date(Date.now() - 30_000).toISOString();
   const record = completedDecisionRecord(
     ctx.assignmentId,
     "Recovered operator question was already resolved.",
-    "resolved"
+    "resolved",
+    {
+      resolvedAt,
+      resolutionSummary: "Operator already resolved the blocker before recovery."
+    }
   );
   await ctx.adapter.runStore.write(record);
 
@@ -2282,6 +2287,11 @@ test("host-run recovery matrix keeps resolved decision recoveries runnable", asy
     ctx.projection.assignments.get(ctx.assignmentId)?.objective
   );
   assert.equal([...reconciled.projection.decisions.values()].at(-1)?.state, "resolved");
+  assert.equal([...reconciled.projection.decisions.values()].at(-1)?.resolvedAt, resolvedAt);
+  assert.equal(
+    [...reconciled.projection.decisions.values()].at(-1)?.resolutionSummary,
+    "Operator already resolved the blocker before recovery."
+  );
   assert.equal(prepared.brief.unresolvedDecisions.length, 0);
   assert.match(prepared.brief.nextRequiredAction, /^Continue assignment /);
 });
@@ -2638,6 +2648,10 @@ test("host-run recovery matrix repairs missing stale status convergence after qu
     reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection),
     /simulated stale-run status persistence failure/
   );
+  assert.notEqual(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
+  );
 
   (ctx.store as RuntimeStore & {
     appendEvents: RuntimeStore["appendEvents"];
@@ -2698,13 +2712,17 @@ test("host-run recovery matrix uses snapshot truth when stale recovery lines bec
   );
 
   const repairedSnapshot = await ctx.store.loadSnapshot();
-  assert.equal(repairedSnapshot, undefined);
+  assert.notEqual(repairedSnapshot, undefined);
 
   const currentProjection = await loadOperatorProjection(ctx.store);
-  assert.equal(currentProjection.assignments.get(ctx.assignmentId)?.state, "in_progress");
-  assert.equal(
+  assert.equal(currentProjection.assignments.get(ctx.assignmentId)?.state, "queued");
+  assert.match(
     currentProjection.status.currentObjective,
-    ctx.projection.assignments.get(ctx.assignmentId)?.objective
+    new RegExp(`^Retry assignment ${ctx.assignmentId}:`)
+  );
+  assert.notEqual(
+    await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+    undefined
   );
   await ctx.store.syncSnapshotFromEvents();
 
@@ -2738,7 +2756,7 @@ test("host-run recovery matrix uses snapshot truth when stale recovery lines bec
     retried.projection.status.currentObjective,
     new RegExp(`^Retry assignment ${ctx.assignmentId}:`)
   );
-  assert.ok(retried.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(!retried.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(replayableQueuedTransitionCount, 0);
   assert.equal(replayableStatusCount, 0);
   assert.equal(
@@ -2863,6 +2881,83 @@ test("host-run recovery matrix keeps completed-run reconciliation idempotent", a
       await testCase.assertStable(ctx, first, second, firstEventCount, secondEventCount);
     });
   }
+});
+
+test("host-run recovery matrix replays fallback resolved decisions when resolution metadata changes", async () => {
+  const ctx = await createMatrixContext();
+  const createdAt = nowIso();
+  const firstResolvedAt = new Date(Date.now() - 60_000).toISOString();
+  const secondResolvedAt = new Date(Date.now() - 30_000).toISOString();
+  const baseDecision = {
+    requesterId: "matrix-host",
+    blockerSummary: "Need operator confirmation before proceeding.",
+    options: [
+      { id: "wait", label: "Wait", summary: "Pause until guidance arrives." },
+      { id: "skip", label: "Skip", summary: "Skip the blocked work." }
+    ],
+    recommendedOption: "wait",
+    state: "resolved" as const,
+    createdAt
+  };
+  const firstRecord: HostRunRecord = {
+    assignmentId: ctx.assignmentId,
+    state: "completed",
+    startedAt: createdAt,
+    completedAt: firstResolvedAt,
+    outcomeKind: "decision",
+    summary: baseDecision.blockerSummary,
+    adapterData: { nativeRunId: `native-${ctx.assignmentId}` },
+    terminalOutcome: {
+      kind: "decision",
+      decision: {
+        ...baseDecision,
+        resolvedAt: firstResolvedAt,
+        resolutionSummary: "Operator chose to continue after the first recovery."
+      }
+    }
+  };
+  await ctx.adapter.runStore.write(firstRecord);
+
+  const firstRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, ctx.projection);
+  const firstRecoveredDecision = [...firstRecovery.projection.decisions.values()].at(-1)!;
+  const firstRecoveredEventCount = await countRecoveredOutcomeEvents(
+    ctx.store,
+    ctx.assignmentId,
+    "decision.created"
+  );
+
+  await ctx.adapter.runStore.write({
+    ...firstRecord,
+    completedAt: secondResolvedAt,
+    terminalOutcome: {
+      kind: "decision",
+      decision: {
+        ...baseDecision,
+        resolvedAt: secondResolvedAt,
+        resolutionSummary: "Operator chose to continue after a newer recovery."
+      }
+    }
+  });
+
+  const secondRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, firstRecovery.projection);
+  const latestRecoveredDecision = [...secondRecovery.projection.decisions.values()].at(-1)!;
+  const secondRecoveredEventCount = await countRecoveredOutcomeEvents(
+    ctx.store,
+    ctx.assignmentId,
+    "decision.created"
+  );
+
+  assert.equal(firstRecovery.projection.decisions.size, 1);
+  assert.equal(firstRecoveredDecision.resolutionSummary, "Operator chose to continue after the first recovery.");
+  assert.equal(secondRecovery.projection.decisions.size, 2);
+  assert.notEqual(latestRecoveredDecision.decisionId, firstRecoveredDecision.decisionId);
+  assert.equal(latestRecoveredDecision.resolvedAt, secondResolvedAt);
+  assert.equal(
+    latestRecoveredDecision.resolutionSummary,
+    "Operator chose to continue after a newer recovery."
+  );
+  assert.ok(secondRecovery.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(secondRecoveredEventCount, firstRecoveredEventCount + 1);
 });
 
 test("host-run recovery matrix does not replay recovered results after a status-update interruption", async () => {
@@ -3036,6 +3131,14 @@ test("host-run recovery matrix releases authoritative attachment truth during co
   assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
   assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "released");
   assert.equal(recovered.projection.claims.get(claimId)?.state, "released");
+  assert.deepEqual(recovered.projection.attachments.get(attachmentId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
+  assert.deepEqual(recovered.projection.claims.get(claimId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.match(
     recovered.projection.attachments.get(attachmentId)?.releasedReason ?? "",
     /Recovered completed assignment finished/
@@ -3332,6 +3435,14 @@ test("host-run recovery matrix orphans authoritative attachment truth during sta
   assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(recovered.projection.attachments.get(attachmentId)?.state, "orphaned");
   assert.equal(recovered.projection.claims.get(claimId)?.state, "orphaned");
+  assert.deepEqual(recovered.projection.attachments.get(attachmentId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
+  assert.deepEqual(recovered.projection.claims.get(claimId)?.provenance, {
+    kind: "recovery",
+    source: "recovery.reconcile"
+  });
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "queued");
   assert.match(
     recovered.projection.attachments.get(attachmentId)?.orphanedReason ?? "",
@@ -3901,7 +4012,9 @@ class MatrixAdapter implements HostAdapter {
       options: capture.options.map((option) => ({ ...option })),
       recommendedOption: capture.recommendedOption,
       state: capture.state ?? "open",
-      createdAt: capture.createdAt ?? nowIso()
+      createdAt: capture.createdAt ?? nowIso(),
+      ...(capture.resolvedAt ? { resolvedAt: capture.resolvedAt } : {}),
+      ...(capture.resolutionSummary ? { resolutionSummary: capture.resolutionSummary } : {})
     };
   }
 
@@ -4477,7 +4590,11 @@ function completedResultRecord(
 function completedDecisionRecord(
   assignmentId: string,
   blockerSummary: string,
-  state: "open" | "resolved" = "open"
+  state: "open" | "resolved" = "open",
+  resolution?: {
+    resolvedAt: string;
+    resolutionSummary: string;
+  }
 ): HostRunRecord {
   const createdAt = nowIso();
   return {
@@ -4500,7 +4617,8 @@ function completedDecisionRecord(
         ],
         recommendedOption: "wait",
         state,
-        createdAt
+        createdAt,
+        ...(resolution ? resolution : {})
       }
     }
   };

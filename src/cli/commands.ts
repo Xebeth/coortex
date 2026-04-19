@@ -8,18 +8,9 @@ import type {
   HostSessionResumeResult,
   TaskEnvelope
 } from "../adapters/contract.js";
-import {
-  buildCompletedHostExecutionOutcomeFromDecisionCapture,
-  buildCompletedHostExecutionOutcomeFromResultCapture,
-  matchesDecisionIdentity,
-  matchesResultIdentity
-} from "../adapters/host-run-records.js";
 import { isActiveHostRunLeaseError } from "../adapters/host-run-store.js";
 import type {
-  Assignment,
   AssignmentClaim,
-  DecisionPacket,
-  ResultPacket,
   RuntimeAttachment
 } from "../core/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
@@ -30,10 +21,6 @@ import {
   selectSingleAuthoritativeAttachmentClaim,
   selectSingleResumableAttachmentClaim
 } from "../projections/attachment-claim-queries.js";
-import {
-  findLatestOpenAssignmentDecision,
-  findLatestTerminalAssignmentResult
-} from "../projections/assignment-outcome-queries.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
@@ -48,6 +35,7 @@ import {
   persistWrappedExecutionOutcome,
   projectionForRunnableAssignment,
   recoverCompletedWrappedExecution,
+  synthesizeRecoveredExecutionFromReconciliation,
 } from "./run-operations.js";
 import type { ProjectionWriteOptions } from "./projection-write.js";
 import {
@@ -981,180 +969,4 @@ export async function inspectRuntimeRunWithContext(
         }
       : {})
   };
-}
-
-function synthesizeRecoveredExecutionFromReconciliation(
-  adapter: HostAdapter,
-  projectionBeforeReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  projectionAfterReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>
-): {
-  assignment: Assignment;
-  envelope: TaskEnvelope;
-  execution: HostExecutionOutcome;
-} | undefined {
-  const recoveredDecision = findRecoveredDecisionCandidate(
-    projectionBeforeReconciliation,
-    projectionAfterReconciliation
-  );
-  if (recoveredDecision) {
-    return {
-      assignment: recoveredDecision.assignment,
-      envelope: buildRecoveredExecutionEnvelope(
-        adapter,
-        projectionAfterReconciliation,
-        recoveredDecision.assignment
-      ),
-      execution: buildCompletedHostExecutionOutcomeFromDecisionCapture(
-        recoveredDecision.decision
-      )
-    };
-  }
-
-  if (projectionAfterReconciliation.status.activeAssignmentIds.length > 0) {
-    return undefined;
-  }
-
-  const recoveredResult = findRecoveredResultCandidate(
-    projectionBeforeReconciliation,
-    projectionAfterReconciliation
-  );
-  if (!recoveredResult) {
-    return undefined;
-  }
-
-  return {
-    assignment: recoveredResult.assignment,
-    envelope: buildRecoveredExecutionEnvelope(
-      adapter,
-      projectionAfterReconciliation,
-      recoveredResult.assignment
-    ),
-    execution: buildCompletedHostExecutionOutcomeFromResultCapture(
-      recoveredResult.result
-    )
-  };
-}
-
-function findRecoveredDecisionCandidate(
-  projectionBeforeReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  projectionAfterReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>
-): {
-  assignment: Assignment;
-  decision: DecisionPacket;
-} | undefined {
-  for (const assignmentId of projectionAfterReconciliation.status.activeAssignmentIds) {
-    const assignment = projectionAfterReconciliation.assignments.get(assignmentId);
-    if (!assignment || assignment.state !== "blocked") {
-      continue;
-    }
-    const decision = findLatestOpenAssignmentDecision(
-      projectionAfterReconciliation,
-      assignment.id
-    );
-    if (!decision) {
-      continue;
-    }
-    const beforeAssignment = projectionBeforeReconciliation.assignments.get(assignment.id);
-    if (
-      beforeAssignment?.state !== assignment.state ||
-      projectionBeforeReconciliation.status.activeAssignmentIds.includes(assignment.id) !==
-        projectionAfterReconciliation.status.activeAssignmentIds.includes(assignment.id) ||
-      !hasMatchingDecision(projectionBeforeReconciliation, decision)
-    ) {
-      return { assignment, decision };
-    }
-  }
-
-  return undefined;
-}
-
-function findRecoveredResultCandidate(
-  projectionBeforeReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  projectionAfterReconciliation: Awaited<ReturnType<typeof loadOperatorProjection>>
-): {
-  assignment: Assignment;
-  result: ResultPacket;
-} | undefined {
-  let candidate:
-    | {
-        assignment: Assignment;
-        result: ResultPacket;
-      }
-    | undefined;
-
-  for (const assignment of projectionAfterReconciliation.assignments.values()) {
-    if (assignment.state !== "completed" && assignment.state !== "failed") {
-      continue;
-    }
-    const result = findLatestTerminalAssignmentResult(
-      projectionAfterReconciliation,
-      assignment.id
-    );
-    if (!result) {
-      continue;
-    }
-    const beforeAssignment = projectionBeforeReconciliation.assignments.get(assignment.id);
-    if (
-      beforeAssignment?.state === assignment.state &&
-      projectionBeforeReconciliation.status.activeAssignmentIds.includes(assignment.id) ===
-        projectionAfterReconciliation.status.activeAssignmentIds.includes(assignment.id) &&
-      hasMatchingResult(projectionBeforeReconciliation, result)
-    ) {
-      continue;
-    }
-    if (!candidate || candidate.result.createdAt < result.createdAt) {
-      candidate = { assignment, result };
-    }
-  }
-
-  return candidate;
-}
-
-function buildRecoveredExecutionEnvelope(
-  adapter: HostAdapter,
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  assignment: Assignment
-): TaskEnvelope {
-  const brief = buildRecoveryBrief(projection);
-  return {
-    host: adapter.host,
-    adapter: adapter.id,
-    objective: assignment.objective,
-    writeScope: [...assignment.writeScope],
-    requiredOutputs: [...assignment.requiredOutputs],
-    recoveryBrief: brief,
-    recentResults: brief.lastDurableResults.map((result) => ({
-      resultId: result.resultId,
-      summary: result.summary,
-      trimmed: !!result.trimmed,
-      ...(result.reference ? { reference: result.reference } : {})
-    })),
-    metadata: {
-      activeMode: projection.status.activeMode,
-      activeAssignmentId: assignment.id,
-      unresolvedDecisionCount: brief.unresolvedDecisions.length,
-      recoveredOutcome: true
-    },
-    estimatedChars: 0,
-    trimApplied: false,
-    trimmedFields: []
-  };
-}
-
-function hasMatchingDecision(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  decision: DecisionPacket
-): boolean {
-  return [...projection.decisions.values()].some((candidate) =>
-    matchesDecisionIdentity(decision, candidate)
-  );
-}
-
-function hasMatchingResult(
-  projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
-  result: ResultPacket
-): boolean {
-  return [...projection.results.values()].some((candidate) =>
-    matchesResultIdentity(result, candidate)
-  );
 }

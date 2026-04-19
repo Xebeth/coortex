@@ -463,6 +463,8 @@ test("milestone-2 integration: failed same-session reclaim orphans the attachmen
   assert.equal(resumed.mode, "prepared");
   assert.equal(attachment?.state, "orphaned");
   assert.equal(claim?.state, "orphaned");
+  assert.deepEqual(attachment?.provenance, { kind: "resume", source: "ctx.resume" });
+  assert.deepEqual(claim?.provenance, { kind: "resume", source: "ctx.resume" });
   assert.match(attachment?.orphanedReason ?? "", /did not confirm the requested session/);
   assert.match(claim?.orphanedReason ?? "", /did not confirm the requested session/);
   assert.equal(projection.assignments.get(setup.assignmentId)?.state, "queued");
@@ -1374,6 +1376,8 @@ test("milestone-2 integration: wrapped resume persists a terminal completed resu
   assert.equal(resumed.execution.run.resultStatus, "completed");
   assert.equal(attachment?.state, "released");
   assert.equal(claim?.state, "released");
+  assert.deepEqual(attachment?.provenance, { kind: "resume", source: "ctx.resume" });
+  assert.deepEqual(claim?.provenance, { kind: "resume", source: "ctx.resume" });
   assert.equal(projection.assignments.get(setup.assignmentId)?.state, "completed");
   assert.deepEqual(projection.status.activeAssignmentIds, []);
   assert.equal(projection.status.currentObjective, "Await the next assignment.");

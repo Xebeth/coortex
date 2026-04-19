@@ -364,7 +364,13 @@ function buildRecoveredOutcomeEvents(
           options: record.terminalOutcome.decision.options.map((option) => ({ ...option })),
           recommendedOption: record.terminalOutcome.decision.recommendedOption,
           state: decisionState,
-          createdAt: record.terminalOutcome.decision.createdAt
+          createdAt: record.terminalOutcome.decision.createdAt,
+          ...(record.terminalOutcome.decision.resolvedAt
+            ? { resolvedAt: record.terminalOutcome.decision.resolvedAt }
+            : {}),
+          ...(record.terminalOutcome.decision.resolutionSummary
+            ? { resolutionSummary: record.terminalOutcome.decision.resolutionSummary }
+            : {})
         }
       }
     });

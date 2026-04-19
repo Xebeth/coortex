@@ -103,6 +103,8 @@ export interface HostDecisionCapture {
   recommendedOption: string;
   state?: DecisionPacket["state"];
   createdAt?: string;
+  resolvedAt?: DecisionPacket["resolvedAt"];
+  resolutionSummary?: DecisionPacket["resolutionSummary"];
   decisionId?: string;
 }
 

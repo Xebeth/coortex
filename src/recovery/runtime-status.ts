@@ -14,6 +14,8 @@ interface ResultOutcomeShape {
 
 export type RuntimeStatusOutcome = DecisionOutcomeShape | ResultOutcomeShape;
 
+const RETRY_OBJECTIVE_PREFIX = /^Retry assignment [^:]+:\s*/;
+
 export function buildNextRuntimeStatus(
   projection: RuntimeProjection,
   assignmentId: string,
@@ -46,9 +48,13 @@ export function buildRetryRuntimeStatus(
     lastStaleRunInstanceId?: string;
   }
 ): RuntimeProjection["status"] {
+  const prioritizedAssignmentId = projection.status.activeAssignmentIds[0] ?? assignmentId;
+  const prioritizedObjective =
+    projection.assignments.get(prioritizedAssignmentId)?.objective
+    ?? (prioritizedAssignmentId === assignmentId ? objective : projection.status.currentObjective);
   return {
     ...projection.status,
-    currentObjective: buildRetryObjective(assignmentId, objective),
+    currentObjective: buildRetryObjective(prioritizedAssignmentId, prioritizedObjective),
     lastDurableOutputAt: timestamp,
     resumeReady: true,
     ...(options?.lastStaleRunInstanceId !== undefined
@@ -126,10 +132,11 @@ function buildRetryObjective(
   assignmentId: string,
   objective: string
 ): string {
-  const retryPrefix = `Retry assignment ${assignmentId}:`;
-  return objective.startsWith(retryPrefix)
-    ? objective
-    : `${retryPrefix} ${objective}`;
+  let normalizedObjective = objective.trim();
+  while (RETRY_OBJECTIVE_PREFIX.test(normalizedObjective)) {
+    normalizedObjective = normalizedObjective.replace(RETRY_OBJECTIVE_PREFIX, "").trimStart();
+  }
+  return `Retry assignment ${assignmentId}: ${normalizedObjective}`;
 }
 
 function statusObjectiveTracksAssignment(

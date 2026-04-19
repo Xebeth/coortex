@@ -107,7 +107,8 @@ function buildTerminalAttachmentClaimPatch(
     attachment: string;
     claim: string;
   },
-  timestamp: string
+  timestamp: string,
+  provenanceKind?: RuntimeAuthorityProvenance["kind"]
 ): {
   attachment: Partial<RuntimeAttachment>;
   claim: Partial<AssignmentClaim>;
@@ -119,13 +120,15 @@ function buildTerminalAttachmentClaimPatch(
           state,
           updatedAt: timestamp,
           releasedAt: timestamp,
-          releasedReason: reason.attachment
+          releasedReason: reason.attachment,
+          ...(provenanceKind ? { provenance: buildAuthorityProvenance(provenanceKind) } : {})
         },
         claim: {
           state,
           updatedAt: timestamp,
           releasedAt: timestamp,
-          releasedReason: reason.claim
+          releasedReason: reason.claim,
+          ...(provenanceKind ? { provenance: buildAuthorityProvenance(provenanceKind) } : {})
         }
       };
     case "orphaned":
@@ -134,13 +137,15 @@ function buildTerminalAttachmentClaimPatch(
           state,
           updatedAt: timestamp,
           orphanedAt: timestamp,
-          orphanedReason: reason.attachment
+          orphanedReason: reason.attachment,
+          ...(provenanceKind ? { provenance: buildAuthorityProvenance(provenanceKind) } : {})
         },
         claim: {
           state,
           updatedAt: timestamp,
           orphanedAt: timestamp,
-          orphanedReason: reason.claim
+          orphanedReason: reason.claim,
+          ...(provenanceKind ? { provenance: buildAuthorityProvenance(provenanceKind) } : {})
         }
       };
   }
@@ -202,11 +207,13 @@ function buildRecoveredAuthorityRepairEvents(
   repair:
     | {
         kind: "release";
+        provenanceKind: RuntimeAuthorityProvenance["kind"];
         attachmentReason: string;
         claimReason: string;
       }
     | {
         kind: "orphan";
+        provenanceKind: RuntimeAuthorityProvenance["kind"];
         attachmentReason: string;
         claimReason: string;
       },
@@ -223,7 +230,8 @@ function buildRecoveredAuthorityRepairEvents(
       attachment: repair.attachmentReason,
       claim: repair.claimReason
     },
-    timestamp
+    timestamp,
+    repair.provenanceKind
   );
 
   return [
@@ -452,7 +460,10 @@ export const AttachmentLifecycleService = {
       attachment: string;
       claim: string;
     },
-    options?: ProjectionWriteOptions
+    options?: ProjectionWriteOptions,
+    repair?: {
+      provenanceKind?: RuntimeAuthorityProvenance["kind"];
+    }
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     return AttachmentLifecycleService.transitionAttachmentClaim(
@@ -460,7 +471,7 @@ export const AttachmentLifecycleService = {
       projection,
       attachmentId,
       claimId,
-      buildTerminalAttachmentClaimPatch("released", reason, timestamp),
+      buildTerminalAttachmentClaimPatch("released", reason, timestamp, repair?.provenanceKind),
       options
     );
   },
@@ -474,7 +485,10 @@ export const AttachmentLifecycleService = {
       attachment: string;
       claim: string;
     },
-    options?: ProjectionWriteOptions
+    options?: ProjectionWriteOptions,
+    repair?: {
+      provenanceKind?: RuntimeAuthorityProvenance["kind"];
+    }
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     return AttachmentLifecycleService.transitionAttachmentClaim(
@@ -482,7 +496,7 @@ export const AttachmentLifecycleService = {
       projection,
       attachmentId,
       claimId,
-      buildTerminalAttachmentClaimPatch("orphaned", reason, timestamp),
+      buildTerminalAttachmentClaimPatch("orphaned", reason, timestamp, repair?.provenanceKind),
       options
     );
   },
@@ -614,7 +628,8 @@ export const AttachmentLifecycleService = {
       claim,
       reason,
       {
-        ...(assignment ? { requeueObjective: assignment.objective } : {})
+        ...(assignment ? { requeueObjective: assignment.objective } : {}),
+        provenanceKind: "resume"
       },
       options
     );
@@ -636,6 +651,7 @@ export const AttachmentLifecycleService = {
           cleanupOrder?: "before_orphan" | "after_orphan";
           inspectedRecord?: HostRunRecord;
           requeueObjective?: string;
+          provenanceKind?: RuntimeAuthorityProvenance["kind"];
         }
       | undefined,
     options?: ProjectionWriteOptions
@@ -663,7 +679,8 @@ export const AttachmentLifecycleService = {
         attachment: reason,
         claim: reason
       },
-      options
+      options,
+      cleanup?.provenanceKind ? { provenanceKind: cleanup.provenanceKind } : undefined
     );
     const cleanupAfterError = cleanupBefore
       ? undefined
@@ -704,6 +721,7 @@ export const AttachmentLifecycleService = {
     cleanup:
       | {
           inspectedRecord?: HostRunRecord;
+          provenanceKind?: RuntimeAuthorityProvenance["kind"];
         }
       | undefined,
     options?: ProjectionWriteOptions
@@ -717,7 +735,8 @@ export const AttachmentLifecycleService = {
       attachment.id,
       claim.id,
       releaseReason,
-      options
+      options,
+      cleanup?.provenanceKind ? { provenanceKind: cleanup.provenanceKind } : undefined
     );
     const cleanupWarning = await cleanupHostRunArtifactsWarning(
       store,
@@ -738,11 +757,13 @@ export const AttachmentLifecycleService = {
     repair:
       | {
           kind: "release";
+          provenanceKind: RuntimeAuthorityProvenance["kind"];
           attachmentReason: string;
           claimReason: string;
         }
       | {
           kind: "orphan";
+          provenanceKind: RuntimeAuthorityProvenance["kind"];
           attachmentReason: string;
           claimReason: string;
         }
@@ -813,6 +834,7 @@ export const AttachmentLifecycleService = {
             assignmentId,
             {
               kind: "orphan",
+              provenanceKind: "recovery",
               attachmentReason: repair.missingIdentityReason.attachment,
               claimReason: repair.missingIdentityReason.claim
             },
@@ -872,6 +894,7 @@ export const AttachmentLifecycleService = {
         "release"
         ? {
             kind: "release",
+            provenanceKind,
             attachmentReason:
               execution.outcome.kind === "result"
                 ? `Assignment finished with ${execution.outcome.capture.status}.`
@@ -921,6 +944,7 @@ export const AttachmentLifecycleService = {
       record.assignmentId,
       {
         kind: "release",
+        provenanceKind: "recovery",
         attachmentReason:
           record.terminalOutcome.kind === "result"
             ? `Recovered completed assignment finished with ${record.terminalOutcome.result.status}.`
@@ -941,6 +965,7 @@ export const AttachmentLifecycleService = {
       assignmentId,
       {
         kind: "orphan",
+        provenanceKind: "recovery",
         attachmentReason: "Stale host run was requeued for retry.",
         claimReason: "Stale host run was requeued for retry."
       },

@@ -11,16 +11,23 @@ import { nowIso } from "../utils/time.js";
 type DecisionIdentity = {
   assignmentId: DecisionPacket["assignmentId"];
   decisionId?: DecisionPacket["decisionId"];
+  requesterId: DecisionPacket["requesterId"];
   blockerSummary: DecisionPacket["blockerSummary"];
+  options: DecisionPacket["options"];
   recommendedOption: DecisionPacket["recommendedOption"];
+  state?: DecisionPacket["state"];
   createdAt?: DecisionPacket["createdAt"];
+  resolvedAt?: DecisionPacket["resolvedAt"];
+  resolutionSummary?: DecisionPacket["resolutionSummary"];
 };
 
 type ResultIdentity = {
   assignmentId: ResultPacket["assignmentId"];
   resultId?: ResultPacket["resultId"];
+  producerId: ResultPacket["producerId"];
   status: ResultPacket["status"];
   summary: ResultPacket["summary"];
+  changedFiles: ResultPacket["changedFiles"];
   createdAt?: ResultPacket["createdAt"];
 };
 
@@ -50,6 +57,12 @@ export function buildCompletedRunRecord(
           recommendedOption: outcome.outcome.capture.recommendedOption,
           state: outcome.outcome.capture.state ?? "open",
           createdAt: outcome.outcome.capture.createdAt ?? completedAt,
+          ...(outcome.outcome.capture.resolvedAt
+            ? { resolvedAt: outcome.outcome.capture.resolvedAt }
+            : {}),
+          ...(outcome.outcome.capture.resolutionSummary
+            ? { resolutionSummary: outcome.outcome.capture.resolutionSummary }
+            : {}),
           ...(outcome.outcome.capture.decisionId
             ? { decisionId: outcome.outcome.capture.decisionId }
             : {})
@@ -125,6 +138,8 @@ export function buildCompletedHostExecutionOutcomeFromDecisionCapture(
         recommendedOption: capture.recommendedOption,
         ...(capture.state ? { state: capture.state } : {}),
         ...(capture.createdAt ? { createdAt: capture.createdAt } : {}),
+        ...(capture.resolvedAt ? { resolvedAt: capture.resolvedAt } : {}),
+        ...(capture.resolutionSummary ? { resolutionSummary: capture.resolutionSummary } : {}),
         ...(capture.decisionId ? { decisionId: capture.decisionId } : {})
       }
     }
@@ -194,9 +209,14 @@ export function matchesDecisionIdentity(
   }
   return expected.decisionId
     ? candidate.decisionId === expected.decisionId
-    : candidate.blockerSummary === expected.blockerSummary &&
+    : candidate.requesterId === expected.requesterId &&
+        optionsEqual(candidate.options, expected.options) &&
+        candidate.blockerSummary === expected.blockerSummary &&
         candidate.recommendedOption === expected.recommendedOption &&
-        candidate.createdAt === expected.createdAt;
+        candidate.state === expected.state &&
+        candidate.createdAt === expected.createdAt &&
+        candidate.resolvedAt === expected.resolvedAt &&
+        candidate.resolutionSummary === expected.resolutionSummary;
 }
 
 export function matchesResultIdentity(
@@ -208,7 +228,9 @@ export function matchesResultIdentity(
   }
   return expected.resultId
     ? candidate.resultId === expected.resultId
-    : candidate.status === expected.status &&
+    : candidate.producerId === expected.producerId &&
+        changedFilesEqual(candidate.changedFiles, expected.changedFiles) &&
+        candidate.status === expected.status &&
         candidate.summary === expected.summary &&
         candidate.createdAt === expected.createdAt;
 }
@@ -253,6 +275,12 @@ function decisionCaptureFromTerminalOutcome(
     recommendedOption: decision.recommendedOption,
     state: decision.state,
     createdAt: decision.createdAt,
+    ...(decision.resolvedAt
+      ? { resolvedAt: decision.resolvedAt }
+      : {}),
+    ...(decision.resolutionSummary
+      ? { resolutionSummary: decision.resolutionSummary }
+      : {}),
     ...(decision.decisionId
       ? { decisionId: decision.decisionId }
       : {})
@@ -303,7 +331,9 @@ export function normalizeHostDecisionCapture(
     options: capture.options.map((option) => ({ ...option })),
     recommendedOption: capture.recommendedOption,
     state: capture.state ?? "open",
-    createdAt: capture.createdAt ?? fallbackCreatedAt
+    createdAt: capture.createdAt ?? fallbackCreatedAt,
+    ...(capture.resolvedAt ? { resolvedAt: capture.resolvedAt } : {}),
+    ...(capture.resolutionSummary ? { resolutionSummary: capture.resolutionSummary } : {})
   };
 }
 
@@ -329,4 +359,27 @@ export function ensureStableHostExecutionOutcomeIds(
       capture: normalizeHostResultCapture(outcome.outcome.capture, fallbackCreatedAt)
     }
   };
+}
+
+function optionsEqual(
+  left: DecisionPacket["options"],
+  right: DecisionPacket["options"]
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((option, index) => {
+      const candidate = right[index];
+      return candidate !== undefined &&
+        option.id === candidate.id &&
+        option.label === candidate.label &&
+        option.summary === candidate.summary;
+    })
+  );
+}
+
+function changedFilesEqual(
+  left: ResultPacket["changedFiles"],
+  right: ResultPacket["changedFiles"]
+): boolean {
+  return left.length === right.length && left.every((file, index) => file === right[index]);
 }

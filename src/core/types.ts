@@ -211,6 +211,8 @@ export interface HostRunRecord {
           recommendedOption: string;
           state: DecisionPacket["state"];
           createdAt: string;
+          resolvedAt?: string;
+          resolutionSummary?: string;
         };
       };
   adapterData?: Record<string, unknown>;

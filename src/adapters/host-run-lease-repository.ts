@@ -173,10 +173,13 @@ export class HostRunLeaseRepository {
   }
 
   async readRunRecord(assignmentId: string): Promise<HostRunRecord | undefined> {
-    return this.store.readJsonArtifact<HostRunRecord>(
+    const record = await this.store.readJsonArtifact<HostRunRecord>(
       this.artifacts.runRecordPath(assignmentId),
       `${this.adapterId} run record`
     );
+    return isValidHostRunRecordFact(record) && record.assignmentId === assignmentId
+      ? record
+      : undefined;
   }
 
   async writeRunRecord(record: HostRunRecord): Promise<void> {
@@ -189,28 +192,21 @@ export class HostRunLeaseRepository {
 
   async readLastRunPointer(): Promise<HostRunPointerInspection> {
     const relativePath = this.artifacts.lastRunPath();
+    const label = `${this.adapterId} run record`;
+    const content = await this.store.readTextArtifact(relativePath, label);
+    if (content === undefined) {
+      return { state: "missing" };
+    }
     try {
-      const record = await this.store.readJsonArtifact<HostRunRecord>(
-        relativePath,
-        `${this.adapterId} run record`
-      );
-      return record ? { state: "valid", record } : { state: "missing" };
+      const record = parseJson<HostRunRecord>(content, label);
+      return isValidHostRunRecordFact(record)
+        ? { state: "valid", record }
+        : { state: "malformed", raw: content };
     } catch {
-      const content = await this.store.readTextArtifact(relativePath, `${this.adapterId} run record`);
-      if (content === undefined) {
-        return { state: "missing" };
-      }
-      try {
-        return {
-          state: "valid",
-          record: parseJson<HostRunRecord>(content, `${this.adapterId} run record`)
-        };
-      } catch {
-        return {
-          state: "malformed",
-          raw: content
-        };
-      }
+      return {
+        state: "malformed",
+        raw: content
+      };
     }
   }
 
@@ -285,6 +281,20 @@ function isValidLeaseRecord(record: unknown, assignmentId: string): record is Ho
     leaseRecord.state === "running" &&
     typeof leaseRecord.startedAt === "string" &&
     leaseRecord.startedAt.length > 0
+  );
+}
+
+function isValidHostRunRecordFact(record: unknown): record is HostRunRecord {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return false;
+  }
+  const pointerRecord = record as Partial<HostRunRecord>;
+  return (
+    typeof pointerRecord.assignmentId === "string" &&
+    pointerRecord.assignmentId.length > 0 &&
+    (pointerRecord.state === "running" || pointerRecord.state === "completed") &&
+    typeof pointerRecord.startedAt === "string" &&
+    pointerRecord.startedAt.length > 0
   );
 }
 

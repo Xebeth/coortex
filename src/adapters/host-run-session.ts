@@ -103,10 +103,13 @@ function queueSessionIdentityHandling<TExecution extends { exitCode: number }>(
 ): void {
   coordinator.queueStartupTask(async () => {
     if (options?.persistNativeRunId) {
-      const persisted = await coordinator.persistNativeRunId(identity.nativeSessionId);
+      const persisted = await coordinator.ensureNativeRunId(identity.nativeSessionId);
       if (!persisted) {
         return;
       }
+    }
+    if (!coordinator.noteSessionIdentityHandled(identity.nativeSessionId)) {
+      return;
     }
     await onSessionIdentity?.(identity);
   }, "session identity handling");
@@ -257,7 +260,8 @@ export async function executeHostResumeSession<TExecution extends { exitCode: nu
         coordinator,
         nowIso(),
         execution.exitCode,
-        input.summarizeExecutionFailure(error)
+        input.summarizeExecutionFailure(error),
+        execution
       )
   });
 }
@@ -335,15 +339,22 @@ function buildFailedResumeResult<TExecution extends { exitCode: number }>(
   coordinator: HostRunSessionCoordinator<TExecution>,
   stoppedAt: string,
   exitCode: number,
-  warningDetail: string | undefined
+  warningDetail: string | undefined,
+  execution?: TExecution
 ): HostSessionResumeResult {
   const failureOptions: {
     warningDetail?: string;
   } = {};
-  if (warningDetail) {
-    failureOptions.warningDetail = warningDetail;
-  }
   const sessionProof = readResumeSessionProof(input);
+  const failedWarningDetail = buildFailedResumeWarningDetail(
+    input,
+    sessionProof,
+    warningDetail,
+    execution
+  );
+  if (failedWarningDetail) {
+    failureOptions.warningDetail = failedWarningDetail;
+  }
   return buildUnreclaimedResumeResult(
     input,
     coordinator,
@@ -383,6 +394,38 @@ function buildReclaimedResumeResult<TExecution extends { exitCode: number }>(
     outcome: outcome.outcome,
     run: runRecord
   };
+}
+
+function buildFailedResumeWarningDetail<TExecution extends { exitCode: number }>(
+  input: ExecuteHostResumeSessionInput<TExecution>,
+  sessionProof: ResumeSessionProof,
+  warningDetail: string | undefined,
+  execution: TExecution | undefined
+): string | undefined {
+  if (!execution || sessionProof.sessionVerified) {
+    return warningDetail;
+  }
+  return combineResumeWarningDetails(
+    warningDetail,
+    input.summarizeVerificationFailure(
+      input.requestedSessionId,
+      sessionProof.observedSessionId,
+      execution
+    )
+  );
+}
+
+function combineResumeWarningDetails(
+  primary: string | undefined,
+  secondary: string | undefined
+): string | undefined {
+  if (!primary) {
+    return secondary;
+  }
+  if (!secondary || secondary === primary) {
+    return primary;
+  }
+  return `${primary} ${secondary}`;
 }
 
 function readResumeSessionProof<TExecution extends { exitCode: number }>(
