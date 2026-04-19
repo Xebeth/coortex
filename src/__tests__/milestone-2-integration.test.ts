@@ -1064,6 +1064,80 @@ test("milestone-2 integration: inspect prefers the active legacy assignment over
   assert.equal(inspected.record?.run, null);
 });
 
+test("milestone-2 integration: legacy completed recovery stays snapshot-only when the event log is missing", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in legacy snapshot-fallback completed recovery smoke test");
+  });
+  await stripWorkflowStateFromRuntime(setup.store);
+  await rm(setup.store.eventsPath, { force: true });
+
+  const completedAt = "2026-04-18T08:42:00.000Z";
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    adapterData: { nativeRunId: "legacy-snapshot-completed" },
+    startedAt: "2026-04-18T08:41:00.000Z",
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered legacy snapshot-only result.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "legacy-snapshot-completed-result",
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered legacy snapshot-only result.",
+        changedFiles: ["src/cli/run-operations.ts"],
+        createdAt: completedAt
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+
+  const first = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+  const second = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+
+  assert.equal(first.projection.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(second.projection.assignments.get(setup.assignmentId)?.state, "completed");
+  assert.equal(
+    first.projection.results.get("legacy-snapshot-completed-result")?.summary,
+    "Recovered legacy snapshot-only result."
+  );
+  await assert.rejects(readFile(setup.store.eventsPath, "utf8"), /ENOENT/);
+});
+
+test("milestone-2 integration: legacy stale recovery stays snapshot-only when the event log is missing", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in legacy snapshot-fallback stale recovery smoke test");
+  });
+  await stripWorkflowStateFromRuntime(setup.store);
+  await rm(setup.store.eventsPath, { force: true });
+
+  const staleRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    adapterData: { nativeRunId: "legacy-snapshot-stale" },
+    startedAt: "2026-04-18T08:51:00.000Z",
+    heartbeatAt: "2026-04-18T08:51:30.000Z",
+    leaseExpiresAt: "2026-04-18T08:52:00.000Z"
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, staleRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", staleRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, staleRecord);
+
+  const first = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+  const second = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+
+  assert.equal(first.projection.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.ok(first.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(second.projection.assignments.get(setup.assignmentId)?.state, "queued");
+  assert.ok(!second.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  await assert.rejects(readFile(setup.store.eventsPath, "utf8"), /ENOENT/);
+});
+
 test("milestone-2 integration: run surfaces a recovered verify completion after the workflow closes", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in recovered verify completion smoke test");

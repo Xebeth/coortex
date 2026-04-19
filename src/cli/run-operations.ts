@@ -272,9 +272,15 @@ export async function reconcileActiveRuns(
         }
 
         changed = true;
-        for (const event of pendingEvents) {
-          await store.appendEvent(event);
-          applyRuntimeEvent(effectiveProjection, event);
+        if (snapshotFallback) {
+          for (const event of pendingEvents) {
+            applyRuntimeEvent(effectiveProjection, event);
+          }
+        } else {
+          for (const event of pendingEvents) {
+            await store.appendEvent(event);
+            applyRuntimeEvent(effectiveProjection, event);
+          }
         }
         if (!staleRecoveryState.queuedTransitionTimestamp) {
           queuedTransitions.set(assignmentId, [
@@ -407,9 +413,15 @@ export async function reconcileActiveRuns(
     }
 
     changed = true;
-    for (const event of pendingEvents) {
-      await store.appendEvent(event);
-      applyRuntimeEvent(effectiveProjection, event);
+    if (snapshotFallback) {
+      for (const event of pendingEvents) {
+        applyRuntimeEvent(effectiveProjection, event);
+      }
+    } else {
+      for (const event of pendingEvents) {
+        await store.appendEvent(event);
+        applyRuntimeEvent(effectiveProjection, event);
+      }
     }
     if (!staleRecoveryState.queuedTransitionTimestamp) {
       queuedTransitions.set(assignmentId, [
@@ -557,9 +569,15 @@ async function reconcileCompletedRunRecord(
 
   if (completedRecovery.events.length > 0) {
     changed = true;
-    for (const event of completedRecovery.events) {
-      await store.appendEvent(event);
-      applyRuntimeEvent(effectiveProjection, event);
+    if (options.snapshotFallback) {
+      for (const event of completedRecovery.events) {
+        applyRuntimeEvent(effectiveProjection, event);
+      }
+    } else {
+      for (const event of completedRecovery.events) {
+        await store.appendEvent(event);
+        applyRuntimeEvent(effectiveProjection, event);
+      }
     }
     const persisted = await persistReconciledProjection(
       store,
