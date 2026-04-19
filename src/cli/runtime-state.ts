@@ -112,7 +112,7 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   const recordHasLease = new Map<string, boolean>();
   await Promise.all(
     inspectedRuns.map(async (record) => {
-      recordHasLease.set(record.assignmentId, await adapter.hasRunLease(store, record.assignmentId));
+      await cacheRunLeasePresence(store, adapter, recordHasLease, record.assignmentId);
     })
   );
   const inspectedWorkflowRuns = dedupeRunRecords(
@@ -651,10 +651,25 @@ async function resolveWorkflowRunRecord(
       inspectedRunsByAssignmentId.set(assignmentId, record);
     }
   }
-  if (record && !recordHasLease.has(assignmentId)) {
-    recordHasLease.set(assignmentId, await adapter.hasRunLease(store, assignmentId));
+  if (record) {
+    await cacheRunLeasePresence(store, adapter, recordHasLease, assignmentId);
   }
   return record;
+}
+
+async function cacheRunLeasePresence(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  recordHasLease: Map<string, boolean>,
+  assignmentId: string
+): Promise<boolean> {
+  const cached = recordHasLease.get(assignmentId);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const hasLease = await adapter.hasRunLease(store, assignmentId);
+  recordHasLease.set(assignmentId, hasLease);
+  return hasLease;
 }
 
 async function convergeWorkflowProjection(
