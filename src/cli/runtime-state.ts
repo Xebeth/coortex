@@ -17,7 +17,6 @@ import {
   deriveWorkflowRunHandling,
   deriveWorkflowRunTruth
 } from "../recovery/host-runs.js";
-import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import {
   deriveWorkflowStatus,
@@ -26,6 +25,7 @@ import {
 import { RuntimeStore } from "../persistence/store.js";
 
 import type { CommandDiagnostic } from "./types.js";
+import { diagnosticsFromWarning, recordTelemetryWarningDiagnostics } from "./diagnostics.js";
 
 type WorkflowHiddenCleanup = ReturnType<typeof buildWorkflowHiddenRunCleanup>;
 type WorkflowStaleRecovery = ReturnType<typeof buildWorkflowStaleRunRecovery>;
@@ -249,13 +249,6 @@ function buildWorkflowRunReconciliationPlan(
   };
 }
 
-export function diagnosticsFromWarning(
-  warning: string | undefined,
-  code: CommandDiagnostic["code"]
-): CommandDiagnostic[] {
-  return warning ? [{ level: "warning", code, message: warning }] : [];
-}
-
 function isWorkflowStaleCleanupRecord(record: HostRunRecord): boolean {
   return (
     (record.state === "running" &&
@@ -336,16 +329,12 @@ async function emitWorkflowRunTelemetryDiagnostic(
   }
 ): Promise<CommandDiagnostic[]> {
   const diagnostics: CommandDiagnostic[] = [diagnostic];
-  const telemetry = await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry({
-      eventType,
-      taskId: sessionId,
-      assignmentId,
-      metadata
-    })
-  );
-  diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
+  diagnostics.push(...await recordTelemetryWarningDiagnostics(store, adapter, {
+    eventType,
+    taskId: sessionId,
+    assignmentId,
+    metadata
+  }));
   return diagnostics;
 }
 

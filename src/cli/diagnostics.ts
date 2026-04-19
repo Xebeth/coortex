@@ -1,0 +1,24 @@
+import type { HostAdapter, HostTelemetryCapture } from "../adapters/contract.js";
+import { RuntimeStore } from "../persistence/store.js";
+import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
+
+import type { CommandDiagnostic } from "./types.js";
+
+export function diagnosticsFromWarning(
+  warning: string | undefined,
+  code: CommandDiagnostic["code"]
+): CommandDiagnostic[] {
+  return warning ? [{ level: "warning", code, message: warning }] : [];
+}
+
+export async function recordTelemetryWarningDiagnostics(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  capture: HostTelemetryCapture
+): Promise<CommandDiagnostic[]> {
+  const telemetry = await recordNormalizedTelemetry(
+    store,
+    adapter.normalizeTelemetry(capture)
+  );
+  return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
+}

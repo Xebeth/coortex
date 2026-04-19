@@ -2,18 +2,17 @@ import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
-import type { HostAdapter, HostTelemetryCapture } from "../adapters/contract.js";
+import type { HostAdapter } from "../adapters/contract.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
-import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import {
   buildWorkflowBootstrap
 } from "../workflows/index.js";
 import type { CommandDiagnostic } from "./types.js";
+import { diagnosticsFromWarning, recordTelemetryWarningDiagnostics } from "./diagnostics.js";
 import {
-  diagnosticsFromWarning,
   loadOperatorProjection,
   loadOperatorProjectionWithDiagnostics,
   loadWorkflowAwareProjectionWithDiagnostics
@@ -117,7 +116,7 @@ export async function initRuntime(
     projection,
     buildRecoveryBrief(projection)
   );
-  diagnostics.push(...await recordCommandTelemetryWarning(
+  diagnostics.push(...await recordTelemetryWarningDiagnostics(
     store,
     adapter,
     {
@@ -161,7 +160,7 @@ export async function resumeRuntime(
   );
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(effectiveProjection));
-  diagnostics.push(...await recordCommandTelemetryWarning(
+  diagnostics.push(...await recordTelemetryWarningDiagnostics(
     store,
     adapter,
     {
@@ -244,7 +243,7 @@ export async function runRuntime(
     envelope = await buildWorkflowAwareEnvelope(store, adapter, envelopeProjection, brief);
     launchedProjection = await markAssignmentInProgress(store, projectionBefore, assignment.id);
 
-    diagnostics.push(...await recordCommandTelemetryWarning(
+    diagnostics.push(...await recordTelemetryWarningDiagnostics(
       store,
       adapter,
       {
@@ -267,7 +266,7 @@ export async function runRuntime(
     diagnostics.push(...projectionAfterResult.diagnostics);
 
     if (execution.telemetry) {
-      diagnostics.push(...await recordCommandTelemetryWarning(store, adapter, execution.telemetry));
+      diagnostics.push(...await recordTelemetryWarningDiagnostics(store, adapter, execution.telemetry));
     }
 
     return {
@@ -329,18 +328,6 @@ function assertNoActiveWorkflowLease(activeLeases: string[]): void {
   if (assignmentId) {
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
-}
-
-async function recordCommandTelemetryWarning(
-  store: RuntimeStore,
-  adapter: HostAdapter,
-  capture: HostTelemetryCapture
-): Promise<CommandDiagnostic[]> {
-  const telemetry = await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry(capture)
-  );
-  return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
 }
 
 async function buildAndPersistWorkflowEnvelope(

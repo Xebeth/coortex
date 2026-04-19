@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { HostAdapter } from "../adapters/contract.js";
+import type { HostAdapter, HostTelemetryCapture } from "../adapters/contract.js";
 import {
   buildRecoveredOutcomeEvent,
   deriveWorkflowRunAttemptIdentity
@@ -10,13 +10,13 @@ import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord } from "../core/types.js";
 import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import { buildStaleRunReconciliation, createActiveRunDiagnostic, selectRunnableProjection } from "../recovery/host-runs.js";
-import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { deriveWorkflowSummary } from "../workflows/index.js";
 
 import type { CommandDiagnostic } from "./types.js";
-import { diagnosticsFromWarning, loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
+import { diagnosticsFromWarning, recordTelemetryWarningDiagnostics } from "./diagnostics.js";
+import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 
 function hostRunPersistDiagnostics(
   assignmentId: string,
@@ -28,23 +28,17 @@ function hostRunPersistDiagnostics(
   );
 }
 
-async function recordStaleRunTelemetryWarning(
-  store: RuntimeStore,
-  adapter: HostAdapter,
+function buildStaleRunTelemetryCapture(
   sessionId: string,
   assignmentId: string,
   metadata: ReturnType<typeof buildStaleRunReconciliation>["telemetryMetadata"]
-): Promise<CommandDiagnostic[]> {
-  const telemetry = await recordNormalizedTelemetry(
-    store,
-    adapter.normalizeTelemetry({
-      eventType: "host.run.stale_reconciled",
-      taskId: sessionId,
-      assignmentId,
-      metadata
-    })
-  );
-  return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
+): HostTelemetryCapture {
+  return {
+    eventType: "host.run.stale_reconciled",
+    taskId: sessionId,
+    assignmentId,
+    metadata
+  };
 }
 
 export async function loadReconciledProjectionWithDiagnostics(
@@ -308,12 +302,14 @@ export async function reconcileActiveRuns(
         diagnostics.push(...persisted.diagnostics);
         diagnostics.push(reconciliation.diagnostic);
 
-        diagnostics.push(...await recordStaleRunTelemetryWarning(
+        diagnostics.push(...await recordTelemetryWarningDiagnostics(
           store,
           adapter,
-          projection.sessionId,
-          assignmentId,
-          reconciliation.telemetryMetadata
+          buildStaleRunTelemetryCapture(
+            projection.sessionId,
+            assignmentId,
+            reconciliation.telemetryMetadata
+          )
         ));
         await cleanupReconciledRunArtifacts(
           store,
@@ -395,12 +391,14 @@ export async function reconcileActiveRuns(
         await store.writeSnapshot(toSnapshot(effectiveProjection));
         diagnostics.push(reconciliation.diagnostic);
 
-        diagnostics.push(...await recordStaleRunTelemetryWarning(
+        diagnostics.push(...await recordTelemetryWarningDiagnostics(
           store,
           adapter,
-          projection.sessionId,
-          assignmentId,
-          reconciliation.telemetryMetadata
+          buildStaleRunTelemetryCapture(
+            projection.sessionId,
+            assignmentId,
+            reconciliation.telemetryMetadata
+          )
         ));
       }
       await cleanupReconciledRunArtifacts(
@@ -439,12 +437,14 @@ export async function reconcileActiveRuns(
     diagnostics.push(...persisted.diagnostics);
     diagnostics.push(reconciliation.diagnostic);
 
-    diagnostics.push(...await recordStaleRunTelemetryWarning(
+    diagnostics.push(...await recordTelemetryWarningDiagnostics(
       store,
       adapter,
-      projection.sessionId,
-      assignmentId,
-      reconciliation.telemetryMetadata
+      buildStaleRunTelemetryCapture(
+        projection.sessionId,
+        assignmentId,
+        reconciliation.telemetryMetadata
+      )
     ));
     await cleanupReconciledRunArtifacts(
       store,
@@ -868,12 +868,14 @@ async function reconcileOutOfProjectionStaleRun(
     message: `Cleared stale host run artifacts for assignment ${assignmentId} after snapshot fallback could not safely hydrate the assignment into runtime state.`
   });
 
-  diagnostics.push(...await recordStaleRunTelemetryWarning(
+  diagnostics.push(...await recordTelemetryWarningDiagnostics(
     store,
     adapter,
-    projection.sessionId,
-    assignmentId,
-    reconciliation.telemetryMetadata
+    buildStaleRunTelemetryCapture(
+      projection.sessionId,
+      assignmentId,
+      reconciliation.telemetryMetadata
+    )
   ));
 
   await cleanupReconciledRunArtifacts(
