@@ -240,31 +240,35 @@ export function buildCompleteWorkflowEvents(
   completedState: "completed" | "failed",
   timestamp: string
 ): RuntimeEvent[] {
-  return [
-    buildAssignmentStateUpdatedEvent(
-      projection.sessionId,
-      currentAssignment.id,
-      completedState,
-      timestamp
-    ),
-    {
-      eventId: randomUUID(),
-      sessionId: projection.sessionId,
-      timestamp,
-      type: "workflow.transition.applied",
-      payload: {
-        workflowId: progress.workflowId,
-        fromModuleId: progress.currentModuleId,
-        toModuleId: progress.currentModuleId,
-        workflowCycle: progress.workflowCycle,
-        moduleAttempt: progress.currentModuleAttempt,
-        transition: "complete",
-        previousAssignmentId: currentAssignment.id,
-        nextAssignmentId: null,
-        appliedAt: timestamp
-      }
+  const events: RuntimeEvent[] = [];
+  if (currentAssignment.state !== completedState) {
+    events.push(
+      buildAssignmentStateUpdatedEvent(
+        projection.sessionId,
+        currentAssignment.id,
+        completedState,
+        timestamp
+      )
+    );
+  }
+  events.push({
+    eventId: randomUUID(),
+    sessionId: projection.sessionId,
+    timestamp,
+    type: "workflow.transition.applied",
+    payload: {
+      workflowId: progress.workflowId,
+      fromModuleId: progress.currentModuleId,
+      toModuleId: progress.currentModuleId,
+      workflowCycle: progress.workflowCycle,
+      moduleAttempt: progress.currentModuleAttempt,
+      transition: "complete",
+      previousAssignmentId: currentAssignment.id,
+      nextAssignmentId: null,
+      appliedAt: timestamp
     }
-  ];
+  });
+  return events;
 }
 
 function buildAssignmentStateUpdatedEvent(

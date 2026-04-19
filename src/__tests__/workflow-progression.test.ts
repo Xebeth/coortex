@@ -770,6 +770,114 @@ test("workflow progression reuses a durable next assignment when rewind transiti
   );
 });
 
+test("workflow progression reuses completed assignment state when completion transition persistence is interrupted", async () => {
+  const verifyAssignment = createWorkflowAssignment(
+    "verify-assignment-complete-reuse",
+    "default",
+    "Verify the latest approved review state against current-cycle durable evidence.",
+    "in_progress",
+    "2026-04-15T12:50:00.000Z"
+  );
+  const reviewResult: ResultPacket = {
+    resultId: "review-result-complete-reuse",
+    assignmentId: "review-assignment-complete-reuse",
+    producerId: "codex",
+    status: "completed",
+    summary: "Approved review evidence.",
+    changedFiles: [],
+    createdAt: "2026-04-15T12:51:00.000Z"
+  };
+  const verifyResult: ResultPacket = {
+    resultId: "verify-result-complete-reuse",
+    assignmentId: verifyAssignment.id,
+    producerId: "codex",
+    status: "completed",
+    summary: "Verification succeeded and should complete the workflow.",
+    changedFiles: [],
+    createdAt: "2026-04-15T12:52:00.000Z"
+  };
+  const projection = createWorkflowProjection({
+    currentModuleId: "verify",
+    workflowCycle: 1,
+    currentModuleAttempt: 1,
+    currentAssignment: verifyAssignment,
+    currentResult: verifyResult,
+    extraResults: [reviewResult],
+    moduleRecords: {
+      review: {
+        moduleId: "review",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId: "review-assignment-complete-reuse",
+        moduleState: "completed",
+        gateOutcome: "approved",
+        sourceResultIds: [reviewResult.resultId],
+        sourceDecisionIds: [],
+        artifactReferences: [
+          {
+            path: workflowArtifactPath("default", 1, "review", "review-assignment-complete-reuse", 1),
+            format: "json",
+            digest: "review-digest-complete-reuse",
+            sourceResultId: reviewResult.resultId
+          }
+        ],
+        enteredAt: "2026-04-15T12:40:00.000Z",
+        evaluatedAt: "2026-04-15T12:41:00.000Z",
+        checklistStatus: "complete",
+        evidenceSummary: "Review approved."
+      },
+      verify: {
+        moduleId: "verify",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId: verifyAssignment.id,
+        moduleState: "in_progress",
+        sourceResultIds: [],
+        sourceDecisionIds: [],
+        artifactReferences: [],
+        enteredAt: "2026-04-15T12:50:00.000Z"
+      }
+    }
+  });
+  const verifyArtifactPath = workflowArtifactPath("default", 1, "verify", verifyAssignment.id, 1);
+  const store = new StaticWorkflowArtifactStore(
+    new Map([
+      [
+        verifyArtifactPath,
+        {
+          workflowId: "default",
+          workflowCycle: 1,
+          moduleId: "verify",
+          moduleAttempt: 1,
+          assignmentId: verifyAssignment.id,
+          createdAt: "2026-04-15T12:52:00.000Z",
+          payload: {
+            verdict: "verified",
+            verificationSummary: "Verification completed successfully.",
+            evidenceResultIds: [reviewResult.resultId]
+          }
+        }
+      ]
+    ])
+  );
+
+  const firstPass = await evaluateWorkflowProgression(projection, store, {
+    timestamp: "2026-04-15T12:52:01.000Z"
+  });
+  for (const event of firstPass.events.filter((event) => event.type !== "workflow.transition.applied")) {
+    applyRuntimeEvent(projection, event);
+  }
+
+  const secondPass = await evaluateWorkflowProgression(projection, store, {
+    timestamp: "2026-04-15T12:52:10.000Z"
+  });
+  const secondTransition = getTransitionEvent(secondPass.events);
+
+  assert.deepEqual(secondPass.events.map((event) => event.type), ["workflow.transition.applied"]);
+  assert.equal(secondTransition?.payload.transition, "complete");
+  assert.equal(secondTransition?.payload.nextAssignmentId, null);
+});
+
 test("workflow progression does not reuse a prior-cycle equivalent assignment during advance convergence", async () => {
   const planAssignment = createWorkflowAssignment(
     "plan-assignment-advance-cycle-2",
