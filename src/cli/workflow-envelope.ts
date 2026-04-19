@@ -24,7 +24,7 @@ export async function buildAndPersistWorkflowEnvelope(
   brief: ReturnType<typeof buildRecoveryBrief>
 ): Promise<TaskEnvelope> {
   const envelope = await buildWorkflowAwareEnvelope(store, adapter, projection, brief);
-  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
+  await persistWorkflowEnvelope(store, envelope);
   return envelope;
 }
 
@@ -53,12 +53,20 @@ export async function buildRecoveredExecutionEnvelope(
       : projectionForRunnableAssignment(projection, assignmentId);
   const brief = buildRecoveryBrief(envelopeProjection);
   const envelope = await buildWorkflowAwareEnvelope(store, adapter, envelopeProjection, brief);
-
-  return {
+  const recoveredEnvelope = {
     ...envelope,
     metadata: {
       ...envelope.metadata,
       recoveredOutcome: true
     }
   };
+  await persistWorkflowEnvelope(store, recoveredEnvelope);
+  return recoveredEnvelope;
+}
+
+async function persistWorkflowEnvelope(
+  store: RuntimeStore,
+  envelope: TaskEnvelope
+): Promise<void> {
+  await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
 }

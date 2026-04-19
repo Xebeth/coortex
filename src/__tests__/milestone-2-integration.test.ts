@@ -477,6 +477,9 @@ test("milestone-2 integration: recovered plan advancement envelope matches the c
   const reviewAssignment = reviewAssignmentId
     ? run.projectionAfter.assignments.get(reviewAssignmentId)
     : undefined;
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as typeof run.envelope;
 
   assert.equal(run.recoveredOutcome, true);
   assert.equal(run.execution.outcome.kind, "result");
@@ -487,6 +490,11 @@ test("milestone-2 integration: recovered plan advancement envelope matches the c
   assert.equal(run.envelope.metadata.activeAssignmentId, reviewAssignmentId);
   assert.equal(run.envelope.objective, reviewAssignment?.objective);
   assert.deepEqual(run.envelope.requiredOutputs, reviewAssignment?.requiredOutputs);
+  assert.equal(persistedEnvelope.metadata.recoveredOutcome, true);
+  assert.equal(persistedEnvelope.workflow?.currentModuleId, "review");
+  assert.equal(persistedEnvelope.workflow?.currentAssignmentId, reviewAssignmentId);
+  assert.equal(persistedEnvelope.metadata.activeAssignmentId, reviewAssignmentId);
+  assert.equal(persistedEnvelope.objective, reviewAssignment?.objective);
 });
 
 test("milestone-2 integration: inspect converges onto a pre-created review assignment when advance transition persistence is interrupted", async () => {
