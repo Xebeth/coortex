@@ -2,7 +2,7 @@ import { basename, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import type { RuntimeConfig } from "../config/types.js";
-import type { HostAdapter } from "../adapters/contract.js";
+import type { HostAdapter, HostTelemetryCapture } from "../adapters/contract.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { toSnapshot } from "../projections/runtime-projection.js";
@@ -119,9 +119,10 @@ export async function initRuntime(
     bootstrapBrief
   );
   await store.writeJsonArtifact("runtime/last-resume-envelope.json", bootstrapEnvelope);
-  const telemetry = await recordNormalizedTelemetry(
+  diagnostics.push(...await recordCommandTelemetryWarning(
     store,
-    adapter.normalizeTelemetry({
+    adapter,
+    {
       eventType: "runtime.initialized",
       taskId: sessionId,
       assignmentId: bootstrap.initialAssignmentId,
@@ -129,9 +130,8 @@ export async function initRuntime(
         projectRoot,
         repoName: basename(projectRoot)
       }
-    })
-  );
-  diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
+    }
+  ));
 
   return {
     sessionId,
@@ -159,9 +159,10 @@ export async function resumeRuntime(
   const envelopePath = join(store.runtimeDir, "last-resume-envelope.json");
   await store.writeSnapshot(toSnapshot(effectiveProjection));
   await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
-  const telemetry = await recordNormalizedTelemetry(
+  diagnostics.push(...await recordCommandTelemetryWarning(
     store,
-    adapter.normalizeTelemetry({
+    adapter,
+    {
       eventType: "resume.requested",
       taskId: effectiveProjection.sessionId,
       metadata: {
@@ -169,9 +170,8 @@ export async function resumeRuntime(
         trimApplied: envelope.trimApplied,
         trimmedFields: envelope.trimmedFields.length
       }
-    })
-  );
-  diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
+    }
+  ));
 
   return {
     projection: effectiveProjection,
@@ -250,9 +250,10 @@ export async function runRuntime(
     envelope = await buildWorkflowAwareEnvelope(store, adapter, envelopeProjection, brief);
     launchedProjection = await markAssignmentInProgress(store, projectionBefore, assignment.id);
 
-    const startedTelemetry = await recordNormalizedTelemetry(
+    diagnostics.push(...await recordCommandTelemetryWarning(
       store,
-      adapter.normalizeTelemetry({
+      adapter,
+      {
         eventType: "host.run.started",
         taskId: launchedProjection.sessionId,
         assignmentId: assignment.id,
@@ -261,9 +262,8 @@ export async function runRuntime(
           trimApplied: envelope.trimApplied,
           trimmedFields: envelope.trimmedFields.length
         }
-      })
-    );
-    diagnostics.push(...diagnosticsFromWarning(startedTelemetry.warning, "telemetry-write-failed"));
+      }
+    ));
 
     executionStarted = true;
     execution = await adapter.executeAssignment(store, launchedProjection, envelope, claimedRun);
@@ -277,13 +277,7 @@ export async function runRuntime(
     diagnostics.push(...projectionAfterResult.diagnostics);
 
     if (execution.telemetry) {
-      const completedTelemetry = await recordNormalizedTelemetry(
-        store,
-        adapter.normalizeTelemetry(execution.telemetry)
-      );
-      diagnostics.push(
-        ...diagnosticsFromWarning(completedTelemetry.warning, "telemetry-write-failed")
-      );
+      diagnostics.push(...await recordCommandTelemetryWarning(store, adapter, execution.telemetry));
     }
 
     return {
@@ -351,4 +345,16 @@ function assertNoActiveWorkflowLease(activeLeases: string[]): void {
   if (assignmentId) {
     throw new Error(`Assignment ${assignmentId} already has an active host run lease.`);
   }
+}
+
+async function recordCommandTelemetryWarning(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  capture: HostTelemetryCapture
+): Promise<CommandDiagnostic[]> {
+  const telemetry = await recordNormalizedTelemetry(
+    store,
+    adapter.normalizeTelemetry(capture)
+  );
+  return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
 }
