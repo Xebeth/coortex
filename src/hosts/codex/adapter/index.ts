@@ -16,7 +16,9 @@ import type {
 import {
   buildCompletedRunRecord,
   createRunningRunRecord,
-  deriveWorkflowRunAttemptIdentity
+  deriveWorkflowRunAttemptIdentity,
+  normalizeHostDecisionCapture,
+  normalizeHostResultCapture
 } from "../../../adapters/host-run-records.js";
 import { HostRunStore, type HostRunArtifactPaths } from "../../../adapters/host-run-store.js";
 import { executeHostRunSession } from "../../../adapters/host-run-session.js";
@@ -317,28 +319,11 @@ export class CodexAdapter implements HostAdapter {
   }
 
   normalizeResult(capture: HostResultCapture): ResultPacket {
-    return {
-      resultId: capture.resultId ?? randomUUID(),
-      assignmentId: capture.assignmentId,
-      producerId: capture.producerId,
-      status: capture.status,
-      summary: capture.summary,
-      changedFiles: [...capture.changedFiles],
-      createdAt: capture.createdAt ?? nowIso()
-    };
+    return normalizeHostResultCapture(capture);
   }
 
   normalizeDecision(capture: HostDecisionCapture): DecisionPacket {
-    return {
-      decisionId: capture.decisionId ?? randomUUID(),
-      assignmentId: capture.assignmentId,
-      requesterId: capture.requesterId,
-      blockerSummary: capture.blockerSummary,
-      options: capture.options.map((option) => ({ ...option })),
-      recommendedOption: capture.recommendedOption,
-      state: capture.state ?? "open",
-      createdAt: capture.createdAt ?? nowIso()
-    };
+    return normalizeHostDecisionCapture(capture);
   }
 
   normalizeTelemetry(capture: HostTelemetryCapture): Omit<

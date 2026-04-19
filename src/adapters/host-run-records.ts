@@ -1,13 +1,47 @@
-import type { HostExecutionOutcome } from "./contract.js";
 import type {
+  HostDecisionCapture,
+  HostExecutionOutcome,
+  HostResultCapture
+} from "./contract.js";
+import type {
+  DecisionPacket,
   HostRunRecord,
+  ResultPacket,
   RuntimeProjection,
   WorkflowRunAttemptIdentity
 } from "../core/types.js";
+import { nowIso } from "../utils/time.js";
+import { randomUUID } from "node:crypto";
 
 interface HostRunRecordStampOptions {
   nativeRunId?: string | undefined;
   workflowAttempt?: WorkflowRunAttemptIdentity | undefined;
+}
+
+
+export function normalizeHostResultCapture(capture: HostResultCapture): ResultPacket {
+  return {
+    resultId: capture.resultId ?? randomUUID(),
+    assignmentId: capture.assignmentId,
+    producerId: capture.producerId,
+    status: capture.status,
+    summary: capture.summary,
+    changedFiles: [...capture.changedFiles],
+    createdAt: capture.createdAt ?? nowIso()
+  };
+}
+
+export function normalizeHostDecisionCapture(capture: HostDecisionCapture): DecisionPacket {
+  return {
+    decisionId: capture.decisionId ?? randomUUID(),
+    assignmentId: capture.assignmentId,
+    requesterId: capture.requesterId,
+    blockerSummary: capture.blockerSummary,
+    options: capture.options.map((option) => ({ ...option })),
+    recommendedOption: capture.recommendedOption,
+    state: capture.state ?? "open",
+    createdAt: capture.createdAt ?? nowIso()
+  };
 }
 
 export function deriveWorkflowRunAttemptIdentity(

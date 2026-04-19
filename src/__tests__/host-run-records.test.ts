@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   buildCompletedRunRecord,
-  createRunningRunRecord
+  createRunningRunRecord,
+  normalizeHostDecisionCapture,
+  normalizeHostResultCapture
 } from "../adapters/host-run-records.js";
 
 test("host run record builders stamp workflow attempt and native run identity", () => {
@@ -67,4 +69,32 @@ test("host run record builders stamp workflow attempt and native run identity", 
   );
   assert.deepEqual(completedDecision.workflowAttempt, workflowAttempt);
   assert.deepEqual(completedDecision.adapterData, { nativeRunId: "native-host-run" });
+});
+
+
+test("host run record normalization mints ids and timestamps for host captures", () => {
+  const normalizedResult = normalizeHostResultCapture({
+    assignmentId: "assignment-result",
+    producerId: "codex",
+    status: "completed",
+    summary: "done",
+    changedFiles: []
+  });
+  assert.equal(normalizedResult.assignmentId, "assignment-result");
+  assert.equal(typeof normalizedResult.resultId, "string");
+  assert.equal(normalizedResult.resultId.length > 0, true);
+  assert.equal(typeof normalizedResult.createdAt, "string");
+
+  const normalizedDecision = normalizeHostDecisionCapture({
+    assignmentId: "assignment-decision",
+    requesterId: "codex",
+    blockerSummary: "Need approval",
+    options: [{ id: "yes", label: "Yes", summary: "approve" }],
+    recommendedOption: "yes"
+  });
+  assert.equal(normalizedDecision.assignmentId, "assignment-decision");
+  assert.equal(typeof normalizedDecision.decisionId, "string");
+  assert.equal(normalizedDecision.decisionId.length > 0, true);
+  assert.equal(normalizedDecision.state, "open");
+  assert.equal(typeof normalizedDecision.createdAt, "string");
 });
