@@ -272,7 +272,10 @@ operator-facing status from workflow truth when those views diverge.
 
 - `ctx inspect`
   Must read through the same workflow-aware load path and may return
-  workflow context even when no current host run is available.
+  workflow context even when no current host run is available. In
+  workflow mode, it must prefer the workflow-owned inspect target,
+  including a completed terminal assignment, over the convenience
+  last-run pointer.
 
 - `ctx resume`
   Must build its brief from reconciled runtime state.
