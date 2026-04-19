@@ -23,14 +23,13 @@ export async function loadInspectRuntimeContext(
   record: InspectRuntimeContextRecord | undefined;
 }> {
   const loaded = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  const inspectVisibleRun = (assignmentId?: string) =>
+    loadVisibleInspectRun(store, adapter, loaded.projection, assignmentId);
   const workflow = deriveWorkflowSummary(loaded.projection);
 
   if (assignmentId) {
     const explicitAssignment = loaded.projection.assignments.get(assignmentId);
-    const explicitRun = selectWorkflowVisibleRunRecord(
-      loaded.projection,
-      await adapter.inspectRun(store, assignmentId)
-    );
+    const explicitRun = (await inspectVisibleRun(assignmentId)).visibleRun;
     if (!explicitAssignment && !explicitRun) {
       return {
         diagnostics: loaded.diagnostics,
@@ -45,24 +44,17 @@ export async function loadInspectRuntimeContext(
   }
 
   const workflowAssignmentId = loaded.projection.workflowProgress?.currentAssignmentId;
-  const inspectedLastRun = await adapter.inspectRun(store);
-  const lastRun = selectWorkflowVisibleRunRecord(
-    loaded.projection,
-    inspectedLastRun
-  );
+  const inspectedLastRun = await inspectVisibleRun();
+  const lastRun = inspectedLastRun.visibleRun;
   const targetAssignmentId = workflowAssignmentId ?? lastRun?.assignmentId;
   const assignment = targetAssignmentId
     ? loaded.projection.assignments.get(targetAssignmentId)
     : undefined;
-  const inspectedTargetRun = targetAssignmentId && inspectedLastRun?.assignmentId === targetAssignmentId
-    ? inspectedLastRun
+  const run = targetAssignmentId && inspectedLastRun.inspectedRun?.assignmentId === targetAssignmentId
+    ? inspectedLastRun.visibleRun
     : targetAssignmentId
-      ? await adapter.inspectRun(store, targetAssignmentId)
+      ? (await inspectVisibleRun(targetAssignmentId)).visibleRun
       : lastRun;
-  const run = selectWorkflowVisibleRunRecord(
-    loaded.projection,
-    inspectedTargetRun
-  );
 
   if (!workflow && !assignment && !run) {
     return {
@@ -74,6 +66,22 @@ export async function loadInspectRuntimeContext(
   return {
     diagnostics: loaded.diagnostics,
     record: buildInspectRecord(workflow, assignment, run)
+  };
+}
+
+async function loadVisibleInspectRun(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: Parameters<typeof selectWorkflowVisibleRunRecord>[0],
+  assignmentId?: string
+): Promise<{
+  inspectedRun: HostRunRecord | undefined;
+  visibleRun: HostRunRecord | undefined;
+}> {
+  const inspectedRun = await adapter.inspectRun(store, assignmentId);
+  return {
+    inspectedRun,
+    visibleRun: selectWorkflowVisibleRunRecord(projection, inspectedRun)
   };
 }
 
