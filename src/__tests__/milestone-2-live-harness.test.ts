@@ -67,7 +67,8 @@ liveHarness(
         "coortex-review-lane",
         "review-baseline",
         "review-fixer",
-        "review-orchestrator"
+        "review-orchestrator",
+        "seam-walkback-review"
       ]);
       for (const skillName of skillPackManifest.managedSkills) {
         await assertPathExists(join(projectRoot, ".codex", "skills", skillName, "SKILL.md"));

@@ -15,6 +15,10 @@ const fixResultStateScript = resolve(
   process.cwd(),
   "src/hosts/codex/profile/skill-pack/review-fixer/scripts/fix_result_state.py"
 );
+const seamWalkbackStateScript = resolve(
+  process.cwd(),
+  "src/hosts/codex/profile/skill-pack/seam-walkback-review/scripts/walkback_state.py"
+);
 
 async function runPythonJson(
   scriptPath: string,
@@ -42,6 +46,135 @@ async function runPythonJson(
     };
   }
 }
+
+
+async function runGit(cwd: string, args: string[]): Promise<void> {
+  await execFileAsync("git", args, { cwd });
+}
+
+test("seam walkback helper inventories branch state and classifies pivots selectively", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walkback-"));
+
+  await runGit(tempDir, ["init", "-b", "main"]);
+  await runGit(tempDir, ["config", "user.name", "Coortex Tests"]);
+  await runGit(tempDir, ["config", "user.email", "coortex-tests@example.com"]);
+  await writeFile(join(tempDir, "base.txt"), "base\n", "utf8");
+  await runGit(tempDir, ["add", "base.txt"]);
+  await runGit(tempDir, ["commit", "-m", "feat: seed repo"]);
+  await runGit(tempDir, ["checkout", "-b", "feature/seams"]);
+  await writeFile(join(tempDir, "pivot.txt"), "pivot\n", "utf8");
+  await runGit(tempDir, ["add", "pivot.txt"]);
+  await runGit(tempDir, ["commit", "-m", "refactor: extract seam"]);
+  await writeFile(join(tempDir, "fix.txt"), "fix\n", "utf8");
+  await runGit(tempDir, ["add", "fix.txt"]);
+  await runGit(tempDir, ["commit", "-m", "fix: local patch"]);
+  await writeFile(join(tempDir, "dirty.txt"), "dirty\n", "utf8");
+
+  const inventory = await runPythonJson(seamWalkbackStateScript, [
+    "inventory",
+    "--project-root",
+    tempDir,
+    "--base-ref",
+    "main",
+    "--max-commits",
+    "5",
+    "--include-files"
+  ]);
+
+  assert.equal(inventory.exitCode, 0);
+  const json = inventory.json as {
+    branch: string;
+    merge_base: string;
+    dirty_files: string[];
+    commit_count: number;
+    ahead_behind: { base_only_count: number; head_only_count: number };
+    commits: Array<{ subject: string; likely_pivot: boolean; files: string[] }>;
+  };
+  assert.equal(json.branch, "feature/seams");
+  assert.equal(json.commit_count, 2);
+  assert.equal(json.ahead_behind.base_only_count, 0);
+  assert.equal(json.ahead_behind.head_only_count, 2);
+  assert.match(json.merge_base, /^[0-9a-f]{40}$/);
+  assert.deepEqual(json.dirty_files, ["?? dirty.txt"]);
+  assert.equal(json.commits[0]?.subject, "fix: local patch");
+  assert.equal(json.commits[0]?.likely_pivot, false);
+  assert.equal(json.commits[1]?.subject, "refactor: extract seam");
+  assert.equal(json.commits[1]?.likely_pivot, true);
+  assert.deepEqual(json.commits[1]?.files, ["pivot.txt"]);
+});
+
+test("seam walkback helper reports the changed files for one commit", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walkback-"));
+
+  await runGit(tempDir, ["init", "-b", "main"]);
+  await runGit(tempDir, ["config", "user.name", "Coortex Tests"]);
+  await runGit(tempDir, ["config", "user.email", "coortex-tests@example.com"]);
+  await writeFile(join(tempDir, "base.txt"), "base\n", "utf8");
+  await runGit(tempDir, ["add", "base.txt"]);
+  await runGit(tempDir, ["commit", "-m", "feat: seed repo"]);
+  await writeFile(join(tempDir, "one.txt"), "one\n", "utf8");
+  await writeFile(join(tempDir, "two.txt"), "two\n", "utf8");
+  await runGit(tempDir, ["add", "one.txt", "two.txt"]);
+  await runGit(tempDir, ["commit", "-m", "refactor: move pieces"]);
+  const commit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: tempDir })).stdout.trim();
+
+  const result = await runPythonJson(seamWalkbackStateScript, [
+    "commit-files",
+    commit,
+    "--project-root",
+    tempDir
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  const json = result.json as { commit: string; files: string[]; file_count: number };
+  assert.equal(json.commit, commit);
+  assert.equal(json.file_count, 2);
+  assert.deepEqual(json.files, ["one.txt", "two.txt"]);
+});
+
+
+test("seam walkback helper still classifies fix-shaped pivots without inline file lists", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walkback-"));
+
+  await runGit(tempDir, ["init", "-b", "main"]);
+  await runGit(tempDir, ["config", "user.name", "Coortex Tests"]);
+  await runGit(tempDir, ["config", "user.email", "coortex-tests@example.com"]);
+  await writeFile(join(tempDir, "base.txt"), "base\n", "utf8");
+  await runGit(tempDir, ["add", "base.txt"]);
+  await runGit(tempDir, ["commit", "-m", "feat: seed repo"]);
+  await runGit(tempDir, ["checkout", "-b", "feature/seams"]);
+  for (const name of ["a.txt", "b.txt", "c.txt", "d.txt"]) {
+    await writeFile(join(tempDir, name), `${name}\n`, "utf8");
+  }
+  await runGit(tempDir, ["add", "a.txt", "b.txt", "c.txt", "d.txt"]);
+  await runGit(tempDir, ["commit", "-m", "fix: align seam ownership"]);
+
+  const inventory = await runPythonJson(seamWalkbackStateScript, [
+    "inventory",
+    "--project-root",
+    tempDir,
+    "--base-ref",
+    "main",
+    "--max-commits",
+    "5"
+  ]);
+
+  assert.equal(inventory.exitCode, 0);
+  const json = inventory.json as {
+    commits: Array<{
+      subject: string;
+      likely_pivot: boolean;
+      file_count: number;
+      files: string[];
+      pivot_reasons: string[];
+    }>;
+  };
+  assert.equal(json.commits[0]?.subject, "fix: align seam ownership");
+  assert.equal(json.commits[0]?.file_count, 4);
+  assert.deepEqual(json.commits[0]?.files, []);
+  assert.equal(json.commits[0]?.likely_pivot, true);
+  assert.deepEqual(json.commits[0]?.pivot_reasons, ["keyword:align", "type:fix-with-move"]);
+});
 
 test("return review helper marks scope-excluded non-started families as dormant and excludes them from the refreshed handoff by default", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-workflow-state-"));

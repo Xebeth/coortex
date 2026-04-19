@@ -1404,7 +1404,8 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     "coortex-review-lane",
     "review-baseline",
     "review-fixer",
-    "review-orchestrator"
+    "review-orchestrator",
+    "seam-walkback-review"
   ]);
   for (const skillName of skillPackManifest.managedSkills) {
     await readFile(join(projectRoot, ".codex", "skills", skillName, "SKILL.md"), "utf8");

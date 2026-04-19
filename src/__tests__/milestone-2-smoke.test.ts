@@ -136,7 +136,8 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
     "coortex-review-lane",
     "review-baseline",
     "review-fixer",
-    "review-orchestrator"
+    "review-orchestrator",
+    "seam-walkback-review"
   ]);
   for (const skillName of skillPackManifest.managedSkills) {
     await readFile(join(setup.projectRoot, ".codex", "skills", skillName, "SKILL.md"), "utf8");

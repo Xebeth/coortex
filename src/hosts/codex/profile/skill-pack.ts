@@ -11,7 +11,8 @@ const MANAGED_SKILLS = [
   "coortex-review-lane",
   "review-baseline",
   "review-fixer",
-  "review-orchestrator"
+  "review-orchestrator",
+  "seam-walkback-review"
 ] as const;
 
 export class CodexSkillPackManager {

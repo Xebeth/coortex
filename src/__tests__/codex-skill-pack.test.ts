@@ -22,7 +22,8 @@ test("codex managed skill pack is self-contained", async () => {
     "coortex-review-lane",
     "review-baseline",
     "review-fixer",
-    "review-orchestrator"
+    "review-orchestrator",
+    "seam-walkback-review"
   ]);
 
   const externalRefs = new Map<string, string[]>();

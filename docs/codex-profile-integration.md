@@ -56,7 +56,7 @@ The Coortex-specific Codex profile may manage:
   settings and the inherited global top-level Codex config does not
   already provide at least that many worker threads for bounded
   multi-lane review
-- the Coortex-managed review skill pack installed into project-local `.codex/skills`, including the user-facing bounded reviewer and the lane-review dependency skill used by the review workflow
+- the Coortex-managed review skill pack installed into project-local `.codex/skills`, including the user-facing bounded reviewer, the lane-review dependency skill used by the review workflow, and the archaeology-driven seam walkback workflow skill for maintainability cleanup
 - Coortex-specific developer instructions if needed
 - Coortex-specific environment/config placeholders
 - later host-specific hooks or MCP registration if required
