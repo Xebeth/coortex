@@ -148,15 +148,13 @@ function findLatestTerminalResult(
   assignmentId: string,
   attemptLowerBound: string
 ): ResultPacket | undefined {
-  return [...projection.results.values()]
-    .filter(
-      (result) =>
-        result.assignmentId === assignmentId &&
-        result.createdAt >= attemptLowerBound &&
-        (result.status === "completed" || result.status === "failed")
-    )
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-    .at(-1);
+  return findLatestAssignmentRecord(
+    projection.results.values(),
+    assignmentId,
+    attemptLowerBound,
+    (result) => result.createdAt,
+    (result) => result.status === "completed" || result.status === "failed"
+  );
 }
 
 function findLatestDecision(
@@ -165,17 +163,29 @@ function findLatestDecision(
   attemptLowerBound: string,
   state: DecisionPacket["state"]
 ): DecisionPacket | undefined {
-  return [...projection.decisions.values()]
+  return findLatestAssignmentRecord(
+    projection.decisions.values(),
+    assignmentId,
+    attemptLowerBound,
+    (decision) => state === "resolved" ? decision.resolvedAt ?? decision.createdAt : decision.createdAt,
+    (decision) => decision.state === state
+  );
+}
+
+function findLatestAssignmentRecord<T extends { assignmentId: string }>(
+  records: Iterable<T>,
+  assignmentId: string,
+  attemptLowerBound: string,
+  timestampOf: (record: T) => string,
+  predicate: (record: T) => boolean
+): T | undefined {
+  return [...records]
     .filter(
-      (decision) =>
-        decision.assignmentId === assignmentId &&
-        decision.createdAt >= attemptLowerBound &&
-        decision.state === state
+      (record) =>
+        record.assignmentId === assignmentId &&
+        timestampOf(record) >= attemptLowerBound &&
+        predicate(record)
     )
-    .sort((left, right) => {
-      const leftTime = state === "resolved" ? left.resolvedAt ?? left.createdAt : left.createdAt;
-      const rightTime = state === "resolved" ? right.resolvedAt ?? right.createdAt : right.createdAt;
-      return leftTime.localeCompare(rightTime);
-    })
+    .sort((left, right) => timestampOf(left).localeCompare(timestampOf(right)))
     .at(-1);
 }
