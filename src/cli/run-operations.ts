@@ -28,6 +28,25 @@ function hostRunPersistDiagnostics(
   );
 }
 
+async function recordStaleRunTelemetryWarning(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  sessionId: string,
+  assignmentId: string,
+  metadata: ReturnType<typeof buildStaleRunReconciliation>["telemetryMetadata"]
+): Promise<CommandDiagnostic[]> {
+  const telemetry = await recordNormalizedTelemetry(
+    store,
+    adapter.normalizeTelemetry({
+      eventType: "host.run.stale_reconciled",
+      taskId: sessionId,
+      assignmentId,
+      metadata
+    })
+  );
+  return diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed");
+}
+
 export async function loadReconciledProjectionWithDiagnostics(
   store: RuntimeStore,
   adapter: HostAdapter
@@ -293,16 +312,13 @@ export async function reconcileActiveRuns(
         }
         diagnostics.push(reconciliation.diagnostic);
 
-        const telemetry = await recordNormalizedTelemetry(
+        diagnostics.push(...await recordStaleRunTelemetryWarning(
           store,
-          adapter.normalizeTelemetry({
-            eventType: "host.run.stale_reconciled",
-            taskId: projection.sessionId,
-            assignmentId,
-            metadata: reconciliation.telemetryMetadata
-          })
-        );
-        diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
+          adapter,
+          projection.sessionId,
+          assignmentId,
+          reconciliation.telemetryMetadata
+        ));
         const cleanupError = await reconcileStaleRunWithLeaseVerification(
           store,
           adapter,
@@ -385,16 +401,13 @@ export async function reconcileActiveRuns(
         await store.writeSnapshot(toSnapshot(effectiveProjection));
         diagnostics.push(reconciliation.diagnostic);
 
-        const telemetry = await recordNormalizedTelemetry(
+        diagnostics.push(...await recordStaleRunTelemetryWarning(
           store,
-          adapter.normalizeTelemetry({
-            eventType: "host.run.stale_reconciled",
-            taskId: projection.sessionId,
-            assignmentId,
-            metadata: reconciliation.telemetryMetadata
-          })
-        );
-        diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
+          adapter,
+          projection.sessionId,
+          assignmentId,
+          reconciliation.telemetryMetadata
+        ));
       }
       const cleanupError = await reconcileStaleRunWithLeaseVerification(
         store,
@@ -402,12 +415,7 @@ export async function reconcileActiveRuns(
         reconciliation.staleRecord
       );
       if (cleanupError) {
-        diagnostics.push(
-          ...diagnosticsFromWarning(
-            `Host run reconciliation artifacts could not be updated for assignment ${assignmentId}. ${cleanupError.message}`,
-            "host-run-persist-failed"
-          )
-        );
+        diagnostics.push(...hostRunPersistDiagnostics(assignmentId, cleanupError));
       }
       continue;
     }
@@ -438,16 +446,13 @@ export async function reconcileActiveRuns(
     }
     diagnostics.push(reconciliation.diagnostic);
 
-    const telemetry = await recordNormalizedTelemetry(
+    diagnostics.push(...await recordStaleRunTelemetryWarning(
       store,
-      adapter.normalizeTelemetry({
-        eventType: "host.run.stale_reconciled",
-        taskId: projection.sessionId,
-        assignmentId,
-        metadata: reconciliation.telemetryMetadata
-      })
-    );
-    diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
+      adapter,
+      projection.sessionId,
+      assignmentId,
+      reconciliation.telemetryMetadata
+    ));
     const cleanupError = await reconcileStaleRunWithLeaseVerification(
       store,
       adapter,
@@ -839,16 +844,13 @@ async function reconcileOutOfProjectionStaleRun(
     message: `Cleared stale host run artifacts for assignment ${assignmentId} after snapshot fallback could not safely hydrate the assignment into runtime state.`
   });
 
-  const telemetry = await recordNormalizedTelemetry(
+  diagnostics.push(...await recordStaleRunTelemetryWarning(
     store,
-    adapter.normalizeTelemetry({
-      eventType: "host.run.stale_reconciled",
-      taskId: projection.sessionId,
-      assignmentId,
-      metadata: reconciliation.telemetryMetadata
-    })
-  );
-  diagnostics.push(...diagnosticsFromWarning(telemetry.warning, "telemetry-write-failed"));
+    adapter,
+    projection.sessionId,
+    assignmentId,
+    reconciliation.telemetryMetadata
+  ));
 
   const cleanupError = await reconcileStaleRunWithLeaseVerification(
     store,
