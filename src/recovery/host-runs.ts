@@ -295,16 +295,7 @@ export function buildStaleRunReconciliation(
   record: HostRunRecord,
   timestamp = nowIso()
 ): StaleRunReconciliation {
-  const staleReasonCode = record.staleReasonCode ?? describeStaleRunReasonCode(record);
-  const staleReason = record.staleReason ?? describeStaleRunReason(record);
-  const staleRecord: HostRunRecord = {
-    ...record,
-    state: "completed",
-    staleAt: timestamp,
-    staleReasonCode,
-    staleReason
-  };
-  const nativeRunId = getNativeRunId(record);
+  const stale = buildWorkflowStaleRecord(record, timestamp);
   const assignment = projection.assignments.get(assignmentId);
   const objective = assignment?.objective ?? projection.status.currentObjective;
   const events: RuntimeEvent[] = [
@@ -338,21 +329,16 @@ export function buildStaleRunReconciliation(
   ];
 
   return {
-    staleRecord,
+    staleRecord: stale.staleRecord,
     events,
     diagnostic: {
       level: "warning",
       code: "stale-run-reconciled",
       message: `Requeued stale host run for assignment ${assignmentId}${
-        nativeRunId ? ` (${nativeRunId})` : ""
+        stale.nativeRunId ? ` (${stale.nativeRunId})` : ""
       }.`
     },
-    telemetryMetadata: {
-      nativeRunId: nativeRunId ?? "",
-      leaseExpiresAt: record.leaseExpiresAt ?? "",
-      heartbeatAt: record.heartbeatAt ?? "",
-      staleAt: timestamp
-    }
+    telemetryMetadata: stale.telemetryMetadata
   };
 }
 
