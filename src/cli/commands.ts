@@ -38,6 +38,14 @@ export type { CommandDiagnostic } from "./types.js";
 export { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 export { loadReconciledProjectionWithDiagnostics } from "./run-operations.js";
 
+const RUNTIME_NOT_INITIALIZED_MESSAGE = "Coortex is not initialized. Run `ctx init` first.";
+
+async function ensureRuntimeInitialized(store: RuntimeStore): Promise<void> {
+  if (!await store.loadConfig()) {
+    throw new Error(RUNTIME_NOT_INITIALIZED_MESSAGE);
+  }
+}
+
 export interface InitRuntimeResult {
   sessionId: string;
   adapterId: string;
@@ -137,10 +145,7 @@ export async function resumeRuntime(
   store: RuntimeStore,
   adapter: HostAdapter
 ): Promise<ResumeRuntimeResult> {
-  const config = await store.loadConfig();
-  if (!config) {
-    throw new Error("Coortex is not initialized. Run `ctx init` first.");
-  }
+  await ensureRuntimeInitialized(store);
 
   const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
   const authoritativeLeaseAssignmentId = workflowAware.activeLeases[0];
@@ -186,10 +191,7 @@ export async function runRuntime(
   store: RuntimeStore,
   adapter: HostAdapter
 ): Promise<RunRuntimeResult> {
-  const config = await store.loadConfig();
-  if (!config) {
-    throw new Error("Coortex is not initialized. Run `ctx init` first.");
-  }
+  await ensureRuntimeInitialized(store);
 
   const projectionBeforeResult = await loadOperatorProjectionWithDiagnostics(store);
   const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
@@ -339,10 +341,7 @@ export async function inspectRuntimeRun(
   adapter: HostAdapter,
   assignmentId?: string
 ) {
-  const config = await store.loadConfig();
-  if (!config) {
-    throw new Error("Coortex is not initialized. Run `ctx init` first.");
-  }
+  await ensureRuntimeInitialized(store);
   return adapter.inspectRun(store, assignmentId);
 }
 
@@ -351,9 +350,6 @@ export async function inspectRuntimeContext(
   adapter: HostAdapter,
   assignmentId?: string
 ) {
-  const config = await store.loadConfig();
-  if (!config) {
-    throw new Error("Coortex is not initialized. Run `ctx init` first.");
-  }
+  await ensureRuntimeInitialized(store);
   return loadInspectRuntimeContext(store, adapter, assignmentId);
 }

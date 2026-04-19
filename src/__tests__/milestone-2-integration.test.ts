@@ -66,6 +66,26 @@ async function countQueuedAssignmentUpdatedEvents(
   ).length;
 }
 
+test("milestone-2 integration: command helpers share one initialization guard", async () => {
+  const expectedMessage = "Coortex is not initialized. Run `ctx init` first.";
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-m2-uninitialized-commands-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const adapter = new CodexAdapter();
+
+  await assert.rejects(() => resumeRuntime(store, adapter), {
+    message: expectedMessage
+  });
+  await assert.rejects(() => runRuntime(store, adapter), {
+    message: expectedMessage
+  });
+  await assert.rejects(() => inspectRuntimeRun(store, adapter), {
+    message: expectedMessage
+  });
+  await assert.rejects(() => inspectRuntimeContext(store, adapter), {
+    message: expectedMessage
+  });
+});
+
 test("milestone-2 integration: trimming keeps the real run envelope bounded and records trimming telemetry", async () => {
   const setup = await createSmokeSetup(async (input) => {
     await writeStructuredOutput(input.outputPath, {
