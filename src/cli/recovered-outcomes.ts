@@ -128,6 +128,7 @@ export async function recoverPersistedExecutionFromDurableRun(
   error: unknown
 ): Promise<{
   projection: LoadedProjection;
+  envelope: TaskEnvelope;
   execution: HostExecutionOutcome;
   diagnostics: CommandDiagnostic[];
 } | undefined> {
@@ -138,8 +139,15 @@ export async function recoverPersistedExecutionFromDurableRun(
     return undefined;
   }
   const recovered = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  const envelope = await buildRecoveredExecutionEnvelope(
+    store,
+    adapter,
+    recovered.projection,
+    assignmentId
+  );
   return {
     projection: recovered.projection,
+    envelope,
     execution,
     diagnostics: [
       ...diagnosticsFromWarning(

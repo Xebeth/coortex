@@ -301,7 +301,7 @@ export async function runRuntime(
           projectionBefore: launchedProjection,
           projectionAfter: recovered.projection,
           assignment,
-          envelope,
+          envelope: recovered.envelope,
           execution: recovered.execution,
           recoveredOutcome: false,
           diagnostics

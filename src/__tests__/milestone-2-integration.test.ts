@@ -408,6 +408,9 @@ test("milestone-2 integration: run recovers a durable outcome even if the adapte
 
   const run = await runRuntime(setup.store, setup.adapter);
   const snapshot = await setup.store.loadSnapshot();
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as typeof run.envelope;
 
   assert.equal(run.execution.outcome.kind, "result");
   assert.equal(run.execution.outcome.capture.status, "completed");
@@ -421,6 +424,12 @@ test("milestone-2 integration: run recovers a durable outcome even if the adapte
     run.projectionAfter.status.currentObjective,
     new RegExp(`Start plan assignment ${setup.assignmentId}:`)
   );
+  assert.equal(run.envelope.metadata.recoveredOutcome, true);
+  assert.equal(run.envelope.metadata.activeAssignmentId, setup.assignmentId);
+  assert.equal(run.envelope.objective, run.projectionAfter.assignments.get(setup.assignmentId)?.objective);
+  assert.equal(persistedEnvelope.metadata.recoveredOutcome, true);
+  assert.equal(persistedEnvelope.metadata.activeAssignmentId, setup.assignmentId);
+  assert.equal(persistedEnvelope.objective, run.envelope.objective);
   assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 1);
 });
 
