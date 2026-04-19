@@ -28,7 +28,8 @@ import type { CommandDiagnostic } from "./types.js";
 import {
   diagnosticsFromWarning,
   hostRunPersistDiagnostics,
-  recordTelemetryWarningDiagnostics
+  recordTelemetryWarningDiagnostics,
+  syncProjectionWithDiagnostics
 } from "./diagnostics.js";
 
 type WorkflowHiddenCleanup = ReturnType<typeof buildWorkflowHiddenRunCleanup>;
@@ -728,11 +729,7 @@ async function persistWorkflowEvents(
     await store.writeSnapshot(toSnapshot(effectiveProjection));
     return { projection: effectiveProjection, diagnostics: [] };
   }
-  const synced = await store.syncSnapshotFromEventsWithRecovery();
-  return {
-    projection: synced.projection,
-    diagnostics: diagnosticsFromWarning(synced.warning, "event-log-repaired")
-  };
+  return syncProjectionWithDiagnostics(store);
 }
 
 async function syncWorkflowStatus(

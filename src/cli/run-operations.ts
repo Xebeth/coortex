@@ -18,7 +18,8 @@ import type { CommandDiagnostic } from "./types.js";
 import {
   diagnosticsFromWarning,
   hostRunPersistDiagnostics,
-  recordTelemetryWarningDiagnostics
+  recordTelemetryWarningDiagnostics,
+  syncProjectionWithDiagnostics
 } from "./diagnostics.js";
 import { loadOperatorProjection, loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
 
@@ -606,11 +607,7 @@ async function persistReconciledProjection(
     return { projection, diagnostics: [] };
   }
 
-  const syncResult = await store.syncSnapshotFromEventsWithRecovery();
-  return {
-    projection: syncResult.projection,
-    diagnostics: diagnosticsFromWarning(syncResult.warning, "event-log-repaired")
-  };
+  return syncProjectionWithDiagnostics(store);
 }
 
 async function cleanupReconciledRunArtifacts(

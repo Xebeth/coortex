@@ -11,7 +11,11 @@ import {
   buildWorkflowBootstrap
 } from "../workflows/index.js";
 import type { CommandDiagnostic } from "./types.js";
-import { diagnosticsFromWarning, recordTelemetryWarningDiagnostics } from "./diagnostics.js";
+import {
+  diagnosticsFromWarning,
+  recordTelemetryWarningDiagnostics,
+  syncProjectionWithDiagnostics
+} from "./diagnostics.js";
 import {
   loadOperatorProjection,
   loadOperatorProjectionWithDiagnostics,
@@ -103,9 +107,9 @@ export async function initRuntime(
     await store.appendEvent(event);
   }
 
-  const syncResult = await store.syncSnapshotFromEventsWithRecovery();
-  const diagnostics = diagnosticsFromWarning(syncResult.warning, "event-log-repaired");
-  let projection = syncResult.projection;
+  const synced = await syncProjectionWithDiagnostics(store);
+  const diagnostics = [...synced.diagnostics];
+  let projection = synced.projection;
   const workflowAware = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
   projection = workflowAware.projection;
   diagnostics.push(...workflowAware.diagnostics);

@@ -32,3 +32,16 @@ export function hostRunPersistDiagnostics(
     "host-run-persist-failed"
   );
 }
+
+export async function syncProjectionWithDiagnostics(
+  store: RuntimeStore
+): Promise<{
+  projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
+  diagnostics: CommandDiagnostic[];
+}> {
+  const synced = await store.syncSnapshotFromEventsWithRecovery();
+  return {
+    projection: synced.projection,
+    diagnostics: diagnosticsFromWarning(synced.warning, "event-log-repaired")
+  };
+}
