@@ -285,7 +285,9 @@ operator-facing status from workflow truth when those views diverge.
   When multiple active assignments exist, it must build the envelope and
   recovery brief from the assignment actually being executed.
   In workflow mode, it must execute only the current workflow
-  assignment.
+  assignment. When workflow truth has no runnable current assignment,
+  it must surface the workflow's derived next action or completion
+  guidance instead of a generic missing-assignment error.
 
 ---
 

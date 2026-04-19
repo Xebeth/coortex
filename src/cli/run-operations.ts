@@ -12,7 +12,7 @@ import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runt
 import { buildStaleRunReconciliation, createActiveRunDiagnostic, selectRunnableProjection } from "../recovery/host-runs.js";
 import { nowIso } from "../utils/time.js";
 import { RuntimeStore } from "../persistence/store.js";
-import { deriveWorkflowSummary } from "../workflows/index.js";
+import { deriveWorkflowNextRequiredAction, deriveWorkflowSummary } from "../workflows/index.js";
 
 import type { CommandDiagnostic } from "./types.js";
 import {
@@ -1436,8 +1436,14 @@ export function getRunnableAssignment(
     const summary = deriveWorkflowSummary(projection);
     const assignmentId = projection.workflowProgress.currentAssignmentId;
     const assignment = assignmentId ? projection.assignments.get(assignmentId) : undefined;
-    if (!assignment || !summary) {
+    if (!summary) {
       throw new Error("No active workflow assignment is available to run.");
+    }
+    if (!assignment) {
+      throw new Error(
+        deriveWorkflowNextRequiredAction(projection)
+        ?? "No active workflow assignment is available to run."
+      );
     }
     if (!summary.rerunEligible) {
       const suffix = summary.blockerReason ? ` ${summary.blockerReason}` : "";

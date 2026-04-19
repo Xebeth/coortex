@@ -204,6 +204,110 @@ async function rewriteRuntimeAsWorkflowRepairState(projectRoot: string): Promise
   await rm(join(runtimeDir, "events.ndjson"));
 }
 
+async function rewriteRuntimeAsCompletedWorkflow(projectRoot: string): Promise<void> {
+  const runtimeDir = join(projectRoot, ".coortex", "runtime");
+  const snapshotPath = join(runtimeDir, "snapshot.json");
+  const snapshot = JSON.parse(
+    await readFile(snapshotPath, "utf8")
+  ) as {
+    assignments: Array<{
+      id: string;
+      state: string;
+      updatedAt: string;
+    }>;
+    status: {
+      activeMode: string;
+      currentObjective: string;
+      activeAssignmentIds: string[];
+      activeHost: string;
+      activeAdapter: string;
+      lastDurableOutputAt: string;
+      resumeReady: boolean;
+    };
+    workflowProgress?: {
+      workflowId: string;
+      orderedModuleIds: string[];
+      currentModuleId: string;
+      workflowCycle: number;
+      currentAssignmentId: string | null;
+      currentModuleAttempt: number;
+      modules: Record<string, {
+        moduleId: string;
+        workflowCycle: number;
+        moduleAttempt: number;
+        assignmentId: string | null;
+        moduleState: string;
+        sourceResultIds: string[];
+        sourceDecisionIds: string[];
+        artifactReferences: unknown[];
+        enteredAt: string;
+        evaluatedAt?: string;
+      }>;
+      lastTransition?: {
+        fromModuleId: string;
+        toModuleId: string;
+        workflowCycle: number;
+        moduleAttempt: number;
+        transition: string;
+        previousAssignmentId: string | null;
+        nextAssignmentId: string | null;
+        appliedAt: string;
+      };
+    };
+  };
+
+  const assignmentId = snapshot.assignments[0]!.id;
+  const completedAt = "2026-04-15T10:00:00.000Z";
+  snapshot.assignments[0] = {
+    ...snapshot.assignments[0]!,
+    state: "completed",
+    updatedAt: completedAt
+  };
+  snapshot.status = {
+    ...snapshot.status,
+    activeMode: "idle",
+    currentObjective: "Stale completion objective.",
+    activeAssignmentIds: ["old-assignment"],
+    lastDurableOutputAt: completedAt,
+    resumeReady: true
+  };
+  snapshot.workflowProgress = {
+    workflowId: "default",
+    orderedModuleIds: ["plan", "review", "verify"],
+    currentModuleId: "verify",
+    workflowCycle: 1,
+    currentAssignmentId: null,
+    currentModuleAttempt: 1,
+    modules: {
+      verify: {
+        moduleId: "verify",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId,
+        moduleState: "completed",
+        sourceResultIds: ["verify-result"],
+        sourceDecisionIds: [],
+        artifactReferences: [],
+        enteredAt: "2026-04-15T09:30:00.000Z",
+        evaluatedAt: "2026-04-15T09:59:00.000Z"
+      }
+    },
+    lastTransition: {
+      fromModuleId: "verify",
+      toModuleId: "verify",
+      workflowCycle: 1,
+      moduleAttempt: 1,
+      transition: "complete",
+      previousAssignmentId: assignmentId,
+      nextAssignmentId: null,
+      appliedAt: completedAt
+    }
+  };
+
+  await writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
+  await rm(join(runtimeDir, "events.ndjson"));
+}
+
 async function createCompletedDecisionRecoverySetup(options?: { includeLeftoverLease?: boolean }) {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-decision-status-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -1384,6 +1488,42 @@ test("ctx repair-state commands keep workflow progress when the event log is mis
   assert.equal(inspectPayload.workflow?.currentAssignmentId, null);
   assert.equal(inspectPayload.assignment, null);
   assert.equal(inspectPayload.run, null);
+});
+
+test("ctx run reports workflow repair guidance when no workflow assignment is available", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-repair-state-run-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+  await rewriteRuntimeAsWorkflowRepairState(projectRoot);
+
+  const run = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot
+  });
+
+  assert.equal(run.exitCode, 1);
+  assert.equal(run.stdout.trim(), "");
+  assert.match(run.stderr, /Inspect workflow default and repair runtime state\./);
+});
+
+test("ctx run reports workflow completion when no workflow assignment remains", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-workflow-run-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+  await rewriteRuntimeAsCompletedWorkflow(projectRoot);
+
+  const run = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot
+  });
+
+  assert.equal(run.exitCode, 1);
+  assert.equal(run.stdout.trim(), "");
+  assert.match(run.stderr, /Workflow default complete\./);
 });
 
 test("ctx inspect ignores a parseable but invalid convenience last-run pointer", async () => {
