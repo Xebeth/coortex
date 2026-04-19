@@ -11,6 +11,7 @@ import { createEmptyProjection } from "../projections/runtime-projection.js";
 import type { Assignment, RecoveryBrief, RuntimeStatus, WorkflowSummary } from "../core/types.js";
 import { RuntimeStore } from "../persistence/store.js";
 import type { RuntimeConfig } from "../config/types.js";
+import type { RuntimeArtifactStore } from "../adapters/contract.js";
 import { deriveWorkflowSummary } from "../workflows/index.js";
 
 test("task envelope trims oversized result summaries, writes artifacts, and stays bounded", async () => {
@@ -409,6 +410,162 @@ test("task envelope trims oversized workflow explanatory strings before the budg
   assert.equal(advancementArtifact.trim(), lastDurableAdvancement.trim());
 });
 
+test("task envelope keeps trimmed field ordering stable across async artifact writes", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-envelope-trim-order-"));
+  const baseStore = RuntimeStore.forProject(projectRoot);
+  const store = new DelayedWriteArtifactStore(baseStore, {
+    "artifacts/results/result-1.txt": 20,
+    "artifacts/results/result-2.txt": 0,
+    "artifacts/decisions/decision-1.txt": 20,
+    "artifacts/decisions/decision-2.txt": 0
+  });
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId: "session-trim-order",
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: "2026-04-19T00:00:00.000Z"
+  };
+  await baseStore.initialize(config);
+
+  const projection = createEmptyProjection("session-trim-order", projectRoot, "codex");
+  const assignment: Assignment = {
+    id: "assignment-trim-order",
+    parentTaskId: "session-trim-order",
+    workflow: "milestone-1",
+    ownerType: "runtime",
+    ownerId: "codex:bootstrap",
+    objective: "Keep trim metadata ordered.",
+    writeScope: ["src/"],
+    requiredOutputs: ["tests"],
+    state: "in_progress",
+    createdAt: "2026-04-19T00:00:00.000Z",
+    updatedAt: "2026-04-19T00:00:00.000Z"
+  };
+  projection.assignments.set(assignment.id, assignment);
+  projection.status = {
+    activeMode: "solo",
+    currentObjective: assignment.objective,
+    activeAssignmentIds: [assignment.id],
+    activeHost: "codex",
+    activeAdapter: "codex",
+    lastDurableOutputAt: "2026-04-19T00:00:00.000Z",
+    resumeReady: true
+  };
+
+  const brief: RecoveryBrief = {
+    activeObjective: assignment.objective,
+    activeAssignments: [
+      {
+        id: assignment.id,
+        objective: assignment.objective,
+        state: assignment.state,
+        writeScope: assignment.writeScope,
+        requiredOutputs: assignment.requiredOutputs
+      }
+    ],
+    lastDurableResults: [
+      {
+        resultId: "result-1",
+        assignmentId: assignment.id,
+        status: "partial",
+        summary: "r".repeat(900),
+        changedFiles: ["src/one.ts"],
+        createdAt: "2026-04-19T00:00:00.000Z"
+      },
+      {
+        resultId: "result-2",
+        assignmentId: assignment.id,
+        status: "partial",
+        summary: "s".repeat(900),
+        changedFiles: ["src/two.ts"],
+        createdAt: "2026-04-19T00:00:01.000Z"
+      }
+    ],
+    unresolvedDecisions: [
+      {
+        decisionId: "decision-1",
+        assignmentId: assignment.id,
+        blockerSummary: "Need more detail. ".repeat(40),
+        recommendedOption: "revise"
+      },
+      {
+        decisionId: "decision-2",
+        assignmentId: assignment.id,
+        blockerSummary: "Need even more detail. ".repeat(40),
+        recommendedOption: "revise-more"
+      }
+    ],
+    nextRequiredAction: "Continue assignment assignment-trim-order",
+    generatedAt: "2026-04-19T00:00:04.000Z"
+  };
+
+  const envelope = await buildTaskEnvelope(store, projection, brief, {
+    host: "codex",
+    adapter: "codex",
+    maxChars: 4_000,
+    resultSummaryLimit: 120
+  });
+
+  assert.deepEqual(
+    envelope.trimmedFields.map((field) => field.label),
+    [
+      "result:result-1",
+      "result:result-2",
+      "decision:decision-1",
+      "decision:decision-2"
+    ]
+  );
+});
+
 function escapeForRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+class DelayedWriteArtifactStore implements RuntimeArtifactStore {
+  constructor(
+    private readonly inner: RuntimeStore,
+    private readonly delaysMs: Record<string, number>
+  ) {}
+
+  get rootDir(): string {
+    return this.inner.rootDir;
+  }
+
+  get runtimeDir(): string {
+    return this.inner.runtimeDir;
+  }
+
+  get adaptersDir(): string {
+    return this.inner.adaptersDir;
+  }
+
+  readJsonArtifact<T>(relativePath: string, label: string): Promise<T | undefined> {
+    return this.inner.readJsonArtifact(relativePath, label);
+  }
+
+  readTextArtifact(relativePath: string, label: string): Promise<string | undefined> {
+    return this.inner.readTextArtifact(relativePath, label);
+  }
+
+  claimTextArtifact(relativePath: string, content: string): Promise<string> {
+    return this.inner.claimTextArtifact(relativePath, content);
+  }
+
+  writeJsonArtifact(relativePath: string, value: unknown): Promise<string> {
+    return this.inner.writeJsonArtifact(relativePath, value);
+  }
+
+  async writeTextArtifact(relativePath: string, content: string): Promise<string> {
+    const delayMs = this.delaysMs[relativePath] ?? 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    return this.inner.writeTextArtifact(relativePath, content);
+  }
+
+  deleteArtifact(relativePath: string): Promise<void> {
+    return this.inner.deleteArtifact(relativePath);
+  }
 }

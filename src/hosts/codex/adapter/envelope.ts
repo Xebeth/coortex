@@ -18,6 +18,11 @@ export interface EnvelopeOptions {
   workflow?: WorkflowSummary | null;
 }
 
+interface TrimmedEnvelopeEntry<T> {
+  entry: T;
+  trimmedField: TrimmedField | undefined;
+}
+
 export async function buildTaskEnvelope(
   store: RuntimeArtifactStore,
   projection: RuntimeProjection,
@@ -55,14 +60,6 @@ export async function buildTaskEnvelope(
         options.resultSummaryLimit ?? 400,
         `.coortex/${options.artifactDir ?? "artifacts/results"}/${result.resultId}.txt`
       );
-      if (trimmed.trimmed) {
-        trimmedFields.push({
-          label: `result:${result.resultId}`,
-          originalChars: trimmed.originalChars,
-          keptChars: trimmed.value.length,
-          reference: trimmed.reference
-        });
-      }
       const entry: RecoveryBrief["lastDurableResults"][number] = {
         resultId: result.resultId,
         assignmentId: result.assignmentId,
@@ -75,9 +72,14 @@ export async function buildTaskEnvelope(
       if (trimmed.trimmed) {
         entry.reference = trimmed.reference;
       }
-      return entry;
+      return {
+        entry,
+        trimmedField: toTrimmedField(`result:${result.resultId}`, trimmed)
+      };
     })
   );
+  trimmedFields.push(...collectTrimmedFields(compactResults));
+
   const compactDecisions = await Promise.all(
     brief.unresolvedDecisions.map(async (decision) => {
       const trimmed = await trimTextToArtifact(
@@ -87,14 +89,6 @@ export async function buildTaskEnvelope(
         300,
         `.coortex/artifacts/decisions/${decision.decisionId}.txt`
       );
-      if (trimmed.trimmed) {
-        trimmedFields.push({
-          label: `decision:${decision.decisionId}`,
-          originalChars: trimmed.originalChars,
-          keptChars: trimmed.value.length,
-          reference: trimmed.reference
-        });
-      }
       const entry: RecoveryBrief["unresolvedDecisions"][number] = {
         ...decision,
         blockerSummary: trimmed.value,
@@ -103,11 +97,18 @@ export async function buildTaskEnvelope(
       if (trimmed.trimmed) {
         entry.reference = trimmed.reference;
       }
-      return entry;
+      return {
+        entry,
+        trimmedField: toTrimmedField(`decision:${decision.decisionId}`, trimmed)
+      };
     })
   );
+  trimmedFields.push(...collectTrimmedFields(compactDecisions));
 
-  const recentResults = compactResults.map((result) => {
+  const compactResultEntries = compactResults.map(({ entry }) => entry);
+  const compactDecisionEntries = compactDecisions.map(({ entry }) => entry);
+
+  const recentResults = compactResultEntries.map((result) => {
     const entry: TaskEnvelope["recentResults"][number] = {
       resultId: result.resultId,
       summary: result.summary,
@@ -140,8 +141,8 @@ export async function buildTaskEnvelope(
     recoveryBrief: {
       ...brief,
       nextRequiredAction,
-      lastDurableResults: compactResults,
-      unresolvedDecisions: compactDecisions
+      lastDurableResults: compactResultEntries,
+      unresolvedDecisions: compactDecisionEntries
     },
     ...(compactedWorkflow ? { workflow: compactedWorkflow.workflow } : {}),
     recentResults,
@@ -245,6 +246,25 @@ async function trimTextToArtifact(
     originalChars: value.length,
     reference
   };
+}
+
+function toTrimmedField(
+  label: string,
+  trimmed: Awaited<ReturnType<typeof trimTextToArtifact>>
+): TrimmedField | undefined {
+  if (!trimmed.trimmed) {
+    return undefined;
+  }
+  return {
+    label,
+    originalChars: trimmed.originalChars,
+    keptChars: trimmed.value.length,
+    reference: trimmed.reference
+  };
+}
+
+function collectTrimmedFields<T>(entries: TrimmedEnvelopeEntry<T>[]): TrimmedField[] {
+  return entries.flatMap((entry) => (entry.trimmedField ? [entry.trimmedField] : []));
 }
 
 function compactEnvelope(envelope: TaskEnvelope, maxChars: number): TaskEnvelope {
