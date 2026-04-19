@@ -296,26 +296,20 @@ export async function runRuntime(
     if (!executionStarted) {
       await adapter.releaseRunLease(store, assignment.id);
     } else if (launchedProjection && envelope) {
-      const recoveredExecution = synthesizeRecoveredExecution(
-        await adapter.inspectRun(store, assignment.id)
+      const recovered = await recoverPersistedRunAfterEventFailure(
+        store,
+        adapter,
+        assignment.id,
+        error
       );
-      if (recoveredExecution) {
-        const recovered = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
-        diagnostics.push(
-          ...diagnosticsFromWarning(
-            `Runtime event persistence was interrupted after the host run completed durably. Recovered from durable host run metadata. ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-            "host-run-persist-failed"
-          ),
-          ...recovered.diagnostics
-        );
+      if (recovered) {
+        diagnostics.push(...recovered.diagnostics);
         return {
           projectionBefore: launchedProjection,
           projectionAfter: recovered.projection,
           assignment,
           envelope,
-          execution: recoveredExecution,
+          execution: recovered.execution,
           recoveredOutcome: false,
           diagnostics
         };
@@ -371,4 +365,36 @@ async function buildAndPersistWorkflowEnvelope(
   const envelope = await buildWorkflowAwareEnvelope(store, adapter, projection, brief);
   await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
   return envelope;
+}
+
+async function recoverPersistedRunAfterEventFailure(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  assignmentId: string,
+  error: unknown
+): Promise<{
+  projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
+  execution: NonNullable<ReturnType<typeof synthesizeRecoveredExecution>>;
+  diagnostics: CommandDiagnostic[];
+} | undefined> {
+  const execution = synthesizeRecoveredExecution(
+    await adapter.inspectRun(store, assignmentId)
+  );
+  if (!execution) {
+    return undefined;
+  }
+  const recovered = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
+  return {
+    projection: recovered.projection,
+    execution,
+    diagnostics: [
+      ...diagnosticsFromWarning(
+        `Runtime event persistence was interrupted after the host run completed durably. Recovered from durable host run metadata. ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "host-run-persist-failed"
+      ),
+      ...recovered.diagnostics
+    ]
+  };
 }
