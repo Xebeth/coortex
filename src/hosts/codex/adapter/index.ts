@@ -147,6 +147,15 @@ export class CodexAdapter implements HostAdapter {
     return this.runner.startResume!(input);
   }
 
+  private bypassPolicyInput(): { dangerouslyBypassApprovalsAndSandbox: boolean } | {} {
+    return this.options.dangerouslyBypassApprovalsAndSandbox !== undefined
+      ? {
+          dangerouslyBypassApprovalsAndSandbox:
+            this.options.dangerouslyBypassApprovalsAndSandbox
+        }
+      : {};
+  }
+
   async initialize(store: RuntimeArtifactStore, _projection: RuntimeProjection): Promise<void> {
     const paths = this.paths(store);
     await writeCodexKernel(paths.kernelPath);
@@ -267,6 +276,7 @@ export class CodexAdapter implements HostAdapter {
           prompt,
           outputSchemaPath: schemaPath,
           outputPath,
+          ...this.bypassPolicyInput(),
           onEvent: async (event) => {
             const hostRunId =
               event.type === "thread.started" && typeof event.thread_id === "string"
@@ -388,12 +398,7 @@ export class CodexAdapter implements HostAdapter {
               });
             }
           },
-          ...(this.options.dangerouslyBypassApprovalsAndSandbox !== undefined
-            ? {
-                dangerouslyBypassApprovalsAndSandbox:
-                  this.options.dangerouslyBypassApprovalsAndSandbox
-              }
-            : {})
+          ...this.bypassPolicyInput()
         }),
       deriveCompleted: async (execution) => {
         const completed = await deriveCodexExecutionCompletion(

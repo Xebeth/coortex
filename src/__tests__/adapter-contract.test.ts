@@ -390,6 +390,120 @@ test("codex adapter resumes a stored native session id through the wrapped resum
   );
 });
 
+test("codex adapter forwards injected bypass policy on launch and resume", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-bypass-parity-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  let launchBypass: boolean | undefined;
+  let resumeBypass: boolean | undefined;
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      launchBypass = input.dangerouslyBypassApprovalsAndSandbox;
+      return createImmediateRunningHandle((async () => {
+        await input.onEvent?.({ type: "thread.started", thread_id: "thread-bypass-launch-1" });
+        await mkdir(dirname(input.outputPath), { recursive: true });
+        await writeFile(
+          input.outputPath,
+          JSON.stringify({
+            outcomeType: "result",
+            resultStatus: "completed",
+            resultSummary: "Launch captured the injected bypass policy.",
+            changedFiles: ["src/hosts/codex/adapter/index.ts"],
+            blockerSummary: "",
+            decisionOptions: [],
+            recommendedOption: ""
+          }),
+          "utf8"
+        );
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: ""
+        };
+      })());
+    },
+    async runExec() {
+      throw new Error("runExec should not be used when startExec is stubbed");
+    },
+    async startResume(input) {
+      resumeBypass = input.dangerouslyBypassApprovalsAndSandbox;
+      return createImmediateRunningHandle((async () => {
+        await mkdir(dirname(input.outputPath), { recursive: true });
+        await writeFile(
+          input.outputPath,
+          JSON.stringify({
+            outcomeType: "result",
+            resultStatus: "partial",
+            resultSummary: "Resume captured the injected bypass policy.",
+            changedFiles: ["src/hosts/codex/adapter/index.ts"],
+            blockerSummary: "",
+            decisionOptions: [],
+            recommendedOption: ""
+          }),
+          "utf8"
+        );
+        await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: ""
+        };
+      })());
+    }
+  };
+
+  const adapter = new CodexAdapter(runner, {
+    dangerouslyBypassApprovalsAndSandbox: true
+  });
+  await adapter.initialize(store, projection);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+
+  const execution = await adapter.executeAssignment(store, projection, envelope);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-bypass-resume-1",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(execution.outcome.kind, "result");
+  assert.equal(execution.outcome.capture.status, "completed");
+  assert.equal(resumeResult.reclaimed, true);
+  assert.equal(launchBypass, true);
+  assert.equal(resumeBypass, true);
+});
+
 test("codex adapter captures decision outcomes through the wrapped resume runner", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-decision-"));
   const store = RuntimeStore.forProject(projectRoot);

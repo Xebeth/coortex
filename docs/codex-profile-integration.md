@@ -133,8 +133,8 @@ isolating Codex user state. Live acceptance that invokes the real Codex
 binary must run with a temporary HOME/XDG user-state root so operator
 trust/config under `~/.codex` stays untouched, and the harness must
 teardown fixture repos plus isolated user-state trees without leaving
-new `coortex-live-*` paths under the OS temp root or live-harness/Codex
-descendant processes behind.
+new `coortex-live-*` paths under the OS temp root or new tracked
+live-harness/Codex descendant processes behind.
 
 ## Wrapped Session Boundary
 
@@ -189,10 +189,11 @@ For the current hardening slice:
   backfills it from durable host metadata before wrapped reclaim is
   considered available
 - wrapped launch and wrapped reclaim consume the same Coortex bypass
-  policy input, but their default Codex CLI modes are host-specific:
-  launch uses `codex exec --sandbox workspace-write`, while wrapped
-  resume uses the supported `codex exec resume --full-auto` path unless
-  bypass mode is enabled
+  policy input, including when the adapter is given an injected custom
+  runner via `startExec()` / `startResume()`, but their default Codex
+  CLI modes are host-specific: launch uses `codex exec --sandbox
+  workspace-write`, while wrapped resume uses the supported
+  `codex exec resume --full-auto` path unless bypass mode is enabled
 - the `-o` last-message file is the authoritative structured-output
   boundary; if Codex does not materialize that file, Coortex may fall
   back to the streamed `agent_message` JSONL item, but only when that

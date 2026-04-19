@@ -44,7 +44,7 @@ interface LiveFixtureOptions {
 
 interface LiveHarnessCleanupState {
   liveTmpDirs: string[];
-  activeHarnessProcessPids: number[];
+  trackedHarnessProcessPids: number[];
 }
 
 const activeHarnessProcessPids = new Set<number>();
@@ -57,8 +57,7 @@ liveHarness(
   async (t) => {
     const operatorCodexConfigPath = join(process.env.HOME ?? homedir(), ".codex", "config.toml");
     const operatorCodexConfigBefore = await readTextIfPresent(operatorCodexConfigPath);
-    const liveTmpDirsBefore = await listLiveTmpDirs();
-    const activeHarnessProcessPidsBefore = listActiveHarnessProcessPids();
+    const cleanupStateBefore = await snapshotLiveHarnessCleanupState();
 
     const commit = String(
       (await execFileAsync("git", ["rev-parse", "HEAD"], {
@@ -75,25 +74,24 @@ liveHarness(
     t.diagnostic(`host=${codexVersion ?? "codex --version returned no output"}`);
     t.after(async () => {
       const operatorCodexConfigAfter = await readTextIfPresent(operatorCodexConfigPath);
-      const liveTmpDirsAfter = await listLiveTmpDirs();
-      const activeHarnessProcessPidsAfter = listActiveHarnessProcessPids();
+      const cleanupStateAfter = await snapshotLiveHarnessCleanupState();
       assert.equal(
         operatorCodexConfigAfter ?? null,
         operatorCodexConfigBefore ?? null,
         "live harness must not mutate the operator-global Codex config"
       );
       assert.deepEqual(
-        diffNewLiveTmpDirs(liveTmpDirsBefore, liveTmpDirsAfter),
+        diffNewLiveTmpDirs(cleanupStateBefore.liveTmpDirs, cleanupStateAfter.liveTmpDirs),
         [],
         "live harness must not leave new coortex-live-* fixture dirs under the OS temp root behind"
       );
       assert.deepEqual(
         diffNewActiveHarnessProcessPids(
-          activeHarnessProcessPidsBefore,
-          activeHarnessProcessPidsAfter
+          cleanupStateBefore.trackedHarnessProcessPids,
+          cleanupStateAfter.trackedHarnessProcessPids
         ),
         [],
-        "live harness must not leave new live-harness/Codex descendant processes behind"
+        "live harness must not leave new tracked live-harness/Codex processes or descendants behind"
       );
     });
 
@@ -965,6 +963,16 @@ function listActiveHarnessProcessPids(): number[] {
   return [...activeHarnessProcessPids].sort((left, right) => left - right);
 }
 
+async function listTrackedHarnessProcessPids(): Promise<number[]> {
+  const tracked = new Set<number>(listActiveHarnessProcessPids());
+  for (const pid of activeHarnessProcessPids) {
+    for (const descendant of await listDescendantPids(pid)) {
+      tracked.add(descendant);
+    }
+  }
+  return [...tracked].sort((left, right) => left - right);
+}
+
 function diffNewActiveHarnessProcessPids(before: number[], after: number[]): number[] {
   const beforeSet = new Set(before);
   return after.filter((pid) => !beforeSet.has(pid));
@@ -1354,7 +1362,7 @@ function diffNewLiveTmpDirs(before: string[], after: string[]): string[] {
 async function snapshotLiveHarnessCleanupState(): Promise<LiveHarnessCleanupState> {
   return {
     liveTmpDirs: await listLiveTmpDirs(),
-    activeHarnessProcessPids: listActiveHarnessProcessPids()
+    trackedHarnessProcessPids: await listTrackedHarnessProcessPids()
   };
 }
 
@@ -1370,11 +1378,11 @@ async function assertNoNewLiveHarnessCleanupDelta(
   );
   assert.deepEqual(
     diffNewActiveHarnessProcessPids(
-      before.activeHarnessProcessPids,
-      after.activeHarnessProcessPids
+      before.trackedHarnessProcessPids,
+      after.trackedHarnessProcessPids
     ),
     [],
-    `${context} must not leave new live-harness/Codex processes behind`
+    `${context} must not leave new tracked live-harness/Codex processes or descendants behind`
   );
 }
 
