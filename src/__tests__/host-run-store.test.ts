@@ -96,6 +96,7 @@ test("host run store uses adapter-provided artifact roles instead of codex paths
   assert.deepEqual(await runStore.inspect("assignment-1"), completedRecord);
   await runStore.release("assignment-1");
   assert.equal(await runStore.inspect("assignment-1"), undefined);
+  assert.equal(await store.readTextArtifact(artifacts.lastRunPath(), "last run"), undefined);
 });
 
 test("host run store inspection matrix matches recovery invariants", async (t) => {
