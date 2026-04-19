@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type { HostAdapter } from "../adapters/contract.js";
 import { getNativeRunId } from "../core/run-state.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
+import { buildRecoveryBrief } from "../recovery/brief.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import { deriveWorkflowSummary } from "../workflows/index.js";
 import {
@@ -128,7 +129,7 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
     projection.status.activeAssignmentIds.includes(assignment.id)
   );
-  const openDecisions = [...projection.decisions.values()].filter((decision) => decision.state === "open");
+  const brief = buildRecoveryBrief(projection);
   const workflow = deriveWorkflowSummary(projection);
 
   console.log(`Session: ${projection.sessionId}`);
@@ -152,7 +153,7 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     console.log(`Authoritative host leases: ${activeLeases.length}`);
   }
   console.log(`Results: ${projection.results.size}`);
-  console.log(`Open decisions: ${openDecisions.length}`);
+  console.log(`Open decisions: ${brief.unresolvedDecisions.length}`);
   for (const assignment of activeAssignments) {
     console.log(`- ${assignment.id} ${assignment.state} ${assignment.objective}`);
   }

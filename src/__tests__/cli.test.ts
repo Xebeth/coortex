@@ -1109,6 +1109,117 @@ test("ctx status and resume ignore a malformed convenience last-run pointer", as
   assert.doesNotMatch(resume.stderr, /Failed to parse codex run record/);
 });
 
+test("ctx status ignores inactive legacy decisions that resume already filters", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-legacy-inactive-decision-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex", "runtime");
+  const snapshotPath = join(runtimeDir, "snapshot.json");
+  const snapshot = JSON.parse(
+    await readFile(snapshotPath, "utf8")
+  ) as {
+    sessionId: string;
+    assignments: Array<{
+      id: string;
+      parentTaskId: string;
+      workflow: string;
+      ownerType: "runtime" | "host";
+      ownerId: string;
+      objective: string;
+      writeScope: string[];
+      requiredOutputs: string[];
+      state: "queued" | "in_progress" | "blocked" | "completed" | "failed";
+      createdAt: string;
+      updatedAt: string;
+    }>;
+    decisions: Array<{
+      decisionId: string;
+      assignmentId: string;
+      requesterId: string;
+      blockerSummary: string;
+      options: Array<{ id: string; label: string; summary: string }>;
+      recommendedOption: string;
+      state: "open" | "resolved";
+      createdAt: string;
+    }>;
+    status: {
+      activeMode: string;
+      currentObjective: string;
+      activeAssignmentIds: string[];
+      activeHost: string;
+      activeAdapter: string;
+      lastDurableOutputAt: string;
+      resumeReady: boolean;
+    };
+    workflowProgress?: unknown;
+  };
+  const activeAssignment = snapshot.assignments[0]!;
+  const inactiveAssignmentId = randomUUID();
+  const inactiveTimestamp = new Date(Date.now() + 1_000).toISOString();
+
+  snapshot.workflowProgress = undefined;
+  snapshot.assignments.push({
+    id: inactiveAssignmentId,
+    parentTaskId: snapshot.sessionId,
+    workflow: "milestone-2",
+    ownerType: "host",
+    ownerId: "codex",
+    objective: "Inactive legacy assignment should not drive operator decisions.",
+    writeScope: ["README.md"],
+    requiredOutputs: ["result"],
+    state: "blocked",
+    createdAt: inactiveTimestamp,
+    updatedAt: inactiveTimestamp
+  });
+  snapshot.decisions = [
+    {
+      decisionId: "inactive-legacy-decision",
+      assignmentId: inactiveAssignmentId,
+      requesterId: "codex",
+      blockerSummary: "Inactive legacy decision should stay hidden from ctx status.",
+      options: [{ id: "wait", label: "Wait", summary: "Pause the inactive assignment." }],
+      recommendedOption: "wait",
+      state: "open",
+      createdAt: inactiveTimestamp
+    }
+  ];
+  snapshot.status = {
+    ...snapshot.status,
+    activeMode: "runtime",
+    currentObjective: activeAssignment.objective,
+    activeAssignmentIds: [activeAssignment.id],
+    lastDurableOutputAt: inactiveTimestamp,
+    resumeReady: true
+  };
+
+  await writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
+  await rm(join(runtimeDir, "events.ndjson"));
+
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+  const resume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+
+  assert.equal(status.exitCode, 0);
+  assert.match(status.stdout, /Active assignments: 1/);
+  assert.match(status.stdout, /Open decisions: 0/);
+  assert.doesNotMatch(status.stdout, /inactive-legacy-decision/);
+
+  assert.equal(resume.exitCode, 0);
+  assert.match(resume.stdout, /Recovery brief generated/);
+  assert.doesNotMatch(resume.stdout, /inactive-legacy-decision/);
+  assert.doesNotMatch(
+    resume.stdout,
+    /Inactive legacy decision should stay hidden from ctx status\./
+  );
+});
+
 test("ctx inspect ignores a parseable but invalid convenience last-run pointer", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-invalid-last-run-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
