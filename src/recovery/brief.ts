@@ -21,8 +21,11 @@ export function buildRecoveryBrief(projection: RuntimeProjection): RecoveryBrief
       changedFiles: result.changedFiles,
       createdAt: result.createdAt
     }));
-  const unresolvedDecisions = [...projection.decisions.values()]
-    .filter((decision) => decision.state === "open")
+  const unresolvedDecisions = selectRelevantOpenDecisions(
+    projection,
+    workflowGuidance,
+    activeAssignments
+  )
     .map((decision) => ({
       decisionId: decision.decisionId,
       assignmentId: decision.assignmentId,
@@ -70,6 +73,39 @@ function determineNextAction(
     return `Start assignment ${queuedAssignment.id}: ${queuedAssignment.objective}`;
   }
   return "Inspect status and decide the next assignment.";
+}
+
+function selectRelevantOpenDecisions(
+  projection: RuntimeProjection,
+  workflowGuidance: ReturnType<typeof deriveWorkflowOperatorGuidance>,
+  activeAssignments: RecoveryBrief["activeAssignments"]
+) {
+  const openDecisions = [...projection.decisions.values()].filter(
+    (decision) => decision.state === "open"
+  );
+  if (projection.workflowProgress) {
+    const currentAssignmentId = workflowGuidance?.currentAssignment?.id;
+    if (!currentAssignmentId) {
+      return [];
+    }
+    const attemptLowerBound = workflowDecisionLowerBound(projection);
+    return openDecisions.filter(
+      (decision) =>
+        decision.assignmentId === currentAssignmentId &&
+        decision.createdAt >= attemptLowerBound
+    );
+  }
+
+  const activeAssignmentIds = new Set(activeAssignments.map((assignment) => assignment.id));
+  return openDecisions.filter((decision) => activeAssignmentIds.has(decision.assignmentId));
+}
+
+function workflowDecisionLowerBound(projection: RuntimeProjection): string {
+  const workflow = projection.workflowProgress;
+  if (!workflow || workflow.currentModuleAttempt <= 1) {
+    return "";
+  }
+  return workflow.modules[workflow.currentModuleId]?.enteredAt ?? workflow.lastTransition?.appliedAt ?? "";
 }
 
 function deriveGeneratedAt(projection: RuntimeProjection): string {

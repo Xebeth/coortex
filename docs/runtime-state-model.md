@@ -156,7 +156,8 @@ Required contents:
 - active objective
 - active assignments
 - last durable results
-- unresolved decisions
+- unresolved decisions relevant to the active assignment or current
+  workflow attempt
 - next required action
 
 It must be compact enough to fit inside a bounded task envelope.
