@@ -1524,6 +1524,58 @@ test("milestone-2 integration: hidden stale workflow cleanup reports success onl
   );
 });
 
+test("milestone-2 integration: hidden stale workflow cleanup still reports success after a non-terminal cleanup warning", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in hidden stale workflow cleanup warning smoke test");
+  });
+
+  const hiddenAssignmentId = randomUUID();
+  const hiddenStaleRecord: HostRunRecord = {
+    assignmentId: hiddenAssignmentId,
+    state: "running",
+    adapterData: { nativeRunId: "hidden-stale-workflow-warning" },
+    startedAt: new Date(Date.now() - 120_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 120_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() - 60_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${hiddenAssignmentId}.json`, hiddenStaleRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${hiddenAssignmentId}.lease.json`, hiddenStaleRecord);
+
+  const originalReconcile = setup.adapter.reconcileStaleRun.bind(setup.adapter);
+  let reconcileAttempts = 0;
+  setup.adapter.reconcileStaleRun = async (store, record) => {
+    reconcileAttempts += 1;
+    await originalReconcile(store, record);
+    throw new Error("simulated hidden cleanup warning after lease release");
+  };
+
+  const firstLoad = await withSteppedClock(() =>
+    loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter)
+  );
+  const secondLoad = await loadWorkflowAwareProjectionWithDiagnostics(setup.store, setup.adapter);
+  const inspectedHidden = await inspectRuntimeRun(setup.store, setup.adapter, hiddenAssignmentId);
+  const telemetry = await setup.store.loadTelemetry();
+  const hiddenCleanupTelemetry = findLastTelemetry(telemetry, "host.run.hidden_stale_cleaned");
+
+  assert.ok(firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "hidden-run-cleaned"));
+  assert.ok(firstLoad.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+  assert.ok(!secondLoad.diagnostics.some((diagnostic) => diagnostic.code === "hidden-run-cleaned"));
+  assert.ok(!secondLoad.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+  assert.equal(
+    telemetry.filter((event) => event.eventType === "host.run.hidden_stale_cleaned").length,
+    1
+  );
+  assert.equal(reconcileAttempts, 1);
+  assert.equal(hiddenCleanupTelemetry?.metadata.staleAt, inspectedHidden?.staleAt);
+  await assert.rejects(
+    readFile(
+      join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${hiddenAssignmentId}.lease.json`),
+      "utf8"
+    ),
+    /ENOENT/
+  );
+});
+
 test("milestone-2 integration: non-terminal persist warnings still clear the finished lease", async () => {
   const setup = await createSmokeSetup(async (input) => {
     await writeStructuredOutput(input.outputPath, {
@@ -2241,6 +2293,60 @@ test("milestone-2 integration: stale reconciliation retries artifact cleanup aft
   );
   assert.equal(reconcileAttempts, 3);
   assert.equal(staleTelemetryCount, 1);
+});
+
+test("milestone-2 integration: stale reconciliation still reports success after a non-terminal cleanup warning", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in stale reconciliation warning smoke test");
+  });
+
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
+  const staleRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    workflowAttempt,
+    adapterData: { nativeRunId: "smoke-thread-stale-warning-artifacts" },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, staleRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", staleRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, staleRecord);
+
+  const originalReconcile = setup.adapter.reconcileStaleRun.bind(setup.adapter);
+  let reconcileAttempts = 0;
+  setup.adapter.reconcileStaleRun = async (store, record) => {
+    reconcileAttempts += 1;
+    await originalReconcile(store, record);
+    throw new Error("simulated stale cleanup warning after lease release");
+  };
+
+  const firstResume = await resumeRuntime(setup.store, setup.adapter);
+  const snapshotAfterFirst = await setup.store.loadSnapshot();
+  const inspectedAfterFirst = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const secondResume = await resumeRuntime(setup.store, setup.adapter);
+  const telemetry = await setup.store.loadTelemetry();
+  const staleTelemetryCount = telemetry.filter(
+    (event) => event.eventType === "host.run.stale_reconciled"
+  ).length;
+
+  assert.ok(firstResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(firstResume.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+  assert.equal(snapshotAfterFirst?.assignments[0]?.state, "queued");
+  assert.equal(inspectedAfterFirst?.state, "completed");
+  assert.equal(inspectedAfterFirst?.staleReasonCode, "expired_lease");
+  assert.ok(!secondResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(!secondResume.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+  assert.equal(reconcileAttempts, 1);
+  assert.equal(staleTelemetryCount, 1);
+  await assert.rejects(
+    readFile(
+      join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
+      "utf8"
+    ),
+    /ENOENT/
+  );
 });
 
 test("milestone-2 integration: stale retries move back to in-progress before the replacement host run", async () => {

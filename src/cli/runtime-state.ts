@@ -40,6 +40,11 @@ interface WorkflowCleanupResult {
   clearedLease: boolean;
 }
 
+interface WorkflowArtifactCleanupState {
+  cleanupError?: Error;
+  clearedLease: boolean;
+}
+
 type WorkflowRunReconciliationAction =
   | {
       kind: "report_active_lease";
@@ -348,10 +353,12 @@ async function cleanupRunArtifactsWithDiagnostics(
   adapter: HostAdapter,
   record: HostRunRecord
 ): Promise<WorkflowCleanupResult> {
-  const cleanupError = await cleanupRunArtifacts(store, adapter, record);
+  const cleanupResult = await cleanupRunArtifacts(store, adapter, record);
   return {
-    diagnostics: cleanupError ? hostRunPersistDiagnostics(record.assignmentId, cleanupError) : [],
-    clearedLease: !cleanupError
+    diagnostics: cleanupResult.cleanupError
+      ? hostRunPersistDiagnostics(record.assignmentId, cleanupResult.cleanupError)
+      : [],
+    clearedLease: cleanupResult.clearedLease
   };
 }
 
@@ -846,19 +853,28 @@ async function cleanupRunArtifacts(
   store: RuntimeStore,
   adapter: HostAdapter,
   record: HostRunRecord
-): Promise<Error | undefined> {
+): Promise<WorkflowArtifactCleanupState> {
   let cleanupError: Error | undefined;
   try {
     await adapter.reconcileStaleRun(store, record);
   } catch (error) {
     cleanupError = error instanceof Error ? error : new Error(String(error));
   }
-  if (await adapter.hasRunLease(store, record.assignmentId)) {
-    return new Error(
+
+  const clearedLease = !(await adapter.hasRunLease(store, record.assignmentId));
+  if (!clearedLease) {
+    return {
+      clearedLease,
+      cleanupError: new Error(
       `Host run reconciliation failed to clear the active lease for assignment ${record.assignmentId}. ${
         cleanupError?.message ?? "The lease artifact remained on disk."
       }`
-    );
+      )
+    };
   }
-  return cleanupError;
+
+  return {
+    clearedLease,
+    ...(cleanupError ? { cleanupError } : {})
+  };
 }

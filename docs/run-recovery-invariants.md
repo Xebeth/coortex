@@ -254,6 +254,12 @@ the current assignment actually reflects a requeue. Operator warnings
 and telemetry for that path must describe hidden artifact cleanup
 truthfully.
 
+When stale-run or hidden-cleanup artifact rewriting clears the lease but
+still returns a non-terminal persistence warning, the command must keep
+that warning and still treat the cleanup as successful for reconciliation
+diagnostics and telemetry. A warning must not make the runtime behave as
+though the cleared lease were still present.
+
 When workflow mode is active, workflow-derived status is authoritative
 over later ad hoc status drift. The shared load path must re-sync
 operator-facing status from workflow truth when those views diverge.
