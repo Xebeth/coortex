@@ -1220,6 +1220,122 @@ test("ctx status ignores inactive legacy decisions that resume already filters",
   );
 });
 
+test("ctx resume emits a workflow-only envelope for repair-state workflows", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-repair-state-resume-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex", "runtime");
+  const snapshotPath = join(runtimeDir, "snapshot.json");
+  const snapshot = JSON.parse(
+    await readFile(snapshotPath, "utf8")
+  ) as {
+    status: {
+      activeMode: string;
+      currentObjective: string;
+      activeAssignmentIds: string[];
+      activeHost: string;
+      activeAdapter: string;
+      lastDurableOutputAt: string;
+      resumeReady: boolean;
+    };
+    workflowProgress?: {
+      workflowId: string;
+      orderedModuleIds: string[];
+      currentModuleId: string;
+      workflowCycle: number;
+      currentAssignmentId: string | null;
+      currentModuleAttempt: number;
+      modules: Record<string, {
+        moduleId: string;
+        workflowCycle: number;
+        moduleAttempt: number;
+        assignmentId: string | null;
+        moduleState: string;
+        sourceResultIds: string[];
+        sourceDecisionIds: string[];
+        artifactReferences: unknown[];
+        enteredAt: string;
+      }>;
+    };
+  };
+
+  snapshot.status = {
+    ...snapshot.status,
+    currentObjective: "Stale objective.",
+    activeAssignmentIds: ["missing-assignment"],
+    lastDurableOutputAt: "2026-04-14T14:00:00.000Z",
+    resumeReady: true
+  };
+  snapshot.workflowProgress = {
+    workflowId: "default",
+    orderedModuleIds: ["plan", "review", "verify"],
+    currentModuleId: "review",
+    workflowCycle: 1,
+    currentAssignmentId: null,
+    currentModuleAttempt: 1,
+    modules: {
+      review: {
+        moduleId: "review",
+        workflowCycle: 1,
+        moduleAttempt: 1,
+        assignmentId: null,
+        moduleState: "blocked",
+        sourceResultIds: [],
+        sourceDecisionIds: [],
+        artifactReferences: [],
+        enteredAt: "2026-04-14T14:00:00.000Z"
+      }
+    }
+  };
+
+  await writeFile(snapshotPath, JSON.stringify(snapshot, null, 2), "utf8");
+  await rm(join(runtimeDir, "events.ndjson"));
+
+  const resume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  const payload = JSON.parse(
+    resume.stdout.slice(resume.stdout.indexOf("{"))
+  ) as {
+    objective: string;
+    writeScope: string[];
+    recoveryBrief: {
+      activeAssignments: Array<{ id: string }>;
+      nextRequiredAction: string;
+    };
+    workflow?: {
+      id: string;
+      currentModuleId: string;
+      currentModuleState: string;
+      currentAssignmentId: string | null;
+      blockerReason?: string;
+    };
+    metadata: {
+      activeAssignmentId: string | null;
+    };
+  };
+
+  assert.equal(resume.exitCode, 0);
+  assert.match(resume.stdout, /Recovery brief generated for Inspect workflow default and repair runtime state\./);
+  assert.equal(payload.objective, "Inspect workflow default and repair runtime state.");
+  assert.deepEqual(payload.writeScope, []);
+  assert.deepEqual(payload.recoveryBrief.activeAssignments, []);
+  assert.equal(
+    payload.recoveryBrief.nextRequiredAction,
+    "Inspect workflow default and repair runtime state."
+  );
+  assert.equal(payload.workflow?.id, "default");
+  assert.equal(payload.workflow?.currentModuleId, "review");
+  assert.equal(payload.workflow?.currentModuleState, "blocked");
+  assert.equal(payload.workflow?.currentAssignmentId, null);
+  assert.equal(payload.workflow?.blockerReason, "Inspect workflow default and repair runtime state.");
+  assert.equal(payload.metadata.activeAssignmentId, null);
+});
+
 test("ctx inspect ignores a parseable but invalid convenience last-run pointer", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-invalid-last-run-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");

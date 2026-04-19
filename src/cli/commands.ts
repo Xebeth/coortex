@@ -156,7 +156,7 @@ export async function resumeRuntime(
   const diagnostics = [...workflowAware.diagnostics];
   const effectiveProjection = workflowAware.projection;
   const brief = buildRecoveryBrief(effectiveProjection);
-  if (brief.activeAssignments.length === 0) {
+  if (brief.activeAssignments.length === 0 && !effectiveProjection.workflowProgress) {
     throw new Error("No active assignment is available to resume.");
   }
   const envelope = await buildAndPersistWorkflowEnvelope(

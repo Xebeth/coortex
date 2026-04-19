@@ -192,6 +192,13 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   activeLeases.push(...finalLeaseClassification.activeLeases);
   hiddenActiveLeases.push(...finalLeaseClassification.hiddenActiveLeases);
 
+  if (!projection.workflowProgress && loaded.projection.workflowProgress) {
+    projection = {
+      ...projection,
+      workflowProgress: JSON.parse(JSON.stringify(loaded.projection.workflowProgress))
+    };
+  }
+
   return {
     projection,
     diagnostics,
