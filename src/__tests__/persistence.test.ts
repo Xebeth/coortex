@@ -8,9 +8,101 @@ import { randomUUID } from "node:crypto";
 import type { RuntimeConfig } from "../config/types.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
-import { toSnapshot } from "../projections/runtime-projection.js";
+import {
+  createEmptyProjection,
+  fromSnapshot,
+  toSnapshot
+} from "../projections/runtime-projection.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { nowIso } from "../utils/time.js";
+
+test("runtime snapshot conversion detaches projection records", () => {
+  const projection = createEmptyProjection("session-snapshot-detach", "/tmp/project", "codex");
+  projection.status = {
+    ...projection.status,
+    currentObjective: "Original objective",
+    activeAssignmentIds: ["assignment-1"]
+  };
+  projection.assignments.set("assignment-1", {
+    id: "assignment-1",
+    parentTaskId: "task-1",
+    workflow: "default",
+    ownerType: "human",
+    ownerId: "owner-1",
+    objective: "Original assignment objective",
+    writeScope: ["src/cli/commands.ts"],
+    requiredOutputs: ["summary"],
+    state: "queued",
+    createdAt: "2026-04-19T10:00:00.000Z",
+    updatedAt: "2026-04-19T10:00:00.000Z"
+  });
+  projection.results.set("result-1", {
+    resultId: "result-1",
+    assignmentId: "assignment-1",
+    producerId: "codex",
+    status: "completed",
+    summary: "Original result summary",
+    changedFiles: ["src/cli/commands.ts"],
+    createdAt: "2026-04-19T10:01:00.000Z"
+  });
+  projection.decisions.set("decision-1", {
+    decisionId: "decision-1",
+    assignmentId: "assignment-1",
+    requesterId: "codex",
+    blockerSummary: "Original blocker summary",
+    options: [{ id: "wait", label: "Wait", summary: "Pause." }],
+    recommendedOption: "wait",
+    state: "open",
+    createdAt: "2026-04-19T10:02:00.000Z"
+  });
+
+  const snapshot = toSnapshot(projection);
+  snapshot.status.currentObjective = "Snapshot objective";
+  snapshot.status.activeAssignmentIds.push("assignment-2");
+  snapshot.assignments[0]!.objective = "Snapshot assignment objective";
+  snapshot.assignments[0]!.writeScope.push("src/cli/ctx.ts");
+  snapshot.results[0]!.summary = "Snapshot result summary";
+  snapshot.results[0]!.changedFiles.push("src/cli/ctx.ts");
+  snapshot.decisions[0]!.blockerSummary = "Snapshot blocker summary";
+  snapshot.decisions[0]!.options[0]!.label = "Stop";
+
+  assert.equal(projection.status.currentObjective, "Original objective");
+  assert.deepEqual(projection.status.activeAssignmentIds, ["assignment-1"]);
+  assert.equal(
+    projection.assignments.get("assignment-1")?.objective,
+    "Original assignment objective"
+  );
+  assert.deepEqual(
+    projection.assignments.get("assignment-1")?.writeScope,
+    ["src/cli/commands.ts"]
+  );
+  assert.equal(projection.results.get("result-1")?.summary, "Original result summary");
+  assert.deepEqual(projection.results.get("result-1")?.changedFiles, ["src/cli/commands.ts"]);
+  assert.equal(projection.decisions.get("decision-1")?.blockerSummary, "Original blocker summary");
+  assert.equal(projection.decisions.get("decision-1")?.options[0]?.label, "Wait");
+
+  const hydrated = fromSnapshot(snapshot);
+  hydrated.status.currentObjective = "Hydrated objective";
+  hydrated.status.activeAssignmentIds.push("assignment-3");
+  hydrated.assignments.get("assignment-1")!.objective = "Hydrated assignment objective";
+  hydrated.assignments.get("assignment-1")!.writeScope.push("src/cli/run-operations.ts");
+  hydrated.results.get("result-1")!.summary = "Hydrated result summary";
+  hydrated.results.get("result-1")!.changedFiles.push("src/cli/run-operations.ts");
+  hydrated.decisions.get("decision-1")!.blockerSummary = "Hydrated blocker summary";
+  hydrated.decisions.get("decision-1")!.options[0]!.label = "Later";
+
+  assert.equal(snapshot.status.currentObjective, "Snapshot objective");
+  assert.deepEqual(snapshot.status.activeAssignmentIds, ["assignment-1", "assignment-2"]);
+  assert.equal(snapshot.assignments[0]?.objective, "Snapshot assignment objective");
+  assert.deepEqual(
+    snapshot.assignments[0]?.writeScope,
+    ["src/cli/commands.ts", "src/cli/ctx.ts"]
+  );
+  assert.equal(snapshot.results[0]?.summary, "Snapshot result summary");
+  assert.deepEqual(snapshot.results[0]?.changedFiles, ["src/cli/commands.ts", "src/cli/ctx.ts"]);
+  assert.equal(snapshot.decisions[0]?.blockerSummary, "Snapshot blocker summary");
+  assert.equal(snapshot.decisions[0]?.options[0]?.label, "Stop");
+});
 
 test("runtime store rebuilds projection from durable events and snapshots", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-"));
