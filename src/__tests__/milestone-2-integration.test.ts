@@ -256,6 +256,125 @@ test("milestone-2 integration: malformed claim suffixes after the snapshot bound
   );
 });
 
+test("milestone-2 integration: inspect context uses the active claim for the host run assignment", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in inspect-context claim selection coverage");
+  });
+  const sessionId = (await loadOperatorProjection(setup.store)).sessionId;
+  const activeTimestamp = "2026-04-19T10:00:00.000Z";
+  const staleCreatedTimestamp = "2026-04-19T10:05:00.000Z";
+  const staleReleasedTimestamp = "2026-04-19T10:10:00.000Z";
+  const staleReleaseReason = "stale claim should not override the active attachment context";
+  const hostRunRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    startedAt: activeTimestamp,
+    heartbeatAt: staleReleasedTimestamp,
+    leaseExpiresAt: "2026-04-19T10:20:00.000Z",
+    adapterData: {
+      nativeRunId: "smoke-thread-inspect-active-claim"
+    }
+  };
+
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, hostRunRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", hostRunRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, hostRunRecord);
+
+  const { attachmentId, claimId } = await appendAuthoritativeAttachmentClaim(setup, {
+    state: "attached",
+    nativeSessionId: "native-active-claim"
+  });
+  const staleAttachmentId = randomUUID();
+  const staleClaimId = randomUUID();
+
+  await setup.store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp: staleCreatedTimestamp,
+      type: "attachment.created",
+      payload: {
+        attachment: {
+          id: staleAttachmentId,
+          adapter: "codex",
+          host: "codex",
+          state: "attached",
+          createdAt: staleCreatedTimestamp,
+          updatedAt: staleCreatedTimestamp,
+          attachedAt: staleCreatedTimestamp,
+          nativeSessionId: "native-stale-claim",
+          provenance: {
+            kind: "resume",
+            source: "ctx.resume"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp: staleCreatedTimestamp,
+      type: "claim.created",
+      payload: {
+        claim: {
+          id: staleClaimId,
+          assignmentId: setup.assignmentId,
+          attachmentId: staleAttachmentId,
+          state: "active",
+          createdAt: staleCreatedTimestamp,
+          updatedAt: staleCreatedTimestamp,
+          provenance: {
+            kind: "resume",
+            source: "ctx.resume"
+          }
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp: staleReleasedTimestamp,
+      type: "attachment.updated",
+      payload: {
+        attachmentId: staleAttachmentId,
+        patch: {
+          state: "released",
+          updatedAt: staleReleasedTimestamp,
+          releasedAt: staleReleasedTimestamp,
+          releasedReason: staleReleaseReason
+        }
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp: staleReleasedTimestamp,
+      type: "claim.updated",
+      payload: {
+        claimId: staleClaimId,
+        patch: {
+          state: "released",
+          updatedAt: staleReleasedTimestamp,
+          releasedAt: staleReleasedTimestamp,
+          releasedReason: staleReleaseReason
+        }
+      }
+    }
+  ]);
+  await setup.store.syncSnapshotFromEvents();
+
+  const inspection = await inspectRuntimeRunWithContext(setup.store, setup.adapter, setup.assignmentId);
+
+  assert.equal(inspection?.hostRun.assignmentId, setup.assignmentId);
+  assert.deepEqual(inspection?.runtimeAttachment, {
+    id: attachmentId,
+    state: "attached",
+    nativeSessionId: "native-active-claim",
+    claimId,
+    claimState: "active"
+  });
+});
+
 test("milestone-2 integration: prepareResumeRuntime stays read-only against live lease blockers", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runExec should not be used in prepare-only smoke test");

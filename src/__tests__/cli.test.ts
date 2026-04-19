@@ -1197,6 +1197,102 @@ test("ctx status and inspect fail closed on one authoritative attachment claimed
   assert.equal(inspect.stdout.trim(), "");
 });
 
+test("ctx status reports the active claim for attachment ownership", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-active-claim-status-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const store = RuntimeStore.forProject(projectRoot);
+  const projection = await store.loadProjection();
+  const snapshot = (await store.loadSnapshot())!;
+  const primaryAssignmentId = projection.status.activeAssignmentIds[0]!;
+  const releasedAssignmentId = randomUUID();
+  const activeTimestamp = "2026-04-19T10:00:00.000Z";
+  const releasedTimestamp = "2026-04-19T10:10:00.000Z";
+  const attachmentId = randomUUID();
+  const nativeSessionId = "thread-cli-active-claim-status";
+
+  snapshot.attachments ??= [];
+  snapshot.claims ??= [];
+  snapshot.assignments.push({
+    id: releasedAssignmentId,
+    parentTaskId: "task-cli-active-claim-status",
+    workflow: "milestone-2",
+    ownerType: "host",
+    ownerId: "codex",
+    objective: "Released assignment for attachment status coverage.",
+    writeScope: ["README.md"],
+    requiredOutputs: ["result"],
+    state: "completed",
+    createdAt: releasedTimestamp,
+    updatedAt: releasedTimestamp
+  });
+  snapshot.attachments.push({
+    id: attachmentId,
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: activeTimestamp,
+    updatedAt: releasedTimestamp,
+    detachedAt: activeTimestamp,
+    nativeSessionId,
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+  snapshot.claims.push(
+    {
+      id: randomUUID(),
+      assignmentId: primaryAssignmentId,
+      attachmentId,
+      state: "active",
+      createdAt: activeTimestamp,
+      updatedAt: activeTimestamp,
+      provenance: {
+        kind: "launch",
+        source: "ctx.run"
+      }
+    },
+    {
+      id: randomUUID(),
+      assignmentId: releasedAssignmentId,
+      attachmentId,
+      state: "released",
+      createdAt: releasedTimestamp,
+      updatedAt: releasedTimestamp,
+      releasedAt: releasedTimestamp,
+      releasedReason: "Released claims should not displace active attachment ownership.",
+      provenance: {
+        kind: "resume",
+        source: "ctx.resume"
+      }
+    }
+  );
+  await store.writeSnapshot(snapshot);
+  await store.rewriteEventLog([]);
+
+  const status = await runCliCommand(cliPath, "status", { cwd: projectRoot });
+
+  assert.equal(status.exitCode, 0);
+  assert.match(status.stdout, new RegExp(`Active attachment claims: 1`));
+  assert.match(
+    status.stdout,
+    new RegExp(
+      `- attachment ${escapeRegExp(attachmentId)} detached_resumable assignment ${escapeRegExp(primaryAssignmentId)} native-session ${nativeSessionId}`
+    )
+  );
+  assert.doesNotMatch(
+    status.stdout,
+    new RegExp(
+      `- attachment ${escapeRegExp(attachmentId)} detached_resumable assignment ${escapeRegExp(releasedAssignmentId)} native-session ${nativeSessionId}`
+    )
+  );
+});
+
 test("ctx status reconciles stale host run leases before reporting active work", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-stale-status-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");

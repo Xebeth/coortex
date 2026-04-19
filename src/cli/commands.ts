@@ -18,6 +18,7 @@ import type {
 } from "../core/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import {
+  getActiveClaimForAssignment,
   listAuthoritativeAttachmentClaims,
   listResumableAttachmentClaims,
   selectSingleAuthoritativeAttachmentClaim,
@@ -872,21 +873,17 @@ export async function inspectRuntimeRunWithContext(
   if (!hostRun) {
     return undefined;
   }
-  const claim = [...projection.claims.values()]
-    .filter((candidate) => candidate.assignmentId === hostRun.assignmentId)
-    .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
-    .at(-1);
-  const attachment = claim ? projection.attachments.get(claim.attachmentId) : undefined;
+  const binding = getActiveClaimForAssignment(projection, hostRun.assignmentId);
   return {
     hostRun,
-    ...(attachment
+    ...(binding
       ? {
           runtimeAttachment: {
-            id: attachment.id,
-            state: attachment.state,
-            nativeSessionId: attachment.nativeSessionId ?? "",
-            claimId: claim?.id ?? "",
-            claimState: claim?.state ?? ""
+            id: binding.attachment.id,
+            state: binding.attachment.state,
+            nativeSessionId: binding.attachment.nativeSessionId ?? "",
+            claimId: binding.claim.id,
+            claimState: binding.claim.state
           }
         }
       : {})

@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type { HostAdapter } from "../adapters/contract.js";
 import { isWrappedResumeCapableAttachment } from "../core/types.js";
 import { getNativeRunId } from "../core/run-state.js";
+import { listActiveClaimBindings } from "../projections/attachment-claim-queries.js";
 import { RuntimeStore, toPrettyJson } from "../persistence/store.js";
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
 import type { RuntimeConfig } from "../config/types.js";
@@ -138,7 +139,10 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   const attachments = [...projection.attachments.values()].sort((left, right) =>
     left.createdAt.localeCompare(right.createdAt)
   );
-  const activeClaims = [...projection.claims.values()].filter((claim) => claim.state === "active");
+  const activeClaimBindings = listActiveClaimBindings(projection);
+  const activeClaimByAttachmentId = new Map(
+    activeClaimBindings.map(({ attachment, claim }) => [attachment.id, claim] as const)
+  );
   const provisionalAttachments = attachments.filter((attachment) => attachment.state === "provisional");
   const authoritativeAttachments = attachments.filter((attachment) =>
     attachment.state === "attached" ||
@@ -157,7 +161,7 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
   console.log(`Provisional attachments: ${provisionalAttachments.length}`);
   console.log(`Authoritative attachments: ${authoritativeAttachments.length}`);
   console.log(`Resumable attachments: ${resumableAttachments.length}`);
-  console.log(`Active attachment claims: ${activeClaims.length}`);
+  console.log(`Active attachment claims: ${activeClaimBindings.length}`);
   console.log(`Live host run leases: ${activeLeases.length}`);
   console.log(`Results: ${projection.results.size}`);
   console.log(`Open decisions: ${openDecisions.length}`);
@@ -165,10 +169,7 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     console.log(`- ${assignment.id} ${assignment.state} ${assignment.objective}`);
   }
   for (const attachment of attachments) {
-    const claim = [...projection.claims.values()]
-      .filter((candidate) => candidate.attachmentId === attachment.id)
-      .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
-      .at(-1);
+    const claim = activeClaimByAttachmentId.get(attachment.id);
     console.log(
       `- attachment ${attachment.id} ${attachment.state} assignment ${claim?.assignmentId ?? "n/a"} native-session ${
         attachment.nativeSessionId ?? "n/a"
