@@ -523,7 +523,7 @@ async function reconcileCompletedRunRecord(
       changed = true;
     }
   }
-  if (options.snapshotFallback && !effectiveProjection.assignments.has(record.assignmentId)) {
+  if (!effectiveProjection.assignments.has(record.assignmentId)) {
     return {
       projection: effectiveProjection,
       changed,

@@ -966,6 +966,57 @@ test("milestone-2 integration: recovered legacy decisions preserve durable host 
   assert.equal(run.envelope.metadata.recoveredOutcome, true);
 });
 
+test("milestone-2 integration: inspect exposes the active assignment in legacy mode without a host run", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in legacy inspect smoke test");
+  });
+  await stripWorkflowStateFromRuntime(setup.store);
+
+  const inspected = await inspectRuntimeContext(setup.store, setup.adapter);
+
+  assert.equal(inspected.record?.workflow, null);
+  assert.equal(inspected.record?.assignment?.id, setup.assignmentId);
+  assert.equal(inspected.record?.assignment?.state, "queued");
+  assert.equal(inspected.record?.run, null);
+});
+
+test("milestone-2 integration: inspect prefers the active legacy assignment over an unrelated last run", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner should not be used in legacy inspect precedence smoke test");
+  });
+  await stripWorkflowStateFromRuntime(setup.store);
+
+  const unrelatedRun: HostRunRecord = {
+    assignmentId: randomUUID(),
+    state: "completed",
+    adapterData: { nativeRunId: "legacy-inspect-unrelated-thread" },
+    startedAt: new Date(Date.now() - 30_000).toISOString(),
+    completedAt: new Date(Date.now() - 20_000).toISOString(),
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Unrelated legacy last-run record.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "legacy-inspect-unrelated-result",
+        producerId: "codex",
+        status: "completed",
+        summary: "Unrelated legacy last-run record.",
+        changedFiles: [],
+        createdAt: new Date(Date.now() - 20_000).toISOString()
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${unrelatedRun.assignmentId}.json`, unrelatedRun);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", unrelatedRun);
+
+  const inspected = await inspectRuntimeContext(setup.store, setup.adapter);
+
+  assert.equal(inspected.record?.workflow, null);
+  assert.equal(inspected.record?.assignment?.id, setup.assignmentId);
+  assert.equal(inspected.record?.run, null);
+});
+
 test("milestone-2 integration: run surfaces a recovered verify completion after the workflow closes", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in recovered verify completion smoke test");

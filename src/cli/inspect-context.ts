@@ -44,9 +44,12 @@ export async function loadInspectRuntimeContext(
   }
 
   const workflowAssignmentId = loaded.projection.workflowProgress?.currentAssignmentId;
+  const activeAssignmentId = loaded.projection.status.activeAssignmentIds.find((candidateAssignmentId) =>
+    loaded.projection.assignments.has(candidateAssignmentId)
+  );
   const inspectedLastRun = await inspectVisibleRun();
   const lastRun = inspectedLastRun.visibleRun;
-  const targetAssignmentId = workflowAssignmentId ?? lastRun?.assignmentId;
+  const targetAssignmentId = workflowAssignmentId ?? activeAssignmentId ?? lastRun?.assignmentId;
   const assignment = targetAssignmentId
     ? loaded.projection.assignments.get(targetAssignmentId)
     : undefined;
