@@ -1,10 +1,22 @@
 baseline_version: 1
-updated_at: "2026-04-17"
+updated_at: "2026-04-19"
+
+baseline_kind: "primary"
 
 reviewer_model_recommendation:
   model: "gpt-5.4"
   reasoning_effort: "xhigh"
   reason: "Routine review in this repo is boundary-heavy, defect-family oriented, and often spans lifecycle, recovery, persistence, and adapter seams."
+
+alternative_baselines:
+  - id: "m2-seams"
+    name: "M2 Seam Review"
+    purpose: "Finer seam-focused review for M2 attachment, recovery, CLI orchestration, and Codex adapter cleanup."
+    path: "docs/review-baselines/m2-seams.yaml"
+    when_to_use:
+      - "targeted M2 maintainability cleanup by owning seam"
+      - "reviews where commands.ts or reconciliation need cleaner ownership than the primary baseline provides"
+      - "archaeology-informed seam reviews after broad branch inventory"
 
 surfaces:
   - id: "runtime-authority"
@@ -15,7 +27,6 @@ surfaces:
       - "src/projections/**"
     supporting_anchors:
       - "src/cli/attachment-lifecycle.ts"
-      - "src/cli/attachment-claim-queries.ts"
       - "src/__tests__/milestone-2-integration.test.ts"
       - "src/__tests__/host-run-recovery-matrix.test.ts"
     contract_docs:
@@ -100,13 +111,11 @@ surfaces:
     purpose: "Review CLI-owned lifecycle mutation, reconciliation orchestration, and recovery-side durable mutation application."
     primary_anchors:
       - "src/cli/attachment-lifecycle.ts"
-      - "src/cli/attachment-claim-queries.ts"
       - "src/cli/run-reconciliation.ts"
       - "src/cli/host-run-cleanup.ts"
       - "src/cli/projection-write.ts"
       - "src/cli/run-operations.ts"
     supporting_anchors:
-      - "src/cli/commands.ts"
       - "src/__tests__/host-run-recovery-matrix.test.ts"
       - "src/__tests__/milestone-2-integration.test.ts"
       - "src/__tests__/recovery.test.ts"
