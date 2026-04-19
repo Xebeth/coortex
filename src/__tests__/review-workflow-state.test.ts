@@ -137,6 +137,82 @@ test("seam walkback helper reports the changed files for one commit", async () =
 });
 
 
+test("seam walkback helper initializes and appends validated trace records", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walkback-trace-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  const init = await runPythonJson(seamWalkbackStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "seam-walkback-review-test"
+  ]);
+
+  assert.equal(init.exitCode, 0);
+  const initJson = init.json as { coordinator_file: string; trace_dir: string; run_id: string };
+  assert.equal(initJson.run_id, "seam-walkback-review-test");
+  assert.equal(initJson.trace_dir, join(tempDir, ".coortex", "review-trace", "seam-walkback-review-test"));
+  const started = await readFile(initJson.coordinator_file, "utf8");
+  assert.match(started, /"phase": "trace_started"/);
+
+  const recordPath = join(tempDir, "archaeology.json");
+  await writeFile(
+    recordPath,
+    JSON.stringify(
+      {
+        run_id: "seam-walkback-review-test",
+        timestamp_utc: "2026-04-19T19:00:00Z",
+        skill: "seam-walkback-review",
+        phase: "archaeology_cluster",
+        worktree_root: tempDir,
+        cluster_id: "cluster-b",
+        scope_summary: "Inspect seam extraction commits for CLI ownership drift.",
+        pivot_commits: ["abc123", "def456"],
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  const append = await runPythonJson(seamWalkbackStateScript, [
+    "append-trace",
+    "--trace-file",
+    initJson.coordinator_file,
+    "--record-file",
+    recordPath,
+  ]);
+
+  assert.equal(append.exitCode, 0);
+  const traceLines = (await readFile(initJson.coordinator_file, "utf8")).trim().split("\n");
+  assert.equal(traceLines.length, 2);
+  assert.match(traceLines[1] ?? "", /"phase": "archaeology_cluster"/);
+
+  const invalid = await runPythonJson(seamWalkbackStateScript, [
+    "append-trace",
+    "--trace-file",
+    initJson.coordinator_file,
+    "--record-json",
+    JSON.stringify({
+      run_id: "seam-walkback-review-test",
+      timestamp_utc: "2026-04-19T19:01:00Z",
+      skill: "seam-walkback-review",
+      phase: "repair_step",
+      worktree_root: tempDir,
+      owning_seam: "src/cli/commands.ts",
+    }),
+  ]);
+
+  assert.equal(invalid.exitCode, 1);
+  const invalidJson = invalid.json as { appended: boolean; errors: string[] };
+  assert.equal(invalidJson.appended, false);
+  assert.match(invalidJson.errors[0] ?? "", /write_set/);
+});
+
+
 test("seam walkback helper still classifies fix-shaped pivots without inline file lists", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walkback-"));
 

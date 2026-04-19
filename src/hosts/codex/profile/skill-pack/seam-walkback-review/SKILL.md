@@ -102,6 +102,10 @@ Use the bundled helper in this skill for the git-side mechanics:
   to capture current branch state, merge base, dirty files, and recent commits
 - `scripts/walkback_state.py commit-files <sha>` to emit the changed-file set
   for a pivot commit while doing archaeology
+- `scripts/walkback_state.py init-trace --project-root .` to create or resume a
+  first-class seam-walkback trace directory
+- `scripts/walkback_state.py append-trace --trace-file <path> --record-file <json-file>`
+  to append validated phase-boundary trace records
 
 Reuse the existing deterministic helper in `$review-orchestrator` for baseline
 resolution and narrowing instead of inventing a second implementation:
@@ -114,6 +118,7 @@ repeatability:
 
 - current worktree and merge-base inventory
 - per-commit changed-file lookup during archaeology
+- seam-walkback trace directory and JSONL record handling
 - baseline resolution
 - baseline narrowing validation
 
@@ -122,6 +127,10 @@ consolidation are still judgment-heavy and should remain in the skill text until
 a stable deterministic pattern emerges.
 
 ## Workflow
+
+Before the workflow phases below, create or resume a seam-walkback trace via the
+bundled helper and append phase-boundary records as described in
+`references/trace-artifact.md`.
 
 ### 1. Check runtime and worktree state
 

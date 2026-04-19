@@ -2,10 +2,115 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+KNOWN_TRACE_PHASES: dict[str, dict[str, str]] = {
+    "trace_started": {},
+    "archaeology_cluster": {
+        "cluster_id": "string",
+        "scope_summary": "string",
+        "pivot_commits": "list",
+    },
+    "seam_selection": {
+        "seam_id": "string",
+        "reason": "string",
+    },
+    "baseline_action": {
+        "action": "string",
+    },
+    "review_step": {
+        "review_skill": "string",
+        "scope_summary": "string",
+    },
+    "repair_step": {
+        "owning_seam": "string",
+        "write_set": "list",
+    },
+    "deslop_step": {
+        "scope_files": "list",
+    },
+    "verification": {
+        "verification_run": "list",
+    },
+    "atomic_commit": {
+        "commit_sha": "string",
+        "commit_subject": "string",
+    },
+    "final_walkback": {
+        "outcome_summary": "string",
+    },
+}
+
+
+def utc_now_compact() -> str:
+    return dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
+def utc_now_iso() -> str:
+    return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def default_run_id() -> str:
+    return f"seam-walkback-review-{utc_now_compact()}"
+
+
+def load_json_argument(record_json: str | None, record_file: str | None) -> dict[str, Any]:
+    if record_json is not None:
+        data = json.loads(record_json)
+    elif record_file is not None:
+        data = json.loads(Path(record_file).read_text(encoding="utf-8"))
+    else:
+        raise SystemExit("expected --record-json or --record-file")
+    if not isinstance(data, dict):
+        raise SystemExit("trace record must be a JSON object")
+    return data
+
+
+def require_trace_field_type(
+    record: dict[str, Any],
+    field: str,
+    expected: str,
+    errors: list[str],
+    prefix: str,
+) -> None:
+    if field not in record:
+        errors.append(f"{prefix} missing {field}")
+        return
+    value = record[field]
+    if expected == "string":
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"{prefix} field {field} must be a non-empty string")
+    elif expected == "list":
+        if not isinstance(value, list):
+            errors.append(f"{prefix} field {field} must be a list")
+
+
+def validate_trace_record(record: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    prefix = "trace record"
+    for field, expected in {
+        "run_id": "string",
+        "timestamp_utc": "string",
+        "skill": "string",
+        "phase": "string",
+        "worktree_root": "string",
+    }.items():
+        require_trace_field_type(record, field, expected, errors, prefix)
+
+    phase = record.get("phase")
+    if not isinstance(phase, str) or phase not in KNOWN_TRACE_PHASES:
+        errors.append(f"{prefix} has invalid phase {phase!r}")
+        return errors
+
+    for field, expected in KNOWN_TRACE_PHASES[phase].items():
+        require_trace_field_type(record, field, expected, errors, f"{prefix} phase {phase!r}")
+
+    return errors
 
 
 def run_git(args: list[str], cwd: Path) -> str:
@@ -122,6 +227,51 @@ def commit_files(args: argparse.Namespace) -> int:
     return 0
 
 
+def init_trace(args: argparse.Namespace) -> int:
+    run_id = args.run_id or default_run_id()
+    project_root = Path(args.project_root).resolve()
+    trace_root_arg = Path(args.trace_root)
+    trace_root = (project_root / trace_root_arg).resolve() if not trace_root_arg.is_absolute() else trace_root_arg.resolve()
+    trace_dir = trace_root / run_id
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    coordinator_file = trace_dir / "coordinator.jsonl"
+    if not coordinator_file.exists() or coordinator_file.stat().st_size == 0:
+        record = {
+            "run_id": run_id,
+            "timestamp_utc": utc_now_iso(),
+            "skill": "seam-walkback-review",
+            "phase": "trace_started",
+            "worktree_root": str(project_root),
+        }
+        coordinator_file.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "trace_dir": str(trace_dir),
+                "coordinator_file": str(coordinator_file),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def append_trace(args: argparse.Namespace) -> int:
+    trace_file = Path(args.trace_file).resolve()
+    trace_file.parent.mkdir(parents=True, exist_ok=True)
+    record = load_json_argument(args.record_json, args.record_file)
+    errors = validate_trace_record(record)
+    if errors:
+        print(json.dumps({"trace_file": str(trace_file), "appended": False, "errors": errors}, indent=2, sort_keys=True))
+        return 1
+    with trace_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    print(json.dumps({"trace_file": str(trace_file), "appended": True}, indent=2, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deterministic seam-walkback state helpers.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -147,6 +297,25 @@ def build_parser() -> argparse.ArgumentParser:
     commit_files_parser.add_argument("commit")
     commit_files_parser.add_argument("--project-root", default=".")
     commit_files_parser.set_defaults(func=commit_files)
+
+    init_trace_parser = subparsers.add_parser(
+        "init-trace",
+        help="Create or resume the seam-walkback run trace directory and coordinator file.",
+    )
+    init_trace_parser.add_argument("--trace-root", default=".coortex/review-trace")
+    init_trace_parser.add_argument("--project-root", default=".")
+    init_trace_parser.add_argument("--run-id")
+    init_trace_parser.set_defaults(func=init_trace)
+
+    append_trace_parser = subparsers.add_parser(
+        "append-trace",
+        help="Append one JSON record to a seam-walkback trace JSONL file.",
+    )
+    append_trace_parser.add_argument("--trace-file", required=True)
+    append_trace_group = append_trace_parser.add_mutually_exclusive_group(required=True)
+    append_trace_group.add_argument("--record-json")
+    append_trace_group.add_argument("--record-file")
+    append_trace_parser.set_defaults(func=append_trace)
 
     return parser
 
