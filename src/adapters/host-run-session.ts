@@ -147,38 +147,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         await stopHostRun(running);
       }
       await pendingRunningWrite;
-      const completedAt = nowIso();
-      const outcome = ensureStableOutcomeIds(input.buildFailedOutcome(
-        input.assignmentId,
-        completedAt,
-        input.summarizeExecutionFailure(error)
-      ));
-      const runRecord = buildCompletedRunRecord(
-        outcome,
-        input.assignmentId,
-        input.startedAt,
-        completedAt,
-        {
-          nativeRunId: getNativeRunId(runningRecord),
-          workflowAttempt: runningRecord.workflowAttempt
-        }
-      );
-      const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
-      return {
-        ...outcome,
-        run: runRecord,
-        ...(warning ? { warning } : {}),
-        telemetry: {
-          eventType: "host.run.completed",
-          taskId: input.taskId,
-          assignmentId: input.assignmentId,
-          metadata: {
-            nativeRunId: getNativeRunId(runningRecord) ?? "",
-            exitCode: -1,
-            outcomeKind: outcome.outcome.kind
-          }
-        }
-      };
+      return buildFailedRunOutcome(input, runningRecord, error, -1, collectWarnings);
     } finally {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
@@ -190,68 +159,33 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
       await pendingRunningWrite;
       const completedAt = nowIso();
       const completed = await input.deriveCompleted(execution, getNativeRunId(runningRecord));
-      const outcome = ensureStableOutcomeIds(completed.outcome);
-      const runRecord = buildCompletedRunRecord(
-        outcome,
-        input.assignmentId,
-        input.startedAt,
+      const completionOptions: {
+        nativeRunId?: string;
+        usage?: HostTelemetryCapture["usage"];
+      } = {};
+      if (completed.nativeRunId) {
+        completionOptions.nativeRunId = completed.nativeRunId;
+      }
+      if (completed.usage) {
+        completionOptions.usage = completed.usage;
+      }
+      return buildCompletedRunExecution(
+        input,
+        runningRecord,
         completedAt,
-        {
-          nativeRunId: completed.nativeRunId,
-          workflowAttempt: runningRecord.workflowAttempt
-        }
+        execution.exitCode,
+        completed.outcome,
+        collectWarnings,
+        completionOptions
       );
-      const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
-
-      return {
-        ...outcome,
-        run: runRecord,
-        ...(warning ? { warning } : {}),
-        telemetry: {
-          eventType: "host.run.completed",
-          taskId: input.taskId,
-          assignmentId: input.assignmentId,
-          metadata: {
-            nativeRunId: completed.nativeRunId ?? "",
-            exitCode: execution.exitCode,
-            outcomeKind: outcome.outcome.kind
-          },
-          ...(completed.usage ? { usage: completed.usage } : {})
-        }
-      };
     } catch (error) {
-      const completedAt = nowIso();
-      const outcome = ensureStableOutcomeIds(input.buildFailedOutcome(
-        input.assignmentId,
-        completedAt,
-        input.summarizeExecutionFailure(error)
-      ));
-      const runRecord = buildCompletedRunRecord(
-        outcome,
-        input.assignmentId,
-        input.startedAt,
-        completedAt,
-        {
-          nativeRunId: getNativeRunId(runningRecord),
-          workflowAttempt: runningRecord.workflowAttempt
-        }
+      return buildFailedRunOutcome(
+        input,
+        runningRecord,
+        error,
+        execution.exitCode,
+        collectWarnings
       );
-      const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
-      return {
-        ...outcome,
-        run: runRecord,
-        ...(warning ? { warning } : {}),
-        telemetry: {
-          eventType: "host.run.completed",
-          taskId: input.taskId,
-          assignmentId: input.assignmentId,
-          metadata: {
-            nativeRunId: getNativeRunId(runningRecord) ?? "",
-            exitCode: execution.exitCode,
-            outcomeKind: outcome.outcome.kind
-          }
-        }
-      };
     }
   })();
 
@@ -287,6 +221,79 @@ function ensureStableOutcomeIds(
       }
     }
   };
+}
+
+async function buildCompletedRunExecution<TExecution extends { exitCode: number }>(
+  input: ExecuteHostRunSessionInput<TExecution>,
+  runningRecord: HostRunRecord,
+  completedAt: string,
+  exitCode: number,
+  rawOutcome: Pick<HostExecutionOutcome, "outcome">,
+  collectWarnings: (...warnings: Array<string | undefined>) => string | undefined,
+  options?: {
+    nativeRunId?: string;
+    usage?: HostTelemetryCapture["usage"];
+  }
+): Promise<HostExecutionOutcome> {
+  const outcome = ensureStableOutcomeIds(rawOutcome);
+  const runRecord = buildCompletedRunRecord(
+    outcome,
+    input.assignmentId,
+    input.startedAt,
+    completedAt,
+    {
+      nativeRunId: options?.nativeRunId,
+      workflowAttempt: runningRecord.workflowAttempt
+    }
+  );
+  const warning = collectWarnings(await input.runStore.persistWarning(runRecord));
+
+  return {
+    ...outcome,
+    run: runRecord,
+    ...(warning ? { warning } : {}),
+    telemetry: {
+      eventType: "host.run.completed",
+      taskId: input.taskId,
+      assignmentId: input.assignmentId,
+      metadata: {
+        nativeRunId: options?.nativeRunId ?? "",
+        exitCode,
+        outcomeKind: outcome.outcome.kind
+      },
+      ...(options?.usage ? { usage: options.usage } : {})
+    }
+  };
+}
+
+function buildFailedRunOutcome<TExecution extends { exitCode: number }>(
+  input: ExecuteHostRunSessionInput<TExecution>,
+  runningRecord: HostRunRecord,
+  error: unknown,
+  exitCode: number,
+  collectWarnings: (...warnings: Array<string | undefined>) => string | undefined
+): Promise<HostExecutionOutcome> {
+  const completedAt = nowIso();
+  const failureOptions: {
+    nativeRunId?: string;
+  } = {};
+  const nativeRunId = getNativeRunId(runningRecord);
+  if (nativeRunId) {
+    failureOptions.nativeRunId = nativeRunId;
+  }
+  return buildCompletedRunExecution(
+    input,
+    runningRecord,
+    completedAt,
+    exitCode,
+    input.buildFailedOutcome(
+      input.assignmentId,
+      completedAt,
+      input.summarizeExecutionFailure(error)
+    ),
+    collectWarnings,
+    failureOptions
+  );
 }
 
 async function stopHostRun<TExecution>(running: HostRunHandle<TExecution>): Promise<void> {
