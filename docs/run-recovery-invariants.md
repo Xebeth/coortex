@@ -300,9 +300,13 @@ the new durable-output timestamp.
   When multiple active assignments exist, it must build the envelope and
   recovery brief from the assignment actually being executed.
   In workflow mode, it must execute only the current workflow
-  assignment. When workflow truth has no runnable current assignment,
-  it must surface the workflow's derived next action or completion
-  guidance instead of a generic missing-assignment error.
+  assignment. If a durable terminal run still needs recovery for the
+  workflow-owned assignment, `ctx run` must surface that recovered
+  execution before falling back to derived next-action or completion
+  guidance. When workflow truth has no runnable current assignment and
+  no recoverable terminal run remains, it must surface the workflow's
+  derived next action or completion guidance instead of a generic
+  missing-assignment error.
 
 ---
 

@@ -1820,6 +1820,51 @@ test("ctx status and resume recover terminal workflow results after completion",
   assert.equal(payload.metadata.activeAssignmentId, null);
 });
 
+test("ctx run recovers terminal workflow results before reporting completion", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
+    await createCompletedWorkflowTerminalResultRecoverySetup();
+
+  const run = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot
+  });
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{
+      resultId: string;
+      assignmentId: string;
+      producerId: string;
+      status: string;
+      summary: string;
+      changedFiles: string[];
+      createdAt: string;
+    }>;
+    workflowProgress: { currentAssignmentId: string | null; currentModuleId: string };
+  };
+
+  assert.equal(run.exitCode, 0);
+  assert.match(run.stderr, /WARNING completed-run-reconciled/);
+  assert.equal(run.stdout.includes("Workflow default complete."), false);
+  assert.match(run.stdout, /Workflow: default/);
+  assert.match(run.stdout, /Module: verify/);
+  assert.match(run.stdout, /Result \(completed\): Recovered completed terminal workflow result\./);
+  assert.equal(repairedSnapshot.workflowProgress.currentAssignmentId, null);
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "verify");
+  assert.deepEqual(repairedSnapshot.results, [{
+    resultId: "result-cli-completed-workflow-result",
+    assignmentId,
+    producerId: "codex",
+    status: "completed",
+    summary: "Recovered completed terminal workflow result.",
+    changedFiles: ["src/cli/ctx.ts"],
+    createdAt: completedAt
+  }]);
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
 test("ctx inspect ignores a parseable but invalid convenience last-run pointer", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-invalid-last-run-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
