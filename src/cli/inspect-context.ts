@@ -46,6 +46,22 @@ export async function loadInspectRuntimeContext(
     };
   }
 
+  if (loaded.recoveredRunRecord) {
+    const recoveredAssignment = loaded.projection.assignments.get(
+      loaded.recoveredRunRecord.assignmentId
+    );
+    const recoveredRun = selectWorkflowVisibleRunRecord(
+      loaded.projection,
+      loaded.recoveredRunRecord
+    );
+    if (recoveredAssignment || recoveredRun) {
+      return {
+        diagnostics: loaded.diagnostics,
+        record: buildInspectRecord(workflow, recoveredAssignment, recoveredRun)
+      };
+    }
+  }
+
   const workflowAssignmentId = selectWorkflowOwnedRunAssignmentId(loaded.projection);
   const activeAssignmentId = loaded.projection.status.activeAssignmentIds.find((candidateAssignmentId) =>
     loaded.projection.assignments.has(candidateAssignmentId)
