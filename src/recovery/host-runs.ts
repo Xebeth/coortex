@@ -68,6 +68,24 @@ export interface WorkflowRunHandling {
   cleanupRecord?: HostRunRecord;
 }
 
+export function selectWorkflowOwnedRunAssignmentId(
+  projection: RuntimeProjection
+): string | undefined {
+  const progress = projection.workflowProgress;
+  if (!progress) {
+    return undefined;
+  }
+  if (progress.currentAssignmentId) {
+    return progress.currentAssignmentId;
+  }
+  if (progress.lastTransition?.transition !== "complete") {
+    return undefined;
+  }
+  return progress.modules[progress.currentModuleId]?.assignmentId
+    ?? progress.lastTransition.previousAssignmentId
+    ?? undefined;
+}
+
 export function buildWorkflowStaleRunRecovery(
   record: HostRunRecord,
   timestamp = nowIso()
@@ -147,7 +165,7 @@ export function deriveWorkflowRunTruth(
     hasLeaseArtifact: boolean;
   }
 ): WorkflowRunTruth {
-  const isCurrentAssignment = projection.workflowProgress?.currentAssignmentId === record.assignmentId;
+  const isCurrentAssignment = selectWorkflowOwnedRunAssignmentId(projection) === record.assignmentId;
   const missingAttemptIdentity = isCurrentAssignment && isCurrentWorkflowAttemptIdentityMissing(projection, record);
   const beforeCurrentAttempt = isCurrentAssignment &&
     !missingAttemptIdentity &&
@@ -207,8 +225,8 @@ export function selectWorkflowVisibleRunRecord(
   if (!record) {
     return undefined;
   }
-  const currentAssignmentId = projection.workflowProgress?.currentAssignmentId;
-  if (!currentAssignmentId || currentAssignmentId !== record.assignmentId) {
+  const workflowOwnedAssignmentId = selectWorkflowOwnedRunAssignmentId(projection);
+  if (!workflowOwnedAssignmentId || workflowOwnedAssignmentId !== record.assignmentId) {
     return record;
   }
   return (
@@ -371,8 +389,8 @@ function isRecoverableWorkflowCompletedRun(
   if (record.state !== "completed" || !record.terminalOutcome) {
     return false;
   }
-  const currentAssignmentId = projection.workflowProgress?.currentAssignmentId;
-  if (!currentAssignmentId || currentAssignmentId !== record.assignmentId) {
+  const workflowOwnedAssignmentId = selectWorkflowOwnedRunAssignmentId(projection);
+  if (!workflowOwnedAssignmentId || workflowOwnedAssignmentId !== record.assignmentId) {
     return false;
   }
   if (isCurrentWorkflowAttemptIdentityMissing(projection, record) ||
@@ -389,8 +407,8 @@ function isCurrentWorkflowStaleCandidate(
   projection: RuntimeProjection,
   record: HostRunRecord
 ): boolean {
-  const currentAssignmentId = projection.workflowProgress?.currentAssignmentId;
-  if (!currentAssignmentId || currentAssignmentId !== record.assignmentId) {
+  const workflowOwnedAssignmentId = selectWorkflowOwnedRunAssignmentId(projection);
+  if (!workflowOwnedAssignmentId || workflowOwnedAssignmentId !== record.assignmentId) {
     return false;
   }
   return isWorkflowStaleMetadata(record);
@@ -407,9 +425,10 @@ function hasRecoveredResult(
   projection: RuntimeProjection,
   result: Extract<NonNullable<HostRunRecord["terminalOutcome"]>, { kind: "result" }>["result"]
 ): boolean {
+  const workflowOwnedAssignmentId = selectWorkflowOwnedRunAssignmentId(projection);
   return [...projection.results.values()].some(
     (candidate) =>
-      candidate.assignmentId === projection.workflowProgress?.currentAssignmentId &&
+      candidate.assignmentId === workflowOwnedAssignmentId &&
       ((result.resultId && candidate.resultId === result.resultId) ||
         (candidate.status === result.status &&
           candidate.summary === result.summary &&
@@ -421,9 +440,10 @@ function hasRecoveredDecision(
   projection: RuntimeProjection,
   decision: Extract<NonNullable<HostRunRecord["terminalOutcome"]>, { kind: "decision" }>["decision"]
 ): boolean {
+  const workflowOwnedAssignmentId = selectWorkflowOwnedRunAssignmentId(projection);
   return [...projection.decisions.values()].some(
     (candidate) =>
-      candidate.assignmentId === projection.workflowProgress?.currentAssignmentId &&
+      candidate.assignmentId === workflowOwnedAssignmentId &&
       ((decision.decisionId && candidate.decisionId === decision.decisionId) ||
         (candidate.blockerSummary === decision.blockerSummary &&
           candidate.recommendedOption === decision.recommendedOption &&
@@ -474,7 +494,7 @@ function hasDurableWorkflowOutcomeForRunRecord(
 function hasDurableWorkflowOutcomeForCurrentAssignment(
   projection: RuntimeProjection
 ): boolean {
-  const assignmentId = projection.workflowProgress?.currentAssignmentId;
+  const assignmentId = selectWorkflowOwnedRunAssignmentId(projection);
   if (!assignmentId) {
     return false;
   }
@@ -520,7 +540,7 @@ function currentWorkflowAttemptIdentity(
   projection: RuntimeProjection
 ): WorkflowRunAttemptIdentity | undefined {
   const progress = projection.workflowProgress;
-  if (!progress?.currentAssignmentId) {
+  if (!progress || !selectWorkflowOwnedRunAssignmentId(projection)) {
     return undefined;
   }
   return {
@@ -536,7 +556,7 @@ function isCurrentWorkflowAttemptIdentityMissing(
   record: HostRunRecord
 ): boolean {
   return Boolean(
-    projection.workflowProgress?.currentAssignmentId === record.assignmentId &&
+    selectWorkflowOwnedRunAssignmentId(projection) === record.assignmentId &&
       currentWorkflowAttemptIdentity(projection) &&
       !record.workflowAttempt
   );
@@ -556,7 +576,7 @@ function hasDurableWorkflowStaleRecoveryForCurrentAssignment(
   projection: RuntimeProjection,
   record: HostRunRecord
 ): boolean {
-  const assignmentId = projection.workflowProgress?.currentAssignmentId;
+  const assignmentId = selectWorkflowOwnedRunAssignmentId(projection);
   if (!assignmentId || assignmentId !== record.assignmentId) {
     return false;
   }

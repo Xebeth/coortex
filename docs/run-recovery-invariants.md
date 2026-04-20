@@ -195,6 +195,12 @@ replay it again. Later runtime progression, including resolved
 decisions and updated status text, must not regenerate a previously
 absorbed `result.submitted` or `decision.created`.
 
+In workflow mode, the workflow-owned terminal assignment remains
+eligible for completed-run recovery after workflow completion clears
+`currentAssignmentId`. Commands must still absorb that terminal outcome
+into runtime truth and clear any leftover lease instead of treating the
+completed terminal run as unrelated hidden metadata.
+
 In workflow mode, if durable runtime truth for the current assignment
 already contains the recovered terminal result or decision, malformed or
 stale leftover run metadata is cleanup-only. Recovery must clear the

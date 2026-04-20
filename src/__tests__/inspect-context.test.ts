@@ -176,7 +176,10 @@ test("inspect context prefers the completed workflow assignment over an unrelate
   assert.equal(inspection.record?.assignment?.id, bootstrap.initialAssignmentId);
   assert.equal(inspection.record?.assignment?.state, "completed");
   assert.equal(inspection.record?.run, null);
-  assert.deepEqual(adapter.inspectCalls, [undefined, bootstrap.initialAssignmentId]);
+  assert.deepEqual(
+    adapter.inspectCalls.slice(-2),
+    [undefined, bootstrap.initialAssignmentId]
+  );
 });
 
 class CountingInspectAdapter implements HostAdapter {

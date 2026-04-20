@@ -1,6 +1,9 @@
 import type { HostAdapter } from "../adapters/contract.js";
 import type { Assignment, HostRunRecord } from "../core/types.js";
-import { selectWorkflowVisibleRunRecord } from "../recovery/host-runs.js";
+import {
+  selectWorkflowOwnedRunAssignmentId,
+  selectWorkflowVisibleRunRecord
+} from "../recovery/host-runs.js";
 import { RuntimeStore } from "../persistence/store.js";
 import { deriveWorkflowSummary } from "../workflows/index.js";
 import { loadWorkflowAwareProjectionWithDiagnostics } from "./runtime-state.js";
@@ -43,7 +46,7 @@ export async function loadInspectRuntimeContext(
     };
   }
 
-  const workflowAssignmentId = selectWorkflowInspectAssignmentId(loaded.projection);
+  const workflowAssignmentId = selectWorkflowOwnedRunAssignmentId(loaded.projection);
   const activeAssignmentId = loaded.projection.status.activeAssignmentIds.find((candidateAssignmentId) =>
     loaded.projection.assignments.has(candidateAssignmentId)
   );
@@ -70,24 +73,6 @@ export async function loadInspectRuntimeContext(
     diagnostics: loaded.diagnostics,
     record: buildInspectRecord(workflow, assignment, run)
   };
-}
-
-function selectWorkflowInspectAssignmentId(
-  projection: Parameters<typeof selectWorkflowVisibleRunRecord>[0]
-): string | undefined {
-  const workflow = projection.workflowProgress;
-  if (!workflow) {
-    return undefined;
-  }
-  if (workflow.currentAssignmentId) {
-    return workflow.currentAssignmentId;
-  }
-  if (workflow.lastTransition?.transition !== "complete") {
-    return undefined;
-  }
-  return workflow.modules[workflow.currentModuleId]?.assignmentId
-    ?? workflow.lastTransition.previousAssignmentId
-    ?? undefined;
 }
 
 async function loadVisibleInspectRun(

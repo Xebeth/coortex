@@ -478,6 +478,87 @@ async function createCompletedResultRecoverySetup(options?: {
   return { projectRoot, cliPath, runtimeDir, assignmentId, completedAt };
 }
 
+async function createCompletedWorkflowTerminalResultRecoverySetup() {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-workflow-result-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+  await rewriteRuntimeAsCompletedWorkflow(projectRoot);
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+    workflowProgress: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
+  };
+  const assignmentId = snapshot.assignments[0]!.id;
+  const startedAt = new Date(Date.now() - 120_000).toISOString();
+  const completedAt = new Date(Date.now() - 110_000).toISOString();
+  const workflowAttempt = workflowAttemptFromSnapshot(snapshot);
+  const completedRecord = {
+    assignmentId,
+    state: "completed",
+    workflowAttempt,
+    adapterData: {
+      nativeRunId: "thread-cli-completed-workflow-result"
+    },
+    startedAt,
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered completed terminal workflow result.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "result-cli-completed-workflow-result",
+        assignmentId,
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered completed terminal workflow result.",
+        changedFiles: ["src/cli/ctx.ts"],
+        createdAt: completedAt
+      }
+    }
+  };
+  const leftoverLease = {
+    assignmentId,
+    state: "running",
+    workflowAttempt,
+    adapterData: {
+      nativeRunId: "thread-cli-completed-workflow-leftover-lease"
+    },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 5_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+  };
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "last-run.json"),
+    JSON.stringify(completedRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`),
+    JSON.stringify(leftoverLease, null, 2),
+    "utf8"
+  );
+
+  return { projectRoot, cliPath, runtimeDir, assignmentId, completedAt };
+}
+
 async function createSameAssignmentRerunInspectSetup(options: {
   terminalKind: "result" | "decision";
   omitCompletedAt?: boolean;
@@ -1657,6 +1738,85 @@ test("ctx resume emits a workflow-only envelope for completed workflows", async 
   assert.equal(payload.workflow?.currentAssignmentId, null);
   assert.equal(payload.workflow?.blockerReason ?? null, null);
   assert.equal(payload.workflow?.lastDurableAdvancement, "Workflow default complete.");
+  assert.equal(payload.metadata.activeAssignmentId, null);
+});
+
+test("ctx status and resume recover terminal workflow results after completion", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
+    await createCompletedWorkflowTerminalResultRecoverySetup();
+
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{
+      resultId: string;
+      assignmentId: string;
+      producerId: string;
+      status: string;
+      summary: string;
+      changedFiles: string[];
+      createdAt: string;
+    }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string };
+    workflowProgress: { currentAssignmentId: string | null; currentModuleId: string };
+  };
+
+  assert.equal(status.exitCode, 0);
+  assert.match(status.stderr, /WARNING completed-run-reconciled/);
+  assert.match(status.stdout, /Objective: Workflow default complete\./);
+  assert.match(status.stdout, /Results: 1/);
+  assert.equal(repairedSnapshot.workflowProgress.currentAssignmentId, null);
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "verify");
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, []);
+  assert.equal(repairedSnapshot.status.currentObjective, "Workflow default complete.");
+  assert.deepEqual(repairedSnapshot.results, [{
+    resultId: "result-cli-completed-workflow-result",
+    assignmentId,
+    producerId: "codex",
+    status: "completed",
+    summary: "Recovered completed terminal workflow result.",
+    changedFiles: ["src/cli/ctx.ts"],
+    createdAt: completedAt
+  }]);
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+
+  const resume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  const payload = JSON.parse(
+    resume.stdout.slice(resume.stdout.indexOf("{"))
+  ) as {
+    objective: string;
+    recoveryBrief: {
+      lastDurableResults: Array<{ resultId: string; summary: string; status: string }>;
+      nextRequiredAction: string;
+    };
+    metadata: {
+      activeAssignmentId: string | null;
+    };
+  };
+
+  assert.equal(resume.exitCode, 0);
+  assert.doesNotMatch(resume.stderr, /WARNING completed-run-reconciled/);
+  assert.match(resume.stdout, /Recovery brief generated for Workflow default complete\./);
+  assert.equal(payload.objective, "Workflow default complete.");
+  assert.equal(payload.recoveryBrief.nextRequiredAction, "Workflow default complete.");
+  assert.equal(payload.recoveryBrief.lastDurableResults.length, 1);
+  assert.equal(
+    payload.recoveryBrief.lastDurableResults[0]?.resultId,
+    "result-cli-completed-workflow-result"
+  );
+  assert.equal(
+    payload.recoveryBrief.lastDurableResults[0]?.summary,
+    "Recovered completed terminal workflow result."
+  );
+  assert.equal(payload.recoveryBrief.lastDurableResults[0]?.status, "completed");
   assert.equal(payload.metadata.activeAssignmentId, null);
 });
 

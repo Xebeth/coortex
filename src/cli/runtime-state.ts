@@ -15,7 +15,8 @@ import {
   createActiveRunDiagnostic,
   deriveWorkflowCleanupRecord,
   deriveWorkflowRunHandling,
-  deriveWorkflowRunTruth
+  deriveWorkflowRunTruth,
+  selectWorkflowOwnedRunAssignmentId
 } from "../recovery/host-runs.js";
 import { nowIso } from "../utils/time.js";
 import {
@@ -152,8 +153,9 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   diagnostics.push(...currentRunReconciliation.diagnostics);
   recoveredRunRecord = currentRunReconciliation.recoveredRunRecord ?? recoveredRunRecord;
 
+  const workflowOwnedAssignmentId = selectWorkflowOwnedRunAssignmentId(projection);
   for (const record of inspectedWorkflowRunsByAssignmentId.values()) {
-    if (record.assignmentId === projection.workflowProgress?.currentAssignmentId) {
+    if (record.assignmentId === workflowOwnedAssignmentId) {
       continue;
     }
     const plan = buildWorkflowRunReconciliationPlan(
@@ -175,7 +177,7 @@ export async function loadWorkflowAwareProjectionWithDiagnostics(
   }
 
   for (const cleanup of pendingHiddenCleanups) {
-    if (projection.workflowProgress?.currentAssignmentId === cleanup.staleRecord.assignmentId) {
+    if (selectWorkflowOwnedRunAssignmentId(projection) === cleanup.staleRecord.assignmentId) {
       continue;
     }
     diagnostics.push(
@@ -583,14 +585,14 @@ async function reconcileCurrentWorkflowRunAfterConvergence(
   let recoveredRunRecord: HostRunRecord | undefined;
 
   for (let iteration = 0; iteration < 10; iteration += 1) {
-    const currentAssignmentId = effectiveProjection.workflowProgress?.currentAssignmentId;
-    if (!currentAssignmentId) {
+    const workflowOwnedAssignmentId = selectWorkflowOwnedRunAssignmentId(effectiveProjection);
+    if (!workflowOwnedAssignmentId) {
       break;
     }
     const currentRecord = await resolveWorkflowRunRecord(
       store,
       adapter,
-      currentAssignmentId,
+      workflowOwnedAssignmentId,
       inspectedRunsByAssignmentId,
       recordHasLease
     );
@@ -611,7 +613,7 @@ async function reconcileCurrentWorkflowRunAfterConvergence(
     const plan = buildWorkflowRunReconciliationPlan(
       effectiveProjection,
       currentRecord,
-      recordHasLease.get(currentAssignmentId) ?? false
+      recordHasLease.get(workflowOwnedAssignmentId) ?? false
     );
     const executed = await reconcileWorkflowRunPlan(
       store,
