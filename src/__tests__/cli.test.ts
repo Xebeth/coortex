@@ -559,6 +559,118 @@ async function createCompletedWorkflowTerminalResultRecoverySetup() {
   return { projectRoot, cliPath, runtimeDir, assignmentId, completedAt };
 }
 
+async function createInterruptedAdvanceCompletedRecoverySetup(
+  commandSurface: "inspect" | "status" | "resume"
+) {
+  const projectRoot = await mkdtemp(
+    join(tmpdir(), `coortex-cli-interrupted-advance-${commandSurface}-`)
+  );
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const store = RuntimeStore.forProject(projectRoot);
+  const reviewCompletedAt = "2026-04-20T09:02:00.000Z";
+  const recoveredReviewRunId = `thread-cli-${commandSurface}-interrupted-advance-review`;
+  const recoveredReviewSummary =
+    `Recovered review completion for ctx ${commandSurface} after interrupted advance.`;
+  const recoveredReviewResultId = `result-cli-${commandSurface}-interrupted-advance-review`;
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const initialSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+  };
+  const planAssignmentId = initialSnapshot.assignments[0]!.id;
+  const interrupted = await appendWorkflowModuleProgression(store, {
+    artifact: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "plan",
+      moduleAttempt: 1,
+      assignmentId: planAssignmentId,
+      createdAt: "2026-04-20T09:01:00.000Z",
+      payload: {
+        planSummary: "Plan ready for review.",
+        implementationSteps: [
+          `Surface the recovered review completion before ctx ${commandSurface} falls through to verify.`
+        ],
+        reviewEvidenceSummary:
+          `Interrupted advance ${commandSurface} should still show the durable review outcome.`
+      }
+    },
+    resultId: `cli-${commandSurface}-interrupted-advance-plan`,
+    summary: "Plan completed before transition persistence finished.",
+    createdAt: "2026-04-20T09:01:00.000Z",
+    progressionAt: "2026-04-20T09:01:01.000Z",
+    omitEventTypes: ["workflow.transition.applied"]
+  });
+  const reviewAssignmentId = interrupted.createdAssignmentId;
+  assert.ok(reviewAssignmentId, "expected interrupted advance to pre-create the review assignment");
+
+  await store.writeJsonArtifact(
+    workflowArtifactPath("default", 1, "review", reviewAssignmentId, 1),
+    {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "review",
+      moduleAttempt: 1,
+      assignmentId: reviewAssignmentId,
+      createdAt: reviewCompletedAt,
+      payload: {
+        verdict: "approved",
+        rationaleSummary: "Review approved after the interrupted advance."
+      }
+    } satisfies WorkflowArtifactDocument
+  );
+  const completedReviewRun: HostRunRecord = {
+    assignmentId: reviewAssignmentId,
+    state: "completed",
+    workflowAttempt: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "review",
+      moduleAttempt: 1
+    },
+    adapterData: {
+      nativeRunId: recoveredReviewRunId
+    },
+    startedAt: "2026-04-20T09:01:30.000Z",
+    completedAt: reviewCompletedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: recoveredReviewSummary,
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: recoveredReviewResultId,
+        producerId: "codex",
+        status: "completed",
+        summary: recoveredReviewSummary,
+        changedFiles: ["src/workflows/modules/review.ts"],
+        createdAt: reviewCompletedAt
+      }
+    }
+  };
+  await store.writeJsonArtifact(
+    `adapters/codex/runs/${reviewAssignmentId}.json`,
+    completedReviewRun
+  );
+  await store.writeJsonArtifact("adapters/codex/last-run.json", completedReviewRun);
+
+  return {
+    projectRoot,
+    cliPath,
+    runtimeDir,
+    reviewAssignmentId,
+    recoveredReviewRunId,
+    recoveredReviewSummary,
+    recoveredReviewResultId
+  };
+}
+
 async function createSameAssignmentRerunInspectSetup(options: {
   terminalKind: "result" | "decision";
   omitCompletedAt?: boolean;
@@ -2295,100 +2407,15 @@ test("ctx inspect prints reconciliation diagnostics when it repairs a completed 
 });
 
 test("ctx inspect surfaces interrupted advance completed recovery before the next workflow assignment", async () => {
-  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-interrupted-advance-inspect-"));
-  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
-  const store = RuntimeStore.forProject(projectRoot);
-  const reviewCompletedAt = "2026-04-20T09:02:00.000Z";
-  const recoveredReviewRunId = "thread-cli-inspect-interrupted-advance-review";
-  const recoveredReviewSummary = "Recovered review completion for ctx inspect after interrupted advance.";
-  const recoveredReviewResultId = "result-cli-inspect-interrupted-advance-review";
-
-  await execFileAsync(process.execPath, [cliPath, "init"], {
-    cwd: projectRoot
-  });
-
-  const runtimeDir = join(projectRoot, ".coortex");
-  const initialSnapshot = JSON.parse(
-    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
-  ) as {
-    assignments: Array<{ id: string }>;
-  };
-  const planAssignmentId = initialSnapshot.assignments[0]!.id;
-  const interrupted = await appendWorkflowModuleProgression(store, {
-    artifact: {
-      workflowId: "default",
-      workflowCycle: 1,
-      moduleId: "plan",
-      moduleAttempt: 1,
-      assignmentId: planAssignmentId,
-      createdAt: "2026-04-20T09:01:00.000Z",
-      payload: {
-        planSummary: "Plan ready for review.",
-        implementationSteps: [
-          "Surface the recovered review completion before inspect falls through to verify."
-        ],
-        reviewEvidenceSummary:
-          "Interrupted advance inspect should still show the durable review outcome."
-      }
-    },
-    resultId: "cli-inspect-interrupted-advance-plan",
-    summary: "Plan completed before transition persistence finished.",
-    createdAt: "2026-04-20T09:01:00.000Z",
-    progressionAt: "2026-04-20T09:01:01.000Z",
-    omitEventTypes: ["workflow.transition.applied"]
-  });
-  const reviewAssignmentId = interrupted.createdAssignmentId;
-  assert.ok(reviewAssignmentId, "expected interrupted advance to pre-create the review assignment");
-
-  await store.writeJsonArtifact(
-    workflowArtifactPath("default", 1, "review", reviewAssignmentId, 1),
-    {
-      workflowId: "default",
-      workflowCycle: 1,
-      moduleId: "review",
-      moduleAttempt: 1,
-      assignmentId: reviewAssignmentId,
-      createdAt: reviewCompletedAt,
-      payload: {
-        verdict: "approved",
-        rationaleSummary: "Review approved after the interrupted advance."
-      }
-    } satisfies WorkflowArtifactDocument
-  );
-  const completedReviewRun: HostRunRecord = {
-    assignmentId: reviewAssignmentId,
-    state: "completed",
-    workflowAttempt: {
-      workflowId: "default",
-      workflowCycle: 1,
-      moduleId: "review",
-      moduleAttempt: 1
-    },
-    adapterData: {
-      nativeRunId: recoveredReviewRunId
-    },
-    startedAt: "2026-04-20T09:01:30.000Z",
-    completedAt: reviewCompletedAt,
-    outcomeKind: "result",
-    resultStatus: "completed",
-    summary: recoveredReviewSummary,
-    terminalOutcome: {
-      kind: "result",
-      result: {
-        resultId: recoveredReviewResultId,
-        producerId: "codex",
-        status: "completed",
-        summary: recoveredReviewSummary,
-        changedFiles: ["src/workflows/modules/review.ts"],
-        createdAt: reviewCompletedAt
-      }
-    }
-  };
-  await store.writeJsonArtifact(
-    `adapters/codex/runs/${reviewAssignmentId}.json`,
-    completedReviewRun
-  );
-  await store.writeJsonArtifact("adapters/codex/last-run.json", completedReviewRun);
+  const {
+    projectRoot,
+    cliPath,
+    runtimeDir,
+    reviewAssignmentId,
+    recoveredReviewRunId,
+    recoveredReviewSummary,
+    recoveredReviewResultId
+  } = await createInterruptedAdvanceCompletedRecoverySetup("inspect");
 
   const inspect = await runCliCommand(cliPath, "inspect", {
     cwd: projectRoot
@@ -2440,6 +2467,114 @@ test("ctx inspect surfaces interrupted advance completed recovery before the nex
       result.summary === recoveredReviewSummary
     )
   );
+});
+
+test("ctx status and resume surface interrupted advance completed recovery before the next workflow assignment", async () => {
+  for (const command of ["status", "resume"] as const) {
+    const {
+      projectRoot,
+      cliPath,
+      runtimeDir,
+      reviewAssignmentId,
+      recoveredReviewSummary,
+      recoveredReviewResultId
+    } = await createInterruptedAdvanceCompletedRecoverySetup(command);
+
+    const commandResult = await runCliCommand(cliPath, command, {
+      cwd: projectRoot
+    });
+    const repairedSnapshot = JSON.parse(
+      await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+    ) as {
+      assignments: Array<{ id: string; state: string }>;
+      results: Array<{
+        resultId: string;
+        assignmentId: string;
+        status: string;
+        summary: string;
+      }>;
+      status: { activeAssignmentIds: string[] };
+      workflowProgress: {
+        currentAssignmentId: string | null;
+        currentModuleId: string;
+      };
+    };
+    const verifyAssignmentId = repairedSnapshot.workflowProgress.currentAssignmentId;
+    assert.ok(verifyAssignmentId, `expected ctx ${command} recovery to advance into verify`);
+
+    assert.equal(commandResult.exitCode, 0);
+    assert.match(commandResult.stderr, /WARNING completed-run-reconciled/);
+    assert.doesNotMatch(commandResult.stderr, /WARNING stale-run-reconciled/);
+    assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "verify");
+    assert.equal(
+      repairedSnapshot.assignments.find((assignment) => assignment.id === reviewAssignmentId)?.state,
+      "completed"
+    );
+    assert.equal(
+      repairedSnapshot.assignments.find((assignment) => assignment.id === verifyAssignmentId)?.state,
+      "queued"
+    );
+    assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [verifyAssignmentId]);
+    assert.equal(await countRecoveredOutcomeEvents(runtimeDir, reviewAssignmentId, "result.submitted"), 1);
+    await assert.rejects(
+      readFile(join(runtimeDir, "adapters", "codex", "runs", `${reviewAssignmentId}.lease.json`), "utf8"),
+      /ENOENT/
+    );
+
+    assert.ok(
+      repairedSnapshot.results.some((result) =>
+        result.resultId === recoveredReviewResultId &&
+        result.assignmentId === reviewAssignmentId &&
+        result.status === "completed" &&
+        result.summary === recoveredReviewSummary
+      )
+    );
+
+    if (command === "status") {
+      assert.match(commandResult.stdout, /Current module: verify/);
+      assert.match(commandResult.stdout, /Module state: queued/);
+      assert.match(commandResult.stdout, /Active assignments: 1/);
+      assert.match(commandResult.stdout, /Results: 2/);
+      assert.match(
+        commandResult.stdout,
+        new RegExp(`- ${verifyAssignmentId} queued`)
+      );
+      continue;
+    }
+
+    const payload = JSON.parse(
+      commandResult.stdout.slice(commandResult.stdout.indexOf("{"))
+    ) as {
+      workflow?: {
+        currentAssignmentId: string | null;
+        currentModuleId: string;
+      };
+      recoveryBrief: {
+        activeAssignments: Array<{ id: string; state: string }>;
+        lastDurableResults: Array<{
+          resultId: string;
+          assignmentId: string;
+          summary: string;
+          status: string;
+        }>;
+      };
+      metadata: {
+        activeAssignmentId: string | null;
+      };
+    };
+
+    assert.match(commandResult.stdout, /Recovery brief generated/);
+    assert.equal(payload.workflow?.currentModuleId, "verify");
+    assert.equal(payload.workflow?.currentAssignmentId, verifyAssignmentId);
+    assert.equal(payload.metadata.activeAssignmentId, verifyAssignmentId);
+    assert.equal(payload.recoveryBrief.activeAssignments.length, 1);
+    assert.equal(payload.recoveryBrief.activeAssignments[0]?.id, verifyAssignmentId);
+    assert.equal(payload.recoveryBrief.activeAssignments[0]?.state, "queued");
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.resultId, recoveredReviewResultId);
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.assignmentId, reviewAssignmentId);
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.summary, recoveredReviewSummary);
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.status, "completed");
+  }
 });
 
 test("ctx inspect hides prior-attempt same-assignment runs after a rerun", async () => {
