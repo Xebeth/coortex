@@ -2703,6 +2703,202 @@ test("ctx status and resume surface interrupted advance completed recovery befor
   }
 });
 
+test("ctx status and resume do not replay interrupted advance completed recovery after the first command", async () => {
+  for (const command of ["status", "resume"] as const) {
+    const {
+      projectRoot,
+      cliPath,
+      runtimeDir,
+      reviewAssignmentId,
+      recoveredReviewSummary,
+      recoveredReviewResultId
+    } = await createInterruptedAdvanceCompletedRecoverySetup(command);
+
+    const firstCommand = await runCliCommand(cliPath, command, {
+      cwd: projectRoot
+    });
+    const firstSnapshot = JSON.parse(
+      await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+    ) as {
+      assignments: Array<{ id: string; state: string }>;
+      results: Array<{
+        resultId: string;
+        assignmentId: string;
+        status: string;
+        summary: string;
+      }>;
+      status: { activeAssignmentIds: string[] };
+      workflowProgress: {
+        currentAssignmentId: string | null;
+        currentModuleId: string;
+      };
+    };
+    const verifyAssignmentId = firstSnapshot.workflowProgress.currentAssignmentId;
+    assert.ok(verifyAssignmentId, `expected first ctx ${command} recovery to advance into verify`);
+
+    assert.equal(firstCommand.exitCode, 0);
+    assert.match(firstCommand.stderr, /WARNING completed-run-reconciled/);
+    assert.doesNotMatch(firstCommand.stderr, /WARNING stale-run-reconciled/);
+    assert.equal(firstSnapshot.workflowProgress.currentModuleId, "verify");
+    assert.equal(
+      firstSnapshot.assignments.find((assignment) => assignment.id === reviewAssignmentId)?.state,
+      "completed"
+    );
+    assert.equal(
+      firstSnapshot.assignments.find((assignment) => assignment.id === verifyAssignmentId)?.state,
+      "queued"
+    );
+    assert.deepEqual(firstSnapshot.status.activeAssignmentIds, [verifyAssignmentId]);
+    assert.ok(
+      firstSnapshot.results.some((result) =>
+        result.resultId === recoveredReviewResultId &&
+        result.assignmentId === reviewAssignmentId &&
+        result.status === "completed" &&
+        result.summary === recoveredReviewSummary
+      )
+    );
+    const firstRecoveryEventCount = await countRecoveredOutcomeEvents(
+      runtimeDir,
+      reviewAssignmentId,
+      "result.submitted"
+    );
+
+    if (command === "status") {
+      assert.match(firstCommand.stdout, /Current module: verify/);
+      assert.match(firstCommand.stdout, /Module state: queued/);
+      assert.match(firstCommand.stdout, /Active assignments: 1/);
+      assert.match(firstCommand.stdout, /Results: 2/);
+      assert.match(firstCommand.stdout, new RegExp(`- ${verifyAssignmentId} queued`));
+    } else {
+      const payload = JSON.parse(
+        firstCommand.stdout.slice(firstCommand.stdout.indexOf("{"))
+      ) as {
+        workflow?: {
+          currentAssignmentId: string | null;
+          currentModuleId: string;
+        };
+        recoveryBrief: {
+          activeAssignments: Array<{ id: string; state: string }>;
+          lastDurableResults: Array<{
+            resultId: string;
+            assignmentId: string;
+            summary: string;
+            status: string;
+          }>;
+        };
+        metadata: {
+          activeAssignmentId: string | null;
+        };
+      };
+
+      assert.match(firstCommand.stdout, /Recovery brief generated/);
+      assert.equal(payload.workflow?.currentModuleId, "verify");
+      assert.equal(payload.workflow?.currentAssignmentId, verifyAssignmentId);
+      assert.equal(payload.metadata.activeAssignmentId, verifyAssignmentId);
+      assert.equal(payload.recoveryBrief.activeAssignments.length, 1);
+      assert.equal(payload.recoveryBrief.activeAssignments[0]?.id, verifyAssignmentId);
+      assert.equal(payload.recoveryBrief.activeAssignments[0]?.state, "queued");
+      assert.equal(payload.recoveryBrief.lastDurableResults[0]?.resultId, recoveredReviewResultId);
+      assert.equal(payload.recoveryBrief.lastDurableResults[0]?.assignmentId, reviewAssignmentId);
+      assert.equal(payload.recoveryBrief.lastDurableResults[0]?.summary, recoveredReviewSummary);
+      assert.equal(payload.recoveryBrief.lastDurableResults[0]?.status, "completed");
+    }
+
+    assert.equal(firstRecoveryEventCount, 1);
+
+    const secondCommand = await runCliCommand(cliPath, command, {
+      cwd: projectRoot
+    });
+    const secondSnapshot = JSON.parse(
+      await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+    ) as {
+      assignments: Array<{ id: string; state: string }>;
+      results: Array<{
+        resultId: string;
+        assignmentId: string;
+        status: string;
+        summary: string;
+      }>;
+      status: { activeAssignmentIds: string[] };
+      workflowProgress: {
+        currentAssignmentId: string | null;
+        currentModuleId: string;
+      };
+    };
+    const secondRecoveryEventCount = await countRecoveredOutcomeEvents(
+      runtimeDir,
+      reviewAssignmentId,
+      "result.submitted"
+    );
+
+    assert.equal(secondCommand.exitCode, 0);
+    assert.doesNotMatch(secondCommand.stderr, /WARNING completed-run-reconciled/);
+    assert.doesNotMatch(secondCommand.stderr, /WARNING stale-run-reconciled/);
+    assert.equal(secondSnapshot.workflowProgress.currentModuleId, "verify");
+    assert.equal(secondSnapshot.workflowProgress.currentAssignmentId, verifyAssignmentId);
+    assert.equal(
+      secondSnapshot.assignments.find((assignment) => assignment.id === reviewAssignmentId)?.state,
+      "completed"
+    );
+    assert.equal(
+      secondSnapshot.assignments.find((assignment) => assignment.id === verifyAssignmentId)?.state,
+      "queued"
+    );
+    assert.deepEqual(secondSnapshot.status.activeAssignmentIds, [verifyAssignmentId]);
+    assert.ok(
+      secondSnapshot.results.some((result) =>
+        result.resultId === recoveredReviewResultId &&
+        result.assignmentId === reviewAssignmentId &&
+        result.status === "completed" &&
+        result.summary === recoveredReviewSummary
+      )
+    );
+    assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+
+    if (command === "status") {
+      assert.match(secondCommand.stdout, /Current module: verify/);
+      assert.match(secondCommand.stdout, /Module state: queued/);
+      assert.match(secondCommand.stdout, /Active assignments: 1/);
+      assert.match(secondCommand.stdout, /Results: 2/);
+      assert.match(secondCommand.stdout, new RegExp(`- ${verifyAssignmentId} queued`));
+      continue;
+    }
+
+    const payload = JSON.parse(
+      secondCommand.stdout.slice(secondCommand.stdout.indexOf("{"))
+    ) as {
+      workflow?: {
+        currentAssignmentId: string | null;
+        currentModuleId: string;
+      };
+      recoveryBrief: {
+        activeAssignments: Array<{ id: string; state: string }>;
+        lastDurableResults: Array<{
+          resultId: string;
+          assignmentId: string;
+          summary: string;
+          status: string;
+        }>;
+      };
+      metadata: {
+        activeAssignmentId: string | null;
+      };
+    };
+
+    assert.match(secondCommand.stdout, /Recovery brief generated/);
+    assert.equal(payload.workflow?.currentModuleId, "verify");
+    assert.equal(payload.workflow?.currentAssignmentId, verifyAssignmentId);
+    assert.equal(payload.metadata.activeAssignmentId, verifyAssignmentId);
+    assert.equal(payload.recoveryBrief.activeAssignments.length, 1);
+    assert.equal(payload.recoveryBrief.activeAssignments[0]?.id, verifyAssignmentId);
+    assert.equal(payload.recoveryBrief.activeAssignments[0]?.state, "queued");
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.resultId, recoveredReviewResultId);
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.assignmentId, reviewAssignmentId);
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.summary, recoveredReviewSummary);
+    assert.equal(payload.recoveryBrief.lastDurableResults[0]?.status, "completed");
+  }
+});
+
 test("ctx run surfaces interrupted advance completed recovery before the next workflow assignment", async () => {
   const {
     projectRoot,
