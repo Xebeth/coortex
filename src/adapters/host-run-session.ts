@@ -56,13 +56,14 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     metadataFailureReject = reject;
   });
   let metadataFailureRaised = false;
-  let runClosed = false;
+  let runSettled = false;
+  let recordClosed = false;
   let runPhase = 0;
   let pendingRunningWrite: Promise<void> = Promise.resolve();
 
   const persistRunningRecord = async (nextRecord: HostRunRecord, phase: number) => {
     if (
-      runClosed ||
+      recordClosed ||
       runningRecord.state !== "running" ||
       nextRecord.state !== "running" ||
       phase !== runPhase
@@ -76,7 +77,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
   };
 
   const refreshLease = async () => {
-    if (runClosed || runningRecord.state !== "running") {
+    if (runSettled || recordClosed || runningRecord.state !== "running") {
       return;
     }
     const phase = runPhase;
@@ -117,15 +118,19 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
     try {
       running = await input.startRun({
         onNativeRunId: async (nativeRunId) => {
-          const phase = runPhase;
           if (
-            runClosed ||
+            recordClosed ||
             runningRecord.state !== "running" ||
             getNativeRunId(runningRecord) === nativeRunId
           ) {
             return;
           }
           const nextRecord = withRunNativeId(runningRecord, nativeRunId);
+          if (runSettled) {
+            runningRecord = nextRecord;
+            return;
+          }
+          const phase = runPhase;
           try {
             await persistRunningRecord(nextRecord, phase);
           } catch (error) {
@@ -141,16 +146,20 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         });
       }, input.heartbeatMs);
       execution = await Promise.race([running.result, metadataFailure]);
-      runClosed = true;
+      runSettled = true;
       runPhase += 1;
     } catch (error) {
-      runClosed = true;
+      runSettled = true;
       runPhase += 1;
       if (running) {
         await stopHostRun(running);
       }
       await pendingRunningWrite;
-      return buildFailedRunOutcome(input, runningRecord, error, -1, collectWarnings);
+      try {
+        return await buildFailedRunOutcome(input, runningRecord, error, -1, collectWarnings);
+      } finally {
+        recordClosed = true;
+      }
     } finally {
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
@@ -173,7 +182,7 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
       if (completed.usage) {
         completionOptions.usage = completed.usage;
       }
-      return buildCompletedRunExecution(
+      return await buildCompletedRunExecution(
         input,
         runningRecord,
         completedAt,
@@ -183,13 +192,15 @@ export async function executeHostRunSession<TExecution extends { exitCode: numbe
         completionOptions
       );
     } catch (error) {
-      return buildFailedRunOutcome(
+      return await buildFailedRunOutcome(
         input,
         runningRecord,
         error,
         execution.exitCode,
         collectWarnings
       );
+    } finally {
+      recordClosed = true;
     }
   })();
 

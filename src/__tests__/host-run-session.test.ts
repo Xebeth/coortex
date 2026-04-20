@@ -426,6 +426,147 @@ test("host-run session matrix preserves the running native id when completion do
   assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
 });
 
+test("host-run session matrix keeps a late native id after the process exits", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-native-id-late";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let queuedHeartbeat: (() => void) | undefined;
+  let heartbeatRegistered!: () => void;
+  const heartbeatReady = new Promise<void>((resolve) => {
+    heartbeatRegistered = resolve;
+  });
+  globalThis.setInterval = ((callback: Parameters<typeof globalThis.setInterval>[0]) => {
+    queuedHeartbeat = typeof callback === "function" ? callback : undefined;
+    heartbeatRegistered();
+    return 1 as unknown as NodeJS.Timeout;
+  }) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  let runningLeaseWrites = 0;
+  let heartbeatWriteObserved!: () => void;
+  const heartbeatWriteSeen = new Promise<void>((resolve) => {
+    heartbeatWriteObserved = resolve;
+  });
+  let releaseHeartbeatWrite!: () => void;
+  const heartbeatWriteReleased = new Promise<void>((resolve) => {
+    releaseHeartbeatWrite = resolve;
+  });
+  let heartbeatWriteBlocked = false;
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (
+      relativePath === artifacts.runLeasePath(assignmentId) &&
+      typeof value === "object" &&
+      value !== null &&
+      "state" in value &&
+      value.state === "running"
+    ) {
+      runningLeaseWrites += 1;
+      if (!heartbeatWriteBlocked && runningLeaseWrites === 2) {
+        heartbeatWriteBlocked = true;
+        heartbeatWriteObserved();
+        await heartbeatWriteReleased;
+      }
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  let resolveExecution!: (execution: { exitCode: number }) => void;
+  const executionResult = new Promise<{ exitCode: number }>((resolve) => {
+    resolveExecution = resolve;
+  });
+  let reportNativeRunId!: (nativeRunId: string) => Promise<void>;
+  let deriveCompletedNativeRunId: string | undefined;
+
+  try {
+    const executionPromise = executeHostRunSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-native-id-late",
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 5_000,
+      startRun: async ({ onNativeRunId }) => {
+        reportNativeRunId = onNativeRunId;
+        return {
+          result: executionResult,
+          terminate: async () => undefined,
+          waitForExit: async () => ({ code: 0 })
+        };
+      },
+      summarizeExecutionFailure: (error) => (error instanceof Error ? error.message : String(error)),
+      buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+        outcome: {
+          kind: "result",
+          capture: {
+            assignmentId: failedAssignmentId,
+            producerId: "matrix-host",
+            status: "failed",
+            summary,
+            changedFiles: [],
+            createdAt: completedAt
+          }
+        }
+      }),
+      deriveCompleted: async (_result, nativeRunId) => {
+        deriveCompletedNativeRunId = nativeRunId;
+        return {
+          outcome: {
+            outcome: {
+              kind: "result",
+              capture: {
+                assignmentId,
+                producerId: "matrix-host",
+                status: "completed",
+                summary: "Successful completion kept the late native run id.",
+                changedFiles: [],
+                createdAt: "2026-04-11T10:01:00.000Z"
+              }
+            }
+          }
+        };
+      },
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    await heartbeatReady;
+    assert.ok(queuedHeartbeat, "heartbeat callback should be registered");
+    queuedHeartbeat?.();
+    await heartbeatWriteSeen;
+
+    resolveExecution({ exitCode: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await reportNativeRunId("native-late-1");
+    releaseHeartbeatWrite();
+
+    const execution = await executionPromise;
+    const inspected = await runStore.inspect(assignmentId);
+
+    assert.equal(deriveCompletedNativeRunId, "native-late-1");
+    assert.equal(execution.run.adapterData?.nativeRunId, "native-late-1");
+    assert.equal(inspected?.adapterData?.nativeRunId, "native-late-1");
+    assert.equal(execution.telemetry?.metadata.nativeRunId, "native-late-1");
+    assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    store.writeJsonArtifact = originalWriteJsonArtifact;
+  }
+});
+
 test("host-run session matrix fails the run when heartbeat persistence stops working", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
