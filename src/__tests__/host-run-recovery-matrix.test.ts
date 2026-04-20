@@ -2837,6 +2837,51 @@ test("workflow-aware recovery matrix keeps cleanup truth-driven across current a
       }
     },
     {
+      name: "completed terminal workflow results still recover after workflow completion clears the current assignment",
+      run: async () => {
+        const ctx = await createWorkflowMatrixContext();
+        const completedAt = "2026-04-14T12:05:00.000Z";
+        const workflowAttempt = await completeCurrentWorkflowAssignment(ctx, completedAt);
+        const completedRecord = completedResultRecord(
+          ctx.assignmentId,
+          "completed",
+          "Recovered completed terminal workflow result.",
+          workflowAttempt
+        );
+        completedRecord.startedAt = "2026-04-14T12:00:30.000Z";
+        completedRecord.completedAt = completedAt;
+        if (completedRecord.terminalOutcome?.kind === "result") {
+          completedRecord.terminalOutcome.result.createdAt = completedAt;
+        }
+        await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+        await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+        await ctx.store.writeJsonArtifact(
+          `adapters/matrix/runs/${ctx.assignmentId}.lease.json`,
+          runningRecord(ctx.assignmentId, "2999-04-11T10:00:30.000Z", workflowAttempt)
+        );
+
+        const loaded = await loadWorkflowAwareProjectionWithDiagnostics(ctx.store, ctx.adapter);
+
+        assert.ok(loaded.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+        assert.ok(!loaded.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.deepEqual(loaded.activeLeases, []);
+        assert.deepEqual(loaded.hiddenActiveLeases, []);
+        assert.equal(loaded.projection.workflowProgress?.currentAssignmentId, null);
+        assert.equal(loaded.projection.workflowProgress?.currentModuleId, "plan");
+        assert.deepEqual(loaded.projection.status.activeAssignmentIds, []);
+        assert.equal(loaded.projection.status.currentObjective, "Workflow default complete.");
+        assert.equal(
+          [...loaded.projection.results.values()].find((result) => result.assignmentId === ctx.assignmentId)?.status,
+          "completed"
+        );
+        assert.equal(await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted"), 1);
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
       name: "hidden completed decisions with active leftover leases clean up silently once the decision is already durable",
       run: async () => {
         const ctx = await createWorkflowMatrixContext();
@@ -3523,6 +3568,61 @@ async function removeAssignmentFromSnapshot(store: RuntimeStore, assignmentId: s
     activeAssignmentIds: snapshot.status.activeAssignmentIds.filter((id) => id !== assignmentId)
   };
   await store.writeSnapshot(snapshot);
+}
+
+async function completeCurrentWorkflowAssignment(
+  ctx: MatrixContext,
+  completedAt: string
+): Promise<NonNullable<HostRunRecord["workflowAttempt"]>> {
+  const workflowAttempt = await currentWorkflowAttempt(ctx);
+  const snapshot = await ctx.store.loadSnapshot();
+  assert.ok(snapshot, "expected a snapshot before completing the workflow");
+  snapshot.assignments = snapshot.assignments.map((assignment) =>
+    assignment.id === ctx.assignmentId
+      ? {
+          ...assignment,
+          state: "completed",
+          updatedAt: completedAt
+        }
+      : assignment
+  );
+  snapshot.status = {
+    ...snapshot.status,
+    activeMode: "idle",
+    currentObjective: "Workflow default complete.",
+    activeAssignmentIds: [],
+    lastDurableOutputAt: completedAt,
+    resumeReady: true
+  };
+  assert.ok(snapshot.workflowProgress, "expected workflow progress in snapshot");
+  const currentModule = snapshot.workflowProgress.modules[snapshot.workflowProgress.currentModuleId];
+  assert.ok(currentModule, "expected current workflow module in snapshot");
+  snapshot.workflowProgress = {
+    ...snapshot.workflowProgress,
+    currentAssignmentId: null,
+    modules: {
+      ...snapshot.workflowProgress.modules,
+      [snapshot.workflowProgress.currentModuleId]: {
+        ...currentModule,
+        assignmentId: ctx.assignmentId,
+        moduleState: "completed"
+      }
+    },
+    lastTransition: {
+      fromModuleId: snapshot.workflowProgress.currentModuleId,
+      toModuleId: snapshot.workflowProgress.currentModuleId,
+      workflowCycle: snapshot.workflowProgress.workflowCycle,
+      moduleAttempt: snapshot.workflowProgress.currentModuleAttempt,
+      transition: "complete",
+      previousAssignmentId: ctx.assignmentId,
+      nextAssignmentId: null,
+      appliedAt: completedAt
+    }
+  };
+  await ctx.store.writeSnapshot(snapshot);
+  await writeFile(ctx.store.eventsPath, "", "utf8");
+  ctx.projection = await loadOperatorProjection(ctx.store);
+  return workflowAttempt;
 }
 
 function runningRecord(
