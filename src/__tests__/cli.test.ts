@@ -5101,6 +5101,7 @@ test("ctx status falls back to the recovered blocked decision when later suffix 
   };
 
   assert.match(status.stderr, /WARNING completed-run-reconciled/);
+  assert.match(status.stderr, /WARNING event-log-salvaged .*fell back to .*snapshot\.json/i);
   assert.match(status.stdout, /Active assignments: 1/);
   assert.match(status.stdout, /Open decisions: 1/);
   assert.match(status.stdout, new RegExp(`- ${assignmentId} blocked `));
@@ -5115,7 +5116,7 @@ test("ctx status falls back to the recovered blocked decision when later suffix 
     repairedSnapshot.status.currentObjective,
     "Resolve decision decision-cli-completed-status: Need operator confirmation before proceeding."
   );
-  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 2);
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 1);
 });
 
 test("ctx resume repairs snapshot-fallback completed decisions when the snapshot boundary is unusable", async () => {
