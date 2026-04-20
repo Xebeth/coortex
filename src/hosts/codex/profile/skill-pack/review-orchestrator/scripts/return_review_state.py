@@ -8,11 +8,13 @@ import fnmatch
 import json
 import pathlib
 import re
+import subprocess
 from typing import Any
 
 TRACE_PHASES = {
     "trace_started",
     "prep",
+    "packet_bootstrap",
     "lane_plan",
     "lane_result",
     "omission_followup",
@@ -21,9 +23,19 @@ TRACE_PHASES = {
     "final_review",
 }
 
+ACTIVE_CAMPAIGN_FILE = "active-review-campaign.json"
+PACKET_EXPLORATION_MODE = "packet-exploration"
+DISCOVERY_PACKET_PHASES = {"prep", "coverage", "family-exploration", "synthesis"}
+
 TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     "trace_started": {},
     "prep": {},
+    "packet_bootstrap": {
+        "campaign_id": "string",
+        "packet_path": "string",
+        "candidate_family_ids": "list",
+        "reopened_family_ids": "list",
+    },
     "lane_plan": {
         "lane_id": "string",
         "lane_type": "string",
@@ -179,6 +191,19 @@ def resolve_user_path(project_root: pathlib.Path, raw_path: str) -> pathlib.Path
     if candidate.is_absolute():
         return candidate
     return project_root / candidate
+
+
+def try_git(args: list[str], cwd: pathlib.Path) -> str | None:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
 
 
 def default_run_id(mode: str) -> str:
@@ -462,9 +487,377 @@ def summarize_seams_for_families(families: list[dict[str, Any]]) -> dict[str, An
     }
 
 
+def resolve_trace_root(project_root: pathlib.Path, raw_trace_root: str) -> pathlib.Path:
+    trace_root = pathlib.Path(raw_trace_root)
+    if trace_root.is_absolute():
+        return trace_root.resolve()
+    return (project_root / trace_root).resolve()
+
+
+def active_campaign_path(trace_root: pathlib.Path) -> pathlib.Path:
+    return trace_root / ACTIVE_CAMPAIGN_FILE
+
+
+def load_active_campaign(trace_root: pathlib.Path) -> dict[str, Any] | None:
+    path = active_campaign_path(trace_root)
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else None
+
+
+def write_active_campaign(trace_root: pathlib.Path, data: dict[str, Any]) -> pathlib.Path:
+    trace_root.mkdir(parents=True, exist_ok=True)
+    path = active_campaign_path(trace_root)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def clear_active_campaign(trace_root: pathlib.Path, campaign_id: str) -> bool:
+    path = active_campaign_path(trace_root)
+    active = load_active_campaign(trace_root)
+    if not active or str(active.get("campaign_id") or "") != campaign_id:
+        return False
+    if path.exists():
+        path.unlink()
+    return True
+
+
+def require_packet_string(value: Any, field: str, errors: list[str], prefix: str) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        errors.append(f"{prefix} field {field} must be a non-empty string")
+        return None
+    return value
+
+
+def require_packet_list(value: Any, field: str, errors: list[str], prefix: str) -> list[Any] | None:
+    if not isinstance(value, list):
+        errors.append(f"{prefix} field {field} must be a list")
+        return None
+    return value
+
+
+def validate_discovery_signal_entries(
+    entries: Any,
+    prefix: str,
+    errors: list[str],
+) -> tuple[set[str], set[str]]:
+    signal_ids: set[str] = set()
+    family_ids: set[str] = set()
+    if not isinstance(entries, list):
+        errors.append(f"{prefix} must be a list")
+        return signal_ids, family_ids
+    for index, entry in enumerate(entries):
+        entry_prefix = f"{prefix}[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{entry_prefix} must be a mapping")
+            continue
+        signal_id = require_packet_string(entry.get("signal_id"), "signal_id", errors, entry_prefix)
+        require_packet_string(entry.get("summary"), "summary", errors, entry_prefix)
+        evidence = require_packet_list(entry.get("evidence"), "evidence", errors, entry_prefix)
+        candidate_family_ids = require_packet_list(
+            entry.get("candidate_family_ids"), "candidate_family_ids", errors, entry_prefix
+        )
+        if signal_id is not None:
+            signal_ids.add(signal_id)
+        if evidence is not None and any(not isinstance(item, str) or not item.strip() for item in evidence):
+            errors.append(f"{entry_prefix} evidence entries must be non-empty strings")
+        if candidate_family_ids is not None:
+            for family_id in candidate_family_ids:
+                if not isinstance(family_id, str) or not family_id.strip():
+                    errors.append(f"{entry_prefix} candidate_family_ids entries must be non-empty strings")
+                    continue
+                family_ids.add(family_id)
+    return signal_ids, family_ids
+
+
+def validate_discovery_packet_data(packet: dict[str, Any], project_root: pathlib.Path | None = None) -> tuple[list[str], dict[str, Any]]:
+    errors: list[str] = []
+    summary: dict[str, Any] = {}
+
+    if packet.get("packet_type") != "seam-walk-discovery":
+        errors.append("packet_type must be 'seam-walk-discovery'")
+    if packet.get("packet_version") != 1:
+        errors.append("packet_version must be 1")
+
+    campaign = packet.get("campaign")
+    if not isinstance(campaign, dict):
+        errors.append("campaign must be a mapping")
+        return errors, summary
+
+    campaign_id = require_packet_string(campaign.get("campaign_id"), "campaign_id", errors, "campaign")
+    source_run_id = require_packet_string(campaign.get("source_run_id"), "source_run_id", errors, "campaign")
+    worktree_root = require_packet_string(campaign.get("worktree_root"), "worktree_root", errors, "campaign")
+    require_packet_string(campaign.get("base_ref"), "base_ref", errors, "campaign")
+    merge_base = require_packet_string(campaign.get("merge_base"), "merge_base", errors, "campaign")
+    head_sha = require_packet_string(campaign.get("head_sha"), "head_sha", errors, "campaign")
+    baseline_path = require_packet_string(campaign.get("baseline_path"), "baseline_path", errors, "campaign")
+
+    review_target = campaign.get("review_target")
+    if not isinstance(review_target, dict):
+        errors.append("campaign.review_target must be a mapping")
+    else:
+        require_packet_string(review_target.get("mode"), "mode", errors, "campaign.review_target")
+        require_packet_string(review_target.get("scope_summary"), "scope_summary", errors, "campaign.review_target")
+
+    commit_groups = packet.get("commit_groups")
+    if not isinstance(commit_groups, list) or not commit_groups:
+        errors.append("commit_groups must be a non-empty list")
+        commit_groups = []
+
+    known_group_ids: set[str] = set()
+    review_signal_ids: set[str] = set()
+    deslop_signal_ids: set[str] = set()
+    referenced_family_ids: set[str] = set()
+
+    for index, group in enumerate(commit_groups):
+        prefix = f"commit_groups[{index}]"
+        if not isinstance(group, dict):
+            errors.append(f"{prefix} must be a mapping")
+            continue
+        group_id = require_packet_string(group.get("group_id"), "group_id", errors, prefix)
+        require_packet_string(group.get("label"), "label", errors, prefix)
+        require_packet_string(group.get("scope_summary"), "scope_summary", errors, prefix)
+        commit_shas = require_packet_list(group.get("commit_shas"), "commit_shas", errors, prefix)
+        files = require_packet_list(group.get("files"), "files", errors, prefix)
+        primary_seams = require_packet_list(group.get("primary_seams"), "primary_seams", errors, prefix)
+        thin_areas = require_packet_list(group.get("thin_areas"), "thin_areas", errors, prefix)
+        if group_id is not None:
+            if group_id in known_group_ids:
+                errors.append(f"{prefix} group_id {group_id!r} must be unique")
+            known_group_ids.add(group_id)
+        for field_name, values in {"commit_shas": commit_shas, "files": files, "primary_seams": primary_seams, "thin_areas": thin_areas}.items():
+            if values is not None and any(not isinstance(item, str) or not item.strip() for item in values):
+                errors.append(f"{prefix} {field_name} entries must be non-empty strings")
+
+        review_ids, review_families = validate_discovery_signal_entries(
+            group.get("review_grounded_signals"), f"{prefix}.review_grounded_signals", errors
+        )
+        deslop_ids, deslop_families = validate_discovery_signal_entries(
+            group.get("deslop_advisory_signals"), f"{prefix}.deslop_advisory_signals", errors
+        )
+        review_signal_ids.update(review_ids)
+        deslop_signal_ids.update(deslop_ids)
+        referenced_family_ids.update(review_families)
+        referenced_family_ids.update(deslop_families)
+
+    candidate_families = packet.get("candidate_families")
+    if not isinstance(candidate_families, list):
+        errors.append("candidate_families must be a list")
+        candidate_families = []
+
+    candidate_family_ids: set[str] = set()
+    for index, family in enumerate(candidate_families):
+        prefix = f"candidate_families[{index}]"
+        if not isinstance(family, dict):
+            errors.append(f"{prefix} must be a mapping")
+            continue
+        family_id = require_packet_string(family.get("family_id"), "family_id", errors, prefix)
+        require_packet_string(family.get("title"), "title", errors, prefix)
+        require_packet_string(family.get("candidate_root_cause"), "candidate_root_cause", errors, prefix)
+        source_group_ids = require_packet_list(family.get("source_group_ids"), "source_group_ids", errors, prefix)
+        family_review_ids = require_packet_list(
+            family.get("review_grounded_signal_ids"), "review_grounded_signal_ids", errors, prefix
+        )
+        family_deslop_ids = require_packet_list(
+            family.get("deslop_advisory_signal_ids"), "deslop_advisory_signal_ids", errors, prefix
+        )
+        require_packet_string(family.get("likely_owning_seam"), "likely_owning_seam", errors, prefix)
+        secondary_seams = require_packet_list(family.get("secondary_seams"), "secondary_seams", errors, prefix)
+        require_packet_string(family.get("status"), "status", errors, prefix)
+
+        if family_id is not None:
+            if family_id in candidate_family_ids:
+                errors.append(f"{prefix} family_id {family_id!r} must be unique")
+            candidate_family_ids.add(family_id)
+        if source_group_ids is not None:
+            for group_id in source_group_ids:
+                if not isinstance(group_id, str) or not group_id.strip():
+                    errors.append(f"{prefix} source_group_ids entries must be non-empty strings")
+                elif group_id not in known_group_ids:
+                    errors.append(f"{prefix} source_group_ids references unknown group_id {group_id!r}")
+        if family_review_ids is not None:
+            for signal_id in family_review_ids:
+                if not isinstance(signal_id, str) or not signal_id.strip():
+                    errors.append(f"{prefix} review_grounded_signal_ids entries must be non-empty strings")
+                elif signal_id not in review_signal_ids:
+                    errors.append(f"{prefix} review_grounded_signal_ids references unknown signal_id {signal_id!r}")
+        if family_deslop_ids is not None:
+            for signal_id in family_deslop_ids:
+                if not isinstance(signal_id, str) or not signal_id.strip():
+                    errors.append(f"{prefix} deslop_advisory_signal_ids entries must be non-empty strings")
+                elif signal_id not in deslop_signal_ids:
+                    errors.append(f"{prefix} deslop_advisory_signal_ids references unknown signal_id {signal_id!r}")
+        if secondary_seams is not None and any(not isinstance(item, str) or not item.strip() for item in secondary_seams):
+            errors.append(f"{prefix} secondary_seams entries must be non-empty strings")
+
+    if referenced_family_ids and not referenced_family_ids.issubset(candidate_family_ids):
+        missing = sorted(referenced_family_ids - candidate_family_ids)
+        errors.append(f"candidate_families is missing family ids referenced by signals: {missing}")
+
+    handoff = packet.get("handoff")
+    if not isinstance(handoff, dict):
+        errors.append("handoff must be a mapping")
+    else:
+        if handoff.get("mode") != "exploration-only":
+            errors.append("handoff.mode must be 'exploration-only'")
+        requested_phases = require_packet_list(handoff.get("requested_phases"), "requested_phases", errors, "handoff")
+        if requested_phases is not None:
+            normalized = []
+            for phase in requested_phases:
+                if not isinstance(phase, str) or not phase.strip():
+                    errors.append("handoff.requested_phases entries must be non-empty strings")
+                    continue
+                normalized.append(phase)
+                if phase not in DISCOVERY_PACKET_PHASES:
+                    errors.append(f"handoff.requested_phases contains unknown phase {phase!r}")
+            if not normalized:
+                errors.append("handoff.requested_phases must not be empty")
+
+    if project_root is not None:
+        resolved_root = str(project_root.resolve())
+        if worktree_root is not None and str(pathlib.Path(worktree_root).resolve()) != resolved_root:
+            errors.append("campaign.worktree_root does not match the current project-root")
+        current_head = try_git(["rev-parse", "HEAD"], project_root)
+        if current_head is not None and head_sha is not None and current_head != head_sha:
+            errors.append("campaign.head_sha does not match the current HEAD")
+
+    summary = {
+        "campaign_id": campaign_id,
+        "source_run_id": source_run_id,
+        "group_count": len(commit_groups),
+        "candidate_family_ids": sorted(candidate_family_ids),
+        "review_grounded_signal_count": len(review_signal_ids),
+        "deslop_advisory_signal_count": len(deslop_signal_ids),
+        "baseline_path": baseline_path,
+        "merge_base": merge_base,
+        "head_sha": head_sha,
+    }
+    return errors, summary
+
+
+def validate_discovery_packet_command(args: argparse.Namespace) -> int:
+    if args.packet_json:
+        packet = parse_json_record(args.packet_json)
+    else:
+        packet = load_json_object(pathlib.Path(args.packet_file))
+    project_root = pathlib.Path(args.project_root).resolve() if args.project_root else None
+    errors, summary = validate_discovery_packet_data(packet, project_root)
+    if errors:
+        print(json.dumps({"valid": False, "errors": errors, **summary}, indent=2, sort_keys=True))
+        return 2
+    print(json.dumps({"valid": True, **summary}, indent=2, sort_keys=True))
+    return 0
+
+
 def init_trace(args: argparse.Namespace) -> int:
+    project_root = pathlib.Path(args.project_root).resolve()
+    trace_root = resolve_trace_root(project_root, args.trace_root)
+    trace_root.mkdir(parents=True, exist_ok=True)
+
+    packet_mode = args.mode == PACKET_EXPLORATION_MODE
     run_id = args.run_id or default_run_id(args.mode)
-    trace_root = pathlib.Path(args.trace_root)
+    active = load_active_campaign(trace_root)
+    resumed = False
+    linked_campaign_id = None
+
+    if active and active.get("state") == "active":
+        active_type = str(active.get("campaign_type") or "")
+        active_campaign_id = str(active.get("campaign_id") or "")
+        active_run_id = str(active.get("run_id") or active_campaign_id)
+        if packet_mode:
+            if not args.campaign_id:
+                print(
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "reason": "missing-campaign-id",
+                            "message": "packet exploration requires --campaign-id from the active seam-walk campaign",
+                            "active_campaign": active,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+            if active_type != "seam-walkback-review" or args.campaign_id != active_campaign_id:
+                print(
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "reason": "concurrent-review-campaign",
+                            "message": "an active review campaign already exists for this worktree and does not match the requested seam-walk campaign",
+                            "active_campaign": active,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+            linked_campaign_id = active_campaign_id
+            active["child_run_id"] = run_id
+            active["child_skill"] = "review-orchestrator"
+            active["child_mode"] = args.mode
+            write_active_campaign(trace_root, active)
+        else:
+            if active_type != "review-orchestrator":
+                print(
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "reason": "concurrent-review-campaign",
+                            "message": "an active top-level review campaign already exists for this worktree",
+                            "active_campaign": active,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+            if args.run_id and run_id != active_run_id:
+                print(
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "reason": "concurrent-orchestrator-run",
+                            "message": "a standalone orchestrator campaign is already active for this worktree",
+                            "active_campaign": active,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+            run_id = active_run_id
+            resumed = True
+            linked_campaign_id = active_campaign_id
+    else:
+        if packet_mode:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason": "missing-active-seam-walk",
+                        "message": "packet exploration requires an active seam-walk campaign in this worktree",
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        linked_campaign_id = run_id
+        write_active_campaign(
+            trace_root,
+            {
+                "campaign_id": linked_campaign_id,
+                "campaign_type": "review-orchestrator",
+                "run_id": run_id,
+                "state": "active",
+                "worktree_root": str(project_root),
+                "started_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        )
+
     trace_dir = trace_root / run_id
     trace_dir.mkdir(parents=True, exist_ok=True)
     coordinator_file = trace_dir / "coordinator.jsonl"
@@ -473,8 +866,11 @@ def init_trace(args: argparse.Namespace) -> int:
         json.dumps(
             {
                 "run_id": run_id,
+                "campaign_id": linked_campaign_id,
                 "trace_dir": str(trace_dir),
                 "coordinator_file": str(coordinator_file),
+                "active_campaign_file": str(active_campaign_path(trace_root)),
+                "resumed": resumed,
             },
             indent=2,
             sort_keys=True,
@@ -526,12 +922,32 @@ def append_trace(args: argparse.Namespace) -> int:
     with trace_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
+
+    trace_root = trace_file.parent.parent
+    active_cleared = False
+    phase = record.get("phase")
+    record_run_id = str(record.get("run_id") or "")
+    record_campaign_id = str(record.get("campaign_id") or "")
+    if phase == "final_review":
+        active = load_active_campaign(trace_root)
+        if active:
+            active_type = str(active.get("campaign_type") or "")
+            active_campaign_id = str(active.get("campaign_id") or "")
+            active_run_id = str(active.get("run_id") or active_campaign_id)
+            if active_type == "review-orchestrator" and record_run_id == active_run_id:
+                active_cleared = clear_active_campaign(trace_root, active_campaign_id)
+            elif active_type == "seam-walkback-review" and record_campaign_id and record_campaign_id == active_campaign_id:
+                active["child_final_review_run_id"] = record_run_id
+                active["child_final_review_at_utc"] = str(record.get("timestamp_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                write_active_campaign(trace_root, active)
+
     print(
         json.dumps(
             {
                 "trace_file": str(trace_file),
                 "appended": True,
                 "status": "ok",
+                "active_campaign_cleared": active_cleared,
             },
             indent=2,
             sort_keys=True,
@@ -1330,8 +1746,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create or resume the orchestrator run trace directory and coordinator file.",
     )
     init.add_argument("--trace-root", default=".coortex/review-trace")
+    init.add_argument("--project-root", default=".")
     init.add_argument("--mode", default="full-review")
     init.add_argument("--run-id")
+    init.add_argument("--campaign-id")
     init.set_defaults(func=init_trace)
 
     lane_file = subparsers.add_parser(
@@ -1442,6 +1860,16 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--review-handoff", required=True)
     summarize.add_argument("--output")
     summarize.set_defaults(func=summarize_seams)
+
+    validate_packet = subparsers.add_parser(
+        "validate-discovery-packet",
+        help="Validate a seam-walk discovery packet before packet-driven orchestrator exploration.",
+    )
+    packet_group = validate_packet.add_mutually_exclusive_group(required=True)
+    packet_group.add_argument("--packet-file")
+    packet_group.add_argument("--packet-json")
+    validate_packet.add_argument("--project-root")
+    validate_packet.set_defaults(func=validate_discovery_packet_command)
 
     baseline = subparsers.add_parser(
         "resolve-full-review-baseline",

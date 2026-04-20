@@ -153,6 +153,7 @@ Rules:
 
 Include:
 - files reviewed or review window summary
+- when in packet-driven exploration mode, the discovery campaign id / packet summary
 - totals by severity
 - final defect families
 - hot seams summary derived from the final families:
@@ -186,9 +187,21 @@ Include:
   - `APPROVE`
   - `COMMENT`
   - `REQUEST CHANGES`
+- when in packet-driven exploration mode, a campaign outcome may be more useful
+  than a traditional verdict:
+  - `HANDOFF_READY`
+  - `NO_ACTIONABLE_FAMILIES`
+  - `BLOCKED`
 
 Rules:
 - Do not drop lane self-check output during synthesis.
+- In packet-driven exploration mode, surface the distinction between
+  review-grounded and deslop-advisory discovery signals when it materially
+  affects family synthesis or closure confidence.
+- In packet-driven exploration mode, it is acceptable to report a campaign
+  outcome such as `HANDOFF_READY` instead of forcing the normal
+  `APPROVE`/`REQUEST CHANGES` verdict shape when the coordinator's job was to
+  emit a fixer-ready handoff rather than judge a concrete patch.
 - Keep families as the canonical problem-tracking unit. Use seams as an
   ownership and follow-up grouping, not as a replacement for family identity.
 - Aggregate the final families by likely owning seam and surface a concise hot

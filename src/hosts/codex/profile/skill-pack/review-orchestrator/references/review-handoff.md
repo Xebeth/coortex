@@ -126,6 +126,7 @@ Optional top level:
 
 Per family:
 - `family_id`
+- optional `discovery_lineage` when packet-driven exploration resolved the family from seam-walk candidate families
 - `severity`
 - `title`
 - `highest_confidence_root_cause`
@@ -170,6 +171,14 @@ Per optional `next_step` block:
 - `expected_evidence`
 - `reevaluate_when`
 
+Per optional `discovery_lineage` block:
+- `campaign_id`
+- `resolved_from_candidate_family_ids`
+- `source_group_ids`
+- `review_grounded_signal_ids`
+- `deslop_advisory_signal_ids`
+- `ledger_status`
+
 Per optional `carry_forward_context` block:
 - `reason_kind`
 - `touch_state`
@@ -180,6 +189,17 @@ Per optional `carry_forward_context` block:
 ## Rules
 
 - `review_hints` are downstream hints, not authoritative implementation instructions.
+- When packet-driven exploration starts from seam-walk candidate families, the
+  coordinator may preserve the candidate `family_id` when the mapping stays
+  one-to-one. If the coordinator merges, splits, or otherwise regroups the
+  packet families, record that lineage in `discovery_lineage` instead of
+  silently pretending the provisional packet grouping was final.
+- `discovery_lineage.ledger_status` should describe whether the resolved family
+  is `new`, `continued`, `reopened`, `merged`, or `split` relative to the
+  packet+ledger inputs.
+- `deslop_advisory_signal_ids` in `discovery_lineage` identify contributing
+  maintainability signals only. They do not mean those advisory signals were
+  independently sufficient to block closure.
 - `seam_summary` is a seam-level follow-up aid, not a replacement for the
   family list. Families remain the canonical closure and fixer-tracking unit.
 - `seam_summary.hot_seams` should only elevate seams that are worth targeted

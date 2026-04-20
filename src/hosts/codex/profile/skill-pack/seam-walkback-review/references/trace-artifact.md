@@ -1,19 +1,23 @@
 # Trace Artifact
 
-Persist a compact operational trace for every seam-walkback run.
+Persist a compact operational trace for every seam-walkback campaign.
 
-Use the bundled helper for deterministic path/file handling:
+Use the bundled helper for deterministic path/file handling and campaign-lock
+management:
 
 ```bash
 python scripts/walkback_state.py init-trace --project-root .
+python scripts/walkback_state.py packet-path --trace-dir .coortex/review-trace/<run_id>
 python scripts/walkback_state.py append-trace --trace-file <path> --record-file <json-file>
 ```
 
 The helper owns:
 - run-directory creation
 - coordinator file creation
+- canonical packet path resolution
 - JSONL append mechanics
 - trace-record validation for known phase-boundary record types
+- active top-level campaign lock handling for the current worktree
 
 The model still owns the contents of each trace record.
 
@@ -28,30 +32,46 @@ Suggested `run_id` shape:
 Inside that run directory:
 - coordinator file:
   - `coordinator.jsonl`
+- canonical discovery packet path:
+  - `seam-walk-packet.json`
+
+Repository-level active-campaign lock while a top-level review campaign is
+running:
+- `.coortex/review-trace/active-review-campaign.json`
 
 ## Rules
 
-- Create the directory if it does not exist.
+- Allow only one concurrent top-level review campaign per worktree / `.coortex`
+  root.
+- `seam-walkback-review` may not start if another active top-level review
+  campaign already owns the worktree.
+- The orchestrator phase launched **inside** the active seam-walk campaign is
+  part of the same campaign lineage and is allowed to proceed.
 - Append one JSON object per phase-boundary event.
 - Let `append-trace` validate the record shape before it is written.
-- Do not write hidden reasoning or a full transcript.
 - Record observable workflow activity only.
-- Keep trace data on disk by default. Do not surface trace paths or internals in
-  normal output unless the user explicitly asks.
+- Every non-aborted campaign must end with a terminal `final_walkback` record.
 
 ## Record types
 
 At minimum, append these record types when applicable:
 - `trace_started`
+- `campaign_resumed`
 - `archaeology_cluster`
 - `seam_selection`
+- `commit_group_selected`
+- `commit_group_reviewed`
+- `family_consolidation`
+- `handoff_emitted`
+- `final_walkback`
+
+Legacy execution-mode records remain valid for backward compatibility:
 - `baseline_action`
 - `review_step`
 - `repair_step`
 - `deslop_step`
 - `verification`
 - `atomic_commit`
-- `final_walkback`
 
 ## Common fields
 
@@ -64,6 +84,10 @@ Every record should include:
 
 ## Phase-specific expectations
 
+### campaign_resumed
+Include:
+- `previous_run_id`
+
 ### archaeology_cluster
 Include:
 - `cluster_id`
@@ -75,37 +99,41 @@ Include:
 - `seam_id`
 - `reason`
 
-### baseline_action
+### commit_group_selected
 Include:
-- `action`
-- `baseline_path` when known
+- `group_id`
+- `label`
+- `scope_summary`
+- `commit_shas`
+- `primary_seams`
 
-### review_step
+### commit_group_reviewed
 Include:
+- `group_id`
 - `review_skill`
 - `scope_summary`
-- `downstream_run_id` when available
+- `review_grounded_signal_ids`
+- `deslop_advisory_signal_ids`
+- `candidate_family_ids`
 
-### repair_step
+### family_consolidation
 Include:
-- `owning_seam`
-- `write_set`
+- `candidate_family_ids`
+- `summary`
 
-### deslop_step
+### handoff_emitted
 Include:
-- `scope_files`
-- `gate_artifact_dir` when available
-
-### verification
-Include:
-- `verification_run`
-
-### atomic_commit
-Include:
-- `commit_sha`
-- `commit_subject`
+- `packet_path`
+- `next_skill`
+- `handoff_mode`
 
 ### final_walkback
 Include:
 - `outcome_summary`
-- `next_candidate_seam` when known
+- `terminal_state`
+
+Use `terminal_state` values such as:
+- `handoff-completed`
+- `blocked`
+- `aborted`
+- `superseded`

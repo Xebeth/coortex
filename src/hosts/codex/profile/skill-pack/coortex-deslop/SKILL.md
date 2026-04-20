@@ -30,6 +30,28 @@ Do not use this skill when:
   first
 - you want a broad refactor with no behavior lock or bounded scope
 
+## Discovery/advisory mode
+
+`seam-walkback-review` and packet-driven `review-orchestrator` may also use this
+skill as a **read-only advisory lens** during grouped discovery.
+
+In that discovery mode:
+
+- do **not** modify files
+- do **not** run cleanup passes
+- do **not** behave like a fixer
+- emit maintainability signals only:
+  - duplication
+  - stale glue
+  - seam-placement drift
+  - helper sprawl
+  - ownership confusion
+  - cleanup debt
+- treat those signals as advisory until the combined coordinator synthesis
+  grounds them alongside the primary review lens
+
+The mutating cleanup workflow below applies only to post-fix cleanup slices.
+
 ## Coortex stance
 
 - Treat the cleanup as part of a bounded fix slice, not as a new branch-wide

@@ -1,6 +1,6 @@
 ---
 name: seam-walkback-review
-description: Selective git-history archaeology for seam-based maintainability cleanup. Use when broad branch review churn is too expensive and you need a repeatable process to walk back pivot commits, extract stable seams, refresh or derive review baselines, run targeted seam reviews, repair the owning module on current HEAD, run a touched-files-only anti-slop cleanup pass, verify, and commit each slice atomically.
+description: Selective git-history archaeology and grouped discovery for seam-based maintainability campaigns. Use when broad branch review churn is too expensive and you need a repeatable way to walk back pivot commits, extract stable seams, build logical commit groups, run bounded two-lens discovery, and hand the campaign to review-orchestrator for exploration-only family synthesis.
 ---
 
 # Seam Walkback Review
@@ -10,15 +10,17 @@ description: Selective git-history archaeology for seam-based maintainability cl
 Use this skill when a branch has accumulated maintainability debt and broad
 review/fix campaigns are no longer converging.
 
-This skill turns that work into a repeatable loop:
+This skill is now the **discovery phase** of a larger review pipeline:
 
 1. archaeology from selected pivot commits
-2. seam extraction from the archaeology notes
-3. baseline refresh or seam-variant baseline creation
-4. targeted seam review on current HEAD
-5. owning-seam repair
-6. mandatory post-fix anti-slop cleanup on touched files only
-7. targeted verification and atomic commit
+2. logical commit-group selection
+3. bounded two-lens discovery over those groups
+4. candidate-family consolidation
+5. packet emission
+6. automatic handoff to `$review-orchestrator` in packet/exploration mode
+
+This discovery mode does **not** repair code, run mutating cleanup, or commit
+micro-slices.
 
 ## Conversation-visible plan
 
@@ -29,21 +31,19 @@ runs so the user can tell what is happening.
   phase boundary. Keep exactly one step `in_progress` and move it forward as
   the workflow advances.
 - Do not rely only on prose status messages when `update_plan` is available.
-
-- At the start, state the current cluster or seam and the next planned step.
-- After each major phase boundary, update the in-conversation plan/progress
-  before diving back into execution.
-- If you re-scope, skip a phase, or discover a better next slice, say so
+- At the start, state the active campaign and the next planned phase.
+- After archaeology, commit-group review, family consolidation, and handoff,
+  update the in-conversation plan/progress before continuing.
+- If you re-scope, skip a phase, or discover a better grouping, say so
   explicitly instead of silently changing course.
 - These updates are status signals, not approval checkpoints. Unless the user
   explicitly asks you to pause or you are genuinely blocked, continue after the
   update without waiting for acknowledgment.
-- After a successful verification+commit boundary, immediately continue to the
-  next bounded slice when one exists. Do not end with "if you want, I can
-  continue" or similar handoff wording unless a real terminal condition is met.
-- Terminal conditions for this workflow are: explicit user stop, explicit slice
-  budget reached, no bounded next slice, or a genuine blocker that prevents
-  continued execution.
+- Do not end with “if you want, I can continue” or similar offer-to-continue
+  wording unless a real terminal condition is met.
+- Terminal conditions for this workflow are: explicit user stop, no actionable
+  commit groups remain, a deterministic helper reports a blocking campaign/lock
+  error, or the downstream orchestrator handoff cannot be emitted cleanly.
 
 ## When to use it
 
@@ -52,8 +52,8 @@ Good fits:
 - a branch has repeated review churn and keeps surfacing new debt
 - refactors moved responsibilities, but stale glue or split ownership remains
 - one file appears in multiple broad review surfaces and needs a seam-first
-  review model
-- you want reproducible maintainability cleanup instead of ad hoc prompts
+  discovery model
+- you need stable family ids early enough for reopen tracking to matter
 
 Do not use this skill when:
 
@@ -61,81 +61,84 @@ Do not use this skill when:
   use `$coortex-review`
 - you need a normal broad multi-surface review from an already-good baseline;
   use `$review-orchestrator`
-- you only need to refresh or create baselines with no execution slice;
-  use `$review-baseline`
 - you already have a structured review handoff and only need to repair it;
   use `$review-fixer`
 
 ## Core stance
 
 - History is for archaeology, not for fixing old commits.
-- Fix only on current `HEAD`.
-- Treat findings as defect families, not isolated symptoms.
-- Prefer stable seams over one-off files or temporary bug labels.
-- Use a post-fix anti-slop cleanup pass only after a bounded repair lands; do
-  not use cleanup as the archaeology tool.
-- Keep every repair slice small enough to verify and commit atomically.
+- Commit groups are evidence buckets.
+- Families are fix units.
+- Candidate families emitted here are provisional; `$review-orchestrator` has
+  the final say on family grouping, reopen status, and downstream `review_handoff`.
+- Use `$coortex-review` as the primary correctness/contract/recovery lens.
+- Use `$coortex-deslop` only as a **read-only advisory lens** for duplication,
+  stale glue, helper sprawl, seam-placement drift, and ownership confusion.
+- In discovery mode, `$coortex-deslop` must not modify files, run cleanup
+  passes, or behave like a fixer.
+- Deslop-advisory signals alone do not create blocking families. They only
+  become actionable through combined orchestrator synthesis.
 
 ## Repo defaults for this repository
 
-When working in this repo, the durable committed defaults are:
+Treat the active working baselines under `.coortex` as first-class defaults when
+present:
 
-- primary baseline: `docs/review-baseline.yaml`
-- seam variant baseline: `docs/review-baselines/m2-seams.yaml`
+- `.coortex/review-baseline.yaml`
+- `.coortex/review-baselines/m2-seams.yaml`
+- `.coortex/review-baselines/m2-hot-families.yaml`
 
-But treat `.coortex/review-baseline.yaml` as the active working baseline when it
-exists. Use the existing `review-orchestrator` helper to resolve the active
-baseline before assuming the docs path is authoritative.
-
-Refresh the relevant baseline if repo mapping is stale before relying on it.
+Use the durable docs/doc baseline paths only as committed fallback when no local
+working baseline exists.
 
 ## Reuse existing bricks
 
 This skill is a workflow wrapper. Reuse the installed review-skill-pack bricks
 instead of redoing their jobs:
 
-- `$review-baseline` for primary-baseline refresh or seam-variant baseline work
-- `$review-orchestrator` for seam reviews that cleanly match a baseline surface
-- `$coortex-review` for one bounded slice that does not narrow cleanly through
-  the baseline
-- `$review-fixer` when a structured review handoff already exists
-- `$coortex-deslop` for the mandatory post-fix cleanup pass on touched files only
-
-This skill decides **when** to use those bricks and in what order.
+- `$review-baseline` to refresh or derive the active working baseline when repo
+  mapping is stale
+- `$coortex-review` as the primary bounded discovery lens over each selected
+  commit group
+- `$coortex-deslop` as the secondary **read-only advisory** discovery lens over
+  the same bounded group window
+- `$review-orchestrator` to consume the emitted packet and run packet-bootstrap
+  prep + coverage + family exploration + synthesis
 
 ## Deterministic helpers
 
-Only push the parts that are truly mechanical into scripts.
+Push the truly mechanical pieces into scripts.
 
-Use the bundled helper in this skill for the git-side mechanics:
+### Seam-walk helper
 
-- `scripts/walkback_state.py inventory --project-root . --base-ref origin/main`
-  to capture current branch state, merge base, dirty files, and recent commits
-- `scripts/walkback_state.py commit-files <sha>` to emit the changed-file set
-  for a pivot commit while doing archaeology
-- `scripts/walkback_state.py init-trace --project-root .` to create or resume a
-  first-class seam-walkback trace directory
-- `scripts/walkback_state.py append-trace --trace-file <path> --record-file <json-file>`
-  to append validated phase-boundary trace records
+Use this skill's helper for worktree inventory, packet pathing, campaign lock
+handling, and seam-walk trace management:
 
-Reuse the existing deterministic helper in `$review-orchestrator` for baseline
-resolution and narrowing instead of inventing a second implementation:
+```bash
+python scripts/walkback_state.py inventory --project-root . --base-ref origin/main
+python scripts/walkback_state.py commit-files <sha> --project-root .
+python scripts/walkback_state.py init-trace --project-root .
+python scripts/walkback_state.py packet-path --trace-dir .coortex/review-trace/<run_id>
+python scripts/walkback_state.py append-trace --trace-file <path> --record-file <json-file>
+```
 
-- `scripts/return_review_state.py resolve-full-review-baseline ...`
-- `scripts/return_review_state.py validate-full-review-narrowing ...`
+The helper also prevents concurrent top-level seam-walk campaigns in the same
+worktree and blocks seam-walk startup when another top-level review campaign is
+already active there.
 
-Together, those helpers cover the mechanical parts that benefit from
-repeatability:
+### Orchestrator helper
 
-- current worktree and merge-base inventory
-- per-commit changed-file lookup during archaeology
-- seam-walkback trace directory and JSONL record handling
-- baseline resolution
-- baseline narrowing validation
+Use the review-orchestrator helper for packet validation and the eventual
+packet-mode handoff:
 
-Do **not** script the archaeology judgment itself yet. Pivot selection and seam
-consolidation are still judgment-heavy and should remain in the skill text until
-a stable deterministic pattern emerges.
+```bash
+python ../review-orchestrator/scripts/return_review_state.py validate-discovery-packet \
+  --packet-file .coortex/review-trace/<run_id>/seam-walk-packet.json \
+  --project-root .
+```
+
+(When working from the installed skill pack, resolve the script path relative to
+that installed skill directory instead of the source path shown above.)
 
 ## Workflow
 
@@ -147,16 +150,17 @@ bundled helper and append phase-boundary records as described in
 
 Before touching anything:
 
-- check Coortex runtime state
-- inspect the current worktree
-- note any pre-existing dirty files so they do not leak into later commits
+- check Coortex runtime/worktree state
+- inspect the current worktree for pre-existing dirt
+- fail fast if the helper reports another top-level review campaign already owns
+  this worktree
 
 ### 2. Run selective walkback archaeology
 
 Do **not** review every commit.
 
-Instead, select a small set of pivot commits that moved responsibilities.
-Look for:
+Instead, select a small set of pivot commits that moved responsibilities. Look
+for:
 
 - seam extraction refactors
 - ownership migrations
@@ -171,9 +175,9 @@ For each pivot cluster, answer:
 3. what tests or docs define the new contract?
 4. what later patches suggest fallout from that move?
 
-Keep the output short: a debt note with at most a few concrete items.
+Keep the output short: a debt note with a few concrete items.
 
-### 3. Consolidate debt notes into stable seams
+### 3. Consolidate archaeology into stable seams
 
 Group the archaeology into recurring review units such as:
 
@@ -184,106 +188,84 @@ Group the archaeology into recurring review units such as:
 - host adapter contract
 - envelope or prompt bounds
 
-Avoid naming seams after one current file unless that file is the clear long-term
-owner.
+Avoid naming seams after one temporary file unless that file is the clear
+long-term owner.
 
-### 4. Refresh or derive baselines
+### 4. Select logical commit groups
 
-If the primary baseline has stale paths or obvious ownership overlap, refresh it
-first.
+Choose bounded commit groups that act as **evidence buckets** for the next
+review window.
 
-Then decide whether you need an alternative seam-focused baseline.
+For each group, record:
 
-Use `$review-baseline` when you need to:
+- group id and label
+- why these commits belong together
+- primary seams involved
+- candidate files / surfaces that define the bounded group window
 
-- refresh the primary repo mapping
-- create a seam-focused derived or fresh variant baseline
-- replace noisy broad surfaces with better seam surfaces
+### 5. Run two-lens grouped discovery
 
-For this repo, the existing seam variant already lives at:
-`docs/review-baselines/m2-seams.yaml`.
+For each bounded commit group, run two complementary **read-only** lenses over
+that same window:
 
-### 5. Choose the next execution slice
+- `$coortex-review` (primary)
+  - correctness
+  - contracts/invariants
+  - operator truth
+  - recovery semantics
+  - root cause and defect-family grounding
+- `$coortex-deslop` (advisory)
+  - duplication
+  - stale glue
+  - seam-placement drift
+  - helper sprawl
+  - ownership confusion
+  - cleanup debt
 
-Pick one seam or one debt note.
+In discovery mode:
 
-Review choice:
+- neither lens may modify files
+- `$coortex-deslop` must not act like a fixer or post-fix cleanup pass
+- deslop signals alone do not become blocking families
 
-- use `$review-orchestrator` when the seam cleanly matches a baseline surface
-- use `$coortex-review` when the slice is bounded but does not narrow cleanly
-  through the baseline
+### 6. Consolidate candidate families
 
-Default to one seam or one bounded slice at a time.
-Do not reopen the whole branch.
+Merge the grouped lens outputs into provisional discovery families.
 
-### 6. Repair in the owning module on current HEAD
+For each candidate family, record enough for downstream synthesis:
 
-When a finding is confirmed:
+- stable provisional `family_id`
+- candidate root cause
+- source commit-group ids
+- which signals are review-grounded
+- which signals are deslop-advisory
+- likely owning seam and any grounded secondary seams
 
-- identify the owning seam/module
-- remove stale glue or duplicate interpretation paths
-- check sibling manifestations in the affected seam
-- avoid adding new wrappers or compatibility plumbing beside the real owner
+### 7. Emit a discovery packet and hand off automatically
 
-Use `$review-fixer` when structured review output already exists and you want a
-repair driven from that handoff.
-Otherwise perform one bounded repair slice on current `HEAD`.
+Emit a discovery packet that follows the orchestrator packet contract in:
+`../review-orchestrator/references/discovery-packet.md`.
 
-### 7. Mandatory post-fix anti-slop pass
+Validate the packet with the orchestrator helper before handoff.
 
-After the code repair and before final verification, run `$coortex-deslop` on
-touched files only. Use the bundled `scripts/deslop_state.py` helper from that
-skill to resolve the changed-files scope and execute the pre/post cleanup gates
-deterministically.
+Then hand the campaign directly to `$review-orchestrator` in packet-driven
+exploration mode. The user should not need to manually chain the next skill.
 
-Use it to:
+### 8. End with a real terminal record
 
-- delete stale code left behind by the fix
-- absorb duplicate branches or local helper drift
-- simplify naming and local ownership
-- keep the diff bounded
+Every non-aborted run must end with an explicit terminal record after handoff.
 
-Do **not** broaden this into an unrelated refactor.
-
-### 8. Verify the slice
-
-Run targeted verification for the touched seam:
-
-- diagnostics or typecheck on touched files
-- focused tests for the repaired behavior
-- build or integration coverage when materially needed
-
-Do not rely on a generic broad branch rerun if targeted verification is what
-actually locks the slice.
-
-### 9. Commit atomically
-
-Commit only the files that belong to the slice.
-Leave unrelated dirty files alone.
-
-The commit should capture:
-
-- one maintainability or ownership slice
-- the repair
-- any same-slice test or doc update
-
-## Output expectations
-
-When using this skill, keep progress visible. Prefer short structured updates
-such as:
-
-- current archaeology cluster
-- current seam or debt note
-- why this slice was chosen
-- verification run
-- whether the slice is ready to commit
+Do not leave a campaign with only intermediate records such as review,
+verification, or commit-like boundaries.
 
 ## Guardrails
 
-- Do not turn archaeology into commit-by-commit closure review.
-- Do not fix on historical commits.
-- Do not create a fake baseline for one transient annoyance.
-- Do not skip the post-fix anti-slop pass.
-- Do not mix several seams into one cleanup commit just because they are nearby.
-- If a seam note turns into a broader branch-wide issue, stop and re-scope
-  rather than silently expanding the slice.
+- Do not repair code or commit slices in discovery mode.
+- Do not run mutating `$coortex-deslop` cleanup inside discovery mode.
+- Do not start a concurrent seam-walk campaign in the same worktree.
+- Do not allow standalone `$review-orchestrator` to run concurrently in the
+  same worktree; only the orchestrator phase launched from this campaign may
+  proceed while the campaign is active.
+- Do not let candidate families become final family truth locally; the
+  orchestrator validates them against the family ledger and assigns final family
+  grouping.

@@ -5,7 +5,7 @@ Persist a compact operational trace for every orchestrator run.
 Use the bundled helper for deterministic path/file management:
 
 ```bash
-python scripts/return_review_state.py init-trace --mode <mode>
+python scripts/return_review_state.py init-trace --project-root . --mode <mode>
 python scripts/return_review_state.py lane-trace-file --trace-dir <dir> --lane-type <type> --session-id <id> --family-id <family_id> --family-name "<family name>"
 python scripts/return_review_state.py append-trace --trace-file <path> --record-file <json-file>
 python scripts/return_review_state.py summarize-lane-omissions --lane-result-file <lane-json> [--lane-result-file <lane-json> ...]
@@ -15,6 +15,7 @@ python scripts/return_review_state.py current-run-reopens --run-id <run_id>
 
 The helper owns:
 - run-directory creation
+- active top-level review-campaign lock handling for the current worktree
 - coordinator file creation
 - lane filename construction
 - JSONL append mechanics
@@ -45,6 +46,12 @@ Inside that run directory:
 ## Rules
 
 - Create the directory if it does not exist.
+- Allow only one concurrent top-level review campaign per worktree / `.coortex`
+  root.
+- Standalone orchestrator runs must not start while a seam-walk campaign is
+  active in the same worktree.
+- Packet-driven exploration may run only when it is linked to the active
+  seam-walk campaign id.
 - Append one JSON object per phase-boundary event.
 - Let `append-trace` validate the record shape before it is written.
 - Maintain a repository-level family ledger at:
@@ -61,6 +68,7 @@ Inside that run directory:
 At minimum, append these record types when applicable:
 - `trace_started`
 - `prep`
+- `packet_bootstrap`
 - `lane_plan`
 - `lane_result`
 - `omission_followup`
@@ -80,12 +88,25 @@ Every record should include:
 
 ## Prep record
 
+Use normal `prep` for standalone full-discovery or targeted return review.
+
 Include when known:
 - `baseline_path`
 - `changed_files`
 - `surface_mapping`
 - `split_triggers`
 - `boundedness_exceptions`
+
+## Packet-bootstrap record
+
+Use `packet_bootstrap` in packet-driven exploration mode instead of pretending
+that the coordinator reran full discovery prep.
+
+Include:
+- `campaign_id`
+- `packet_path`
+- `candidate_family_ids`
+- `reopened_family_ids`
 
 ## Lane-plan record
 

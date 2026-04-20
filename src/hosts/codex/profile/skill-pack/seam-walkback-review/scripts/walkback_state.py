@@ -8,9 +8,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+ACTIVE_CAMPAIGN_FILE = "active-review-campaign.json"
+SEAM_WALK_CAMPAIGN_TYPE = "seam-walkback-review"
 
 KNOWN_TRACE_PHASES: dict[str, dict[str, str]] = {
     "trace_started": {},
+    "campaign_resumed": {
+        "previous_run_id": "string",
+    },
     "archaeology_cluster": {
         "cluster_id": "string",
         "scope_summary": "string",
@@ -19,6 +24,25 @@ KNOWN_TRACE_PHASES: dict[str, dict[str, str]] = {
     "seam_selection": {
         "seam_id": "string",
         "reason": "string",
+    },
+    "commit_group_selected": {
+        "group_id": "string",
+        "label": "string",
+        "scope_summary": "string",
+        "commit_shas": "list",
+        "primary_seams": "list",
+    },
+    "commit_group_reviewed": {
+        "group_id": "string",
+        "review_skill": "string",
+        "scope_summary": "string",
+        "review_grounded_signal_ids": "list",
+        "deslop_advisory_signal_ids": "list",
+        "candidate_family_ids": "list",
+    },
+    "family_consolidation": {
+        "candidate_family_ids": "list",
+        "summary": "string",
     },
     "baseline_action": {
         "action": "string",
@@ -41,23 +65,25 @@ KNOWN_TRACE_PHASES: dict[str, dict[str, str]] = {
         "commit_sha": "string",
         "commit_subject": "string",
     },
+    "handoff_emitted": {
+        "packet_path": "string",
+        "next_skill": "string",
+        "handoff_mode": "string",
+    },
     "final_walkback": {
         "outcome_summary": "string",
+        "terminal_state": "string",
     },
 }
-
 
 def utc_now_compact() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
 
-
 def utc_now_iso() -> str:
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
-
 def default_run_id() -> str:
     return f"seam-walkback-review-{utc_now_compact()}"
-
 
 def load_json_argument(record_json: str | None, record_file: str | None) -> dict[str, Any]:
     if record_json is not None:
@@ -69,7 +95,6 @@ def load_json_argument(record_json: str | None, record_file: str | None) -> dict
     if not isinstance(data, dict):
         raise SystemExit("trace record must be a JSON object")
     return data
-
 
 def require_trace_field_type(
     record: dict[str, Any],
@@ -88,7 +113,6 @@ def require_trace_field_type(
     elif expected == "list":
         if not isinstance(value, list):
             errors.append(f"{prefix} field {field} must be a list")
-
 
 def validate_trace_record(record: dict[str, Any]) -> list[str]:
     errors: list[str] = []
@@ -112,7 +136,6 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
 
     return errors
 
-
 def run_git(args: list[str], cwd: Path) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -122,7 +145,6 @@ def run_git(args: list[str], cwd: Path) -> str:
         text=True,
     )
     return result.stdout.strip()
-
 
 def try_git(args: list[str], cwd: Path) -> str | None:
     result = subprocess.run(
@@ -136,11 +158,9 @@ def try_git(args: list[str], cwd: Path) -> str | None:
         return None
     return result.stdout.strip()
 
-
 def changed_files_for_commit(cwd: Path, commit: str) -> list[str]:
     output = run_git(["diff-tree", "--no-commit-id", "--name-only", "-r", commit], cwd)
     return [line for line in output.splitlines() if line]
-
 
 def classify_commit(subject: str, file_count: int) -> dict[str, Any]:
     lowered = subject.lower()
@@ -169,6 +189,34 @@ def classify_commit(subject: str, file_count: int) -> dict[str, Any]:
         "pivot_reasons": pivot_reasons,
     }
 
+def resolve_trace_root(project_root: Path, raw_trace_root: str) -> Path:
+    trace_root_arg = Path(raw_trace_root)
+    return (project_root / trace_root_arg).resolve() if not trace_root_arg.is_absolute() else trace_root_arg.resolve()
+
+def active_campaign_path(trace_root: Path) -> Path:
+    return trace_root / ACTIVE_CAMPAIGN_FILE
+
+def load_active_campaign(trace_root: Path) -> dict[str, Any] | None:
+    path = active_campaign_path(trace_root)
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else None
+
+def write_active_campaign(trace_root: Path, data: dict[str, Any]) -> Path:
+    trace_root.mkdir(parents=True, exist_ok=True)
+    path = active_campaign_path(trace_root)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+def clear_active_campaign(trace_root: Path, campaign_id: str) -> bool:
+    path = active_campaign_path(trace_root)
+    active = load_active_campaign(trace_root)
+    if not active or str(active.get("campaign_id") or "") != campaign_id:
+        return False
+    if path.exists():
+        path.unlink()
+    return True
 
 def inventory(args: argparse.Namespace) -> int:
     cwd = Path(args.project_root).resolve()
@@ -219,19 +267,67 @@ def inventory(args: argparse.Namespace) -> int:
     print(json.dumps(data, indent=2))
     return 0
 
-
 def commit_files(args: argparse.Namespace) -> int:
     cwd = Path(args.project_root).resolve()
     files = changed_files_for_commit(cwd, args.commit)
     print(json.dumps({"commit": args.commit, "files": files, "file_count": len(files)}, indent=2))
     return 0
 
-
 def init_trace(args: argparse.Namespace) -> int:
-    run_id = args.run_id or default_run_id()
     project_root = Path(args.project_root).resolve()
-    trace_root_arg = Path(args.trace_root)
-    trace_root = (project_root / trace_root_arg).resolve() if not trace_root_arg.is_absolute() else trace_root_arg.resolve()
+    trace_root = resolve_trace_root(project_root, args.trace_root)
+    trace_root.mkdir(parents=True, exist_ok=True)
+
+    active = load_active_campaign(trace_root)
+    requested_run_id = args.run_id
+    resumed = False
+    previous_run_id = None
+
+    if active and active.get("state") == "active":
+        active_type = str(active.get("campaign_type") or "")
+        active_run_id = str(active.get("campaign_id") or active.get("run_id") or "")
+        if active_type != SEAM_WALK_CAMPAIGN_TYPE:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason": "concurrent-review-campaign",
+                        "message": "an active top-level review campaign already exists for this worktree",
+                        "active_campaign": active,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        if requested_run_id and requested_run_id != active_run_id:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason": "concurrent-seam-walk",
+                        "message": "a seam-walkback campaign is already active for this worktree",
+                        "active_campaign": active,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        run_id = active_run_id
+        resumed = True
+        previous_run_id = active_run_id
+    else:
+        run_id = requested_run_id or default_run_id()
+        active = {
+            "campaign_id": run_id,
+            "campaign_type": SEAM_WALK_CAMPAIGN_TYPE,
+            "state": "active",
+            "worktree_root": str(project_root),
+            "started_at_utc": utc_now_iso(),
+        }
+        write_active_campaign(trace_root, active)
+
     trace_dir = trace_root / run_id
     trace_dir.mkdir(parents=True, exist_ok=True)
     coordinator_file = trace_dir / "coordinator.jsonl"
@@ -239,17 +335,31 @@ def init_trace(args: argparse.Namespace) -> int:
         record = {
             "run_id": run_id,
             "timestamp_utc": utc_now_iso(),
-            "skill": "seam-walkback-review",
+            "skill": SEAM_WALK_CAMPAIGN_TYPE,
             "phase": "trace_started",
             "worktree_root": str(project_root),
         }
         coordinator_file.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    elif resumed:
+        record = {
+            "run_id": run_id,
+            "timestamp_utc": utc_now_iso(),
+            "skill": SEAM_WALK_CAMPAIGN_TYPE,
+            "phase": "campaign_resumed",
+            "worktree_root": str(project_root),
+            "previous_run_id": previous_run_id or run_id,
+        }
+        with coordinator_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+
     print(
         json.dumps(
             {
                 "run_id": run_id,
                 "trace_dir": str(trace_dir),
                 "coordinator_file": str(coordinator_file),
+                "active_campaign_file": str(active_campaign_path(trace_root)),
+                "resumed": resumed,
             },
             indent=2,
             sort_keys=True,
@@ -257,6 +367,12 @@ def init_trace(args: argparse.Namespace) -> int:
     )
     return 0
 
+def packet_path_cmd(args: argparse.Namespace) -> int:
+    trace_dir = Path(args.trace_dir).resolve()
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    packet_path = trace_dir / "seam-walk-packet.json"
+    print(json.dumps({"packet_path": str(packet_path)}, indent=2, sort_keys=True))
+    return 0
 
 def append_trace(args: argparse.Namespace) -> int:
     trace_file = Path(args.trace_file).resolve()
@@ -268,9 +384,37 @@ def append_trace(args: argparse.Namespace) -> int:
         return 1
     with trace_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")
-    print(json.dumps({"trace_file": str(trace_file), "appended": True}, indent=2, sort_keys=True))
-    return 0
 
+    phase = str(record.get("phase") or "")
+    run_id = str(record.get("run_id") or "")
+    trace_root = trace_file.parent.parent
+    active_update = None
+    active_cleared = False
+    if phase == "handoff_emitted":
+        active = load_active_campaign(trace_root)
+        if active and str(active.get("campaign_id") or "") == run_id:
+            active["handoff_mode"] = record.get("handoff_mode")
+            active["handoff_packet_path"] = record.get("packet_path")
+            active["next_skill"] = record.get("next_skill")
+            active["handoff_emitted_at_utc"] = str(record.get("timestamp_utc") or utc_now_iso())
+            write_active_campaign(trace_root, active)
+            active_update = "handoff-emitted"
+    elif phase == "final_walkback":
+        active_cleared = clear_active_campaign(trace_root, run_id)
+
+    print(
+        json.dumps(
+            {
+                "trace_file": str(trace_file),
+                "appended": True,
+                "active_campaign_update": active_update,
+                "active_campaign_cleared": active_cleared,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Deterministic seam-walkback state helpers.")
@@ -307,6 +451,13 @@ def build_parser() -> argparse.ArgumentParser:
     init_trace_parser.add_argument("--run-id")
     init_trace_parser.set_defaults(func=init_trace)
 
+    packet_path_parser = subparsers.add_parser(
+        "packet-path",
+        help="Resolve the canonical seam-walk discovery packet path inside a run trace directory.",
+    )
+    packet_path_parser.add_argument("--trace-dir", required=True)
+    packet_path_parser.set_defaults(func=packet_path_cmd)
+
     append_trace_parser = subparsers.add_parser(
         "append-trace",
         help="Append one JSON record to a seam-walkback trace JSONL file.",
@@ -318,7 +469,6 @@ def build_parser() -> argparse.ArgumentParser:
     append_trace_parser.set_defaults(func=append_trace)
 
     return parser
-
 
 if __name__ == "__main__":
     parser = build_parser()

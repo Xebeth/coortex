@@ -220,6 +220,107 @@ test("seam walkback helper initializes and appends validated trace records", asy
 });
 
 
+test("seam walkback helper blocks concurrent campaigns and clears after terminal trace", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walkback-campaign-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  const init = await runPythonJson(seamWalkbackStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "seam-walkback-review-campaign"
+  ]);
+
+  assert.equal(init.exitCode, 0);
+  const initJson = init.json as {
+    active_campaign_file: string;
+    coordinator_file: string;
+    resumed: boolean;
+    trace_dir: string;
+  };
+  assert.equal(initJson.resumed, false);
+  const activeCampaign = JSON.parse(await readFile(initJson.active_campaign_file, "utf8")) as {
+    campaign_id: string;
+    campaign_type: string;
+    state: string;
+    started_at_utc: string;
+    worktree_root: string;
+  };
+  assert.equal(activeCampaign.campaign_id, "seam-walkback-review-campaign");
+  assert.equal(activeCampaign.campaign_type, "seam-walkback-review");
+  assert.equal(activeCampaign.state, "active");
+  assert.equal(activeCampaign.worktree_root, tempDir);
+  assert.equal(typeof activeCampaign.started_at_utc, "string");
+
+  const packet = await runPythonJson(seamWalkbackStateScript, [
+    "packet-path",
+    "--trace-dir",
+    initJson.trace_dir
+  ]);
+  assert.equal(packet.exitCode, 0);
+  assert.deepEqual(packet.json, {
+    packet_path: join(initJson.trace_dir, "seam-walk-packet.json")
+  });
+
+  const concurrent = await runPythonJson(seamWalkbackStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "seam-walkback-review-competing"
+  ]);
+  assert.equal(concurrent.exitCode, 2);
+  const concurrentJson = concurrent.json as { reason: string; status: string };
+  assert.equal(concurrentJson.status, "error");
+  assert.equal(concurrentJson.reason, "concurrent-seam-walk");
+
+  const terminalRecord = join(tempDir, "final-walkback.json");
+  await writeFile(
+    terminalRecord,
+    JSON.stringify(
+      {
+        run_id: "seam-walkback-review-campaign",
+        timestamp_utc: "2026-04-20T12:05:00Z",
+        skill: "seam-walkback-review",
+        phase: "final_walkback",
+        worktree_root: tempDir,
+        outcome_summary: "Discovery packet handed off to the coordinator and the campaign ended cleanly.",
+        terminal_state: "handoff-completed"
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const terminalAppend = await runPythonJson(seamWalkbackStateScript, [
+    "append-trace",
+    "--trace-file",
+    initJson.coordinator_file,
+    "--record-file",
+    terminalRecord
+  ]);
+  assert.equal(terminalAppend.exitCode, 0);
+  const terminalJson = terminalAppend.json as { active_campaign_cleared: boolean };
+  assert.equal(terminalJson.active_campaign_cleared, true);
+
+  const fresh = await runPythonJson(seamWalkbackStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "seam-walkback-review-next"
+  ]);
+  assert.equal(fresh.exitCode, 0);
+});
+
 test("seam walkback helper still classifies fix-shaped pivots without inline file lists", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walkback-"));
 
@@ -1293,6 +1394,192 @@ test("full-review narrowing helper rejects path subsets that overlap multiple su
   });
 });
 
+test("orchestrator packet mode validates discovery packets and respects the active seam-walk campaign", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-orchestrator-packet-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  await runGit(tempDir, ["init", "-b", "main"]);
+  await runGit(tempDir, ["config", "user.name", "Coortex Tests"]);
+  await runGit(tempDir, ["config", "user.email", "coortex-tests@example.com"]);
+  await writeFile(join(tempDir, "base.txt"), "base\n", "utf8");
+  await runGit(tempDir, ["add", "base.txt"]);
+  await runGit(tempDir, ["commit", "-m", "feat: seed repo"]);
+  const headSha = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: tempDir })).stdout.trim();
+
+  const seamInit = await runPythonJson(seamWalkbackStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "seam-walkback-review-campaign"
+  ]);
+  assert.equal(seamInit.exitCode, 0);
+  const seamInitJson = seamInit.json as { campaign_id?: string; run_id: string; trace_dir: string };
+
+  const packetPath = join(seamInitJson.trace_dir, "seam-walk-packet.json");
+  await writeFile(
+    packetPath,
+    JSON.stringify(
+      {
+        packet_type: "seam-walk-discovery",
+        packet_version: 1,
+        campaign: {
+          campaign_id: seamInitJson.run_id,
+          source_run_id: seamInitJson.run_id,
+          worktree_root: tempDir,
+          review_target: {
+            mode: "branch",
+            scope_summary: "branch delta against main"
+          },
+          base_ref: "main",
+          merge_base: headSha,
+          head_sha: headSha,
+          baseline_path: ".coortex/review-baselines/m2-seams.yaml"
+        },
+        commit_groups: [
+          {
+            group_id: "G-001",
+            label: "operator salvage diagnostics",
+            scope_summary: "Read-only operator command warning handling",
+            commit_shas: [headSha],
+            files: ["src/cli/ctx.ts"],
+            primary_seams: ["operator-command-surfaces"],
+            review_grounded_signals: [
+              {
+                signal_id: "R-001",
+                summary: "Status and inspect suppress salvage diagnostics after recovery warnings.",
+                evidence: ["src/cli/ctx.ts:120-180"],
+                candidate_family_ids: ["F-OP-001"]
+              }
+            ],
+            deslop_advisory_signals: [
+              {
+                signal_id: "D-001",
+                summary: "Operator surfaces still carry duplicated warning formatting glue.",
+                evidence: ["src/cli/ctx.ts:140-176"],
+                candidate_family_ids: ["F-OP-001"]
+              }
+            ],
+            thin_areas: ["none"]
+          }
+        ],
+        candidate_families: [
+          {
+            family_id: "F-OP-001",
+            title: "Operator salvage diagnostics drift",
+            candidate_root_cause: "Read-only operator surfaces diverged from the diagnostics-bearing recovery path.",
+            source_group_ids: ["G-001"],
+            review_grounded_signal_ids: ["R-001"],
+            deslop_advisory_signal_ids: ["D-001"],
+            likely_owning_seam: "operator-command-surfaces",
+            secondary_seams: ["projection-recovery-warning-fidelity"],
+            status: "candidate-open"
+          }
+        ],
+        handoff: {
+          mode: "exploration-only",
+          requested_phases: ["prep", "coverage", "family-exploration", "synthesis"]
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const validPacket = await runPythonJson(returnReviewStateScript, [
+    "validate-discovery-packet",
+    "--packet-file",
+    packetPath,
+    "--project-root",
+    tempDir
+  ]);
+  assert.equal(validPacket.exitCode, 0);
+  const validPacketJson = validPacket.json as {
+    candidate_family_ids: string[];
+    campaign_id: string;
+    group_count: number;
+    valid: boolean;
+  };
+  assert.equal(validPacketJson.valid, true);
+  assert.equal(validPacketJson.campaign_id, seamInitJson.run_id);
+  assert.equal(validPacketJson.group_count, 1);
+  assert.deepEqual(validPacketJson.candidate_family_ids, ["F-OP-001"]);
+
+  const blockedStandalone = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "full-review"
+  ]);
+  assert.equal(blockedStandalone.exitCode, 2);
+  const blockedJson = blockedStandalone.json as { reason: string; status: string };
+  assert.equal(blockedJson.status, "error");
+  assert.equal(blockedJson.reason, "concurrent-review-campaign");
+
+  const packetMode = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "packet-exploration",
+    "--campaign-id",
+    seamInitJson.run_id,
+    "--run-id",
+    "review-orchestrator-packet-20260420T120000Z"
+  ]);
+  assert.equal(packetMode.exitCode, 0);
+  const packetModeJson = packetMode.json as { campaign_id: string; run_id: string };
+  assert.equal(packetModeJson.campaign_id, seamInitJson.run_id);
+  assert.equal(packetModeJson.run_id, "review-orchestrator-packet-20260420T120000Z");
+
+  const finalWalkbackPath = join(tempDir, "final-walkback.json");
+  await writeFile(
+    finalWalkbackPath,
+    JSON.stringify(
+      {
+        run_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-20T12:30:00Z",
+        skill: "seam-walkback-review",
+        phase: "final_walkback",
+        worktree_root: tempDir,
+        outcome_summary: "The discovery campaign emitted a packet and the coordinator accepted the handoff.",
+        terminal_state: "handoff-completed"
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await runPythonJson(seamWalkbackStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, seamInitJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    finalWalkbackPath
+  ]);
+
+  const standaloneAfterTerminal = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "full-review",
+    "--run-id",
+    "review-orchestrator-full-review-20260420T130000Z"
+  ]);
+  assert.equal(standaloneAfterTerminal.exitCode, 0);
+});
+
 test("orchestrator trace helper validates lane result records before appending", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");
@@ -1330,6 +1617,7 @@ test("orchestrator trace helper validates lane result records before appending",
 
   assert.equal(valid.exitCode, 0);
   assert.deepEqual(valid.json, {
+    active_campaign_cleared: false,
     appended: true,
     status: "ok",
     trace_file: traceFile
@@ -1625,6 +1913,7 @@ test("orchestrator trace helper validates omission follow-up records before appe
 
   assert.equal(valid.exitCode, 0);
   assert.deepEqual(valid.json, {
+    active_campaign_cleared: false,
     appended: true,
     status: "ok",
     trace_file: traceFile
