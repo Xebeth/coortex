@@ -794,6 +794,62 @@ async function appendCompletedResultStatusDrift(
   );
 }
 
+async function appendCompletedDecisionStatusDrift(
+  runtimeDir: string,
+  currentObjective: string
+): Promise<void> {
+  const snapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    sessionId: string;
+    status: {
+      activeMode: string;
+      currentObjective: string;
+      activeAssignmentIds: string[];
+      activeHost: string;
+      activeAdapter: string;
+      lastDurableOutputAt: string;
+      resumeReady: boolean;
+    };
+  };
+  const driftTimestamp = new Date(Date.now() + 1_000).toISOString();
+  const existingEvents = (await readFile(join(runtimeDir, "runtime", "events.ndjson"), "utf8"))
+    .split("\n")
+    .filter(Boolean);
+  existingEvents.push(
+    JSON.stringify({
+      eventId: randomUUID(),
+      sessionId: snapshot.sessionId,
+      timestamp: driftTimestamp,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...snapshot.status,
+          currentObjective,
+          lastDurableOutputAt: driftTimestamp
+        }
+      }
+    })
+  );
+  await writeFile(join(runtimeDir, "runtime", "events.ndjson"), `${existingEvents.join("\n")}\n`, "utf8");
+  await writeFile(
+    join(runtimeDir, "runtime", "snapshot.json"),
+    JSON.stringify(
+      {
+        ...snapshot,
+        status: {
+          ...snapshot.status,
+          currentObjective,
+          lastDurableOutputAt: driftTimestamp
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+}
+
 async function appendHistoricalRecoveredCompletedResultStatusEvent(runtimeDir: string): Promise<void> {
   const snapshot = JSON.parse(
     await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
@@ -3365,6 +3421,108 @@ test("ctx status recovers a completed host decision before further action", asyn
   await assert.rejects(
     readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
     /ENOENT/
+  );
+});
+
+test("ctx status and resume keep workflow-derived status after completed-decision recovery", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId } =
+    await createCompletedDecisionRecoverySetup({
+      includeLeftoverLease: true
+    });
+
+  const firstStatus = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const firstSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    status: { lastDurableOutputAt: string };
+  };
+  const authoritativeLastDurableOutputAt = firstSnapshot.status.lastDurableOutputAt;
+
+  assert.match(firstStatus.stderr, /WARNING completed-run-reconciled/);
+  assert.match(firstStatus.stdout, new RegExp(`Resolve decision decision-cli-completed-status:`));
+
+  await appendCompletedDecisionStatusDrift(
+    runtimeDir,
+    "Operator adjusted the status after completed decision recovery."
+  );
+
+  const secondStatus = await execFileAsync(process.execPath, [cliPath, "status"], {
+    cwd: projectRoot
+  });
+  const secondSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; state: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string; lastDurableOutputAt: string };
+  };
+
+  assert.doesNotMatch(secondStatus.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(secondStatus.stderr, /WARNING stale-run-reconciled/);
+  assert.match(secondStatus.stdout, /Active assignments: 1/);
+  assert.match(secondStatus.stdout, /Open decisions: 1/);
+  assert.match(secondStatus.stdout, /Resolve decision decision-cli-completed-status:/);
+  assert.equal(secondSnapshot.assignments[0]?.state, "blocked");
+  assert.equal(secondSnapshot.decisions.length, 1);
+  assert.equal(secondSnapshot.decisions[0]?.decisionId, "decision-cli-completed-status");
+  assert.equal(secondSnapshot.decisions[0]?.assignmentId, assignmentId);
+  assert.equal(secondSnapshot.decisions[0]?.state, "open");
+  assert.deepEqual(secondSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.equal(
+    secondSnapshot.status.currentObjective,
+    "Resolve decision decision-cli-completed-status: Need operator confirmation before proceeding."
+  );
+  assert.equal(
+    secondSnapshot.status.lastDurableOutputAt,
+    authoritativeLastDurableOutputAt
+  );
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 1);
+
+  const resume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  assert.equal(resume.exitCode, 0);
+  assert.match(resume.stdout, /Recovery brief generated/);
+  assert.match(resume.stdout, /Resolve decision decision-cli-completed-status:/);
+  assert.doesNotMatch(resume.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(resume.stderr, /WARNING stale-run-reconciled/);
+
+  const finalSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    decisions: Array<{ decisionId: string; assignmentId: string; state: string }>;
+    status: { activeAssignmentIds: string[]; currentObjective: string; lastDurableOutputAt: string };
+  };
+
+  assert.equal(finalSnapshot.assignments[0]?.state, "blocked");
+  assert.equal(finalSnapshot.decisions.length, 1);
+  assert.equal(finalSnapshot.decisions[0]?.decisionId, "decision-cli-completed-status");
+  assert.equal(finalSnapshot.decisions[0]?.assignmentId, assignmentId);
+  assert.equal(finalSnapshot.decisions[0]?.state, "open");
+  assert.deepEqual(finalSnapshot.status.activeAssignmentIds, [assignmentId]);
+  assert.equal(
+    finalSnapshot.status.currentObjective,
+    "Resolve decision decision-cli-completed-status: Need operator confirmation before proceeding."
+  );
+  assert.equal(
+    finalSnapshot.status.lastDurableOutputAt,
+    authoritativeLastDurableOutputAt
+  );
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, assignmentId, "decision.created"), 1);
+  assert.deepEqual(
+    JSON.parse(resume.stdout.slice(resume.stdout.indexOf("{"))).recoveryBrief.unresolvedDecisions,
+    [
+      {
+        decisionId: "decision-cli-completed-status",
+        assignmentId,
+        blockerSummary: "Need operator confirmation before proceeding.",
+        recommendedOption: "wait",
+        trimmed: false
+      }
+    ]
   );
 });
 
