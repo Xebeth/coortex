@@ -511,6 +511,82 @@ test("milestone-2 integration: normal plan advancement refreshes the persisted r
   assert.deepEqual(persistedEnvelope.requiredOutputs, reviewAssignment?.requiredOutputs);
 });
 
+test("milestone-2 integration: normal decision runs refresh the persisted resume envelope to the blocked open-decision state", async () => {
+  const blockerSummary = "Need operator guidance before the plan can continue.";
+  const setup = await createSmokeSetup(async (input) => {
+    await writeStructuredOutput(input.outputPath, {
+      outcomeType: "decision",
+      resultStatus: "",
+      resultSummary: "",
+      changedFiles: [],
+      blockerSummary,
+      decisionOptions: [{ id: "wait", label: "Wait", summary: "Pause until guidance arrives." }],
+      recommendedOption: "wait"
+    });
+    await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-plan-decision-envelope" });
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: ""
+    };
+  });
+
+  const planAssignmentId = setup.assignmentId;
+  const planAssignment = (await loadOperatorProjection(setup.store)).assignments.get(planAssignmentId);
+  const run = await runRuntime(setup.store, setup.adapter);
+  const openDecision = [...run.projectionAfter.decisions.values()].find(
+    (decision) => decision.assignmentId === planAssignmentId && decision.state === "open"
+  );
+  assert.ok(openDecision, "expected the decision run to persist an open decision");
+
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as typeof run.envelope;
+
+  assert.equal(run.recoveredOutcome, false);
+  assert.equal(run.assignment.id, planAssignmentId);
+  assert.equal(run.execution.outcome.kind, "decision");
+  assert.equal(run.projectionBefore.workflowProgress?.currentModuleId, "plan");
+  assert.equal(run.projectionBefore.workflowProgress?.currentAssignmentId, planAssignmentId);
+  assert.equal(run.envelope.workflow?.currentModuleId, "plan");
+  assert.equal(run.envelope.workflow?.currentAssignmentId, planAssignmentId);
+  assert.equal(run.envelope.metadata.activeAssignmentId, planAssignmentId);
+  assert.equal(run.envelope.objective, planAssignment?.objective);
+  assert.equal(run.envelope.recoveryBrief.unresolvedDecisions.length, 0);
+  assert.equal(run.projectionAfter.assignments.get(planAssignmentId)?.state, "blocked");
+  assert.equal(run.projectionAfter.workflowProgress?.currentModuleId, "plan");
+  assert.equal(run.projectionAfter.workflowProgress?.currentAssignmentId, planAssignmentId);
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, [planAssignmentId]);
+  assert.equal(
+    run.projectionAfter.status.currentObjective,
+    `Resolve decision ${openDecision.decisionId}: ${blockerSummary}`
+  );
+  assert.equal(persistedEnvelope.workflow?.currentModuleId, "plan");
+  assert.equal(persistedEnvelope.workflow?.currentModuleState, "blocked");
+  assert.equal(persistedEnvelope.workflow?.currentAssignmentId, planAssignmentId);
+  assert.equal(
+    persistedEnvelope.workflow?.blockerReason,
+    `Resolve decision ${openDecision.decisionId}: ${blockerSummary}`
+  );
+  assert.equal(persistedEnvelope.metadata.activeAssignmentId, planAssignmentId);
+  assert.equal(persistedEnvelope.objective, planAssignment?.objective);
+  assert.deepEqual(persistedEnvelope.requiredOutputs, planAssignment?.requiredOutputs);
+  assert.deepEqual(
+    persistedEnvelope.recoveryBrief.unresolvedDecisions,
+    [{
+      decisionId: openDecision.decisionId,
+      assignmentId: planAssignmentId,
+      blockerSummary,
+      recommendedOption: "wait",
+      trimmed: false
+    }]
+  );
+  assert.equal(
+    persistedEnvelope.recoveryBrief.nextRequiredAction,
+    `Resolve decision ${openDecision.decisionId}: ${blockerSummary}`
+  );
+});
+
 test("milestone-2 integration: legacy normal runs skip unavailable envelope refresh", async () => {
   const setup = await createSmokeSetup(
     stableRunner("legacy-normal-run-thread", "Legacy normal run completed.")
