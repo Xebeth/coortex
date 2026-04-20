@@ -2014,6 +2014,187 @@ test("ctx run recovers terminal workflow results before reporting completion", a
   );
 });
 
+test("ctx run refreshes the persisted envelope after a normal terminal workflow completion", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-terminal-workflow-envelope-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const fixturePath = join(projectRoot, "codex-exec-fixture.json");
+
+  await writeFile(
+    fixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [{ type: "thread.started", thread_id: "thread-cli-terminal-workflow" }],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "completed",
+          resultSummary: "Workflow verification completed successfully.",
+          changedFiles: ["src/cli/ctx.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const env = {
+    ...process.env,
+    COORTEX_CODEX_EXEC_FIXTURE: fixturePath
+  };
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot,
+    env
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const store = RuntimeStore.forProject(projectRoot);
+  const initialSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+    workflowProgress?: { currentAssignmentId: string | null };
+  };
+  const planAssignmentId = initialSnapshot.assignments[0]!.id;
+
+  await appendWorkflowModuleProgression(store, {
+    artifact: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "plan",
+      moduleAttempt: 1,
+      assignmentId: planAssignmentId,
+      createdAt: "2026-04-20T10:01:00.000Z",
+      payload: {
+        planSummary: "Plan ready for review.",
+        implementationSteps: ["Advance to review."],
+        reviewEvidenceSummary: "Review can proceed with the prepared plan."
+      }
+    },
+    resultId: "result-cli-terminal-envelope-plan",
+    summary: "Plan completed.",
+    createdAt: "2026-04-20T10:01:00.000Z",
+    progressionAt: "2026-04-20T10:01:01.000Z"
+  });
+
+  const afterPlanSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    workflowProgress: { currentAssignmentId: string | null };
+  };
+  const reviewAssignmentId = afterPlanSnapshot.workflowProgress.currentAssignmentId;
+  assert.ok(reviewAssignmentId, "expected workflow review assignment after plan advancement");
+
+  await appendWorkflowModuleProgression(store, {
+    artifact: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "review",
+      moduleAttempt: 1,
+      assignmentId: reviewAssignmentId,
+      createdAt: "2026-04-20T10:03:00.000Z",
+      payload: {
+        verdict: "approved",
+        rationaleSummary: "Review approved."
+      }
+    },
+    resultId: "result-cli-terminal-envelope-review",
+    summary: "Review completed.",
+    createdAt: "2026-04-20T10:03:00.000Z",
+    progressionAt: "2026-04-20T10:03:01.000Z"
+  });
+
+  const afterReviewSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    workflowProgress: { currentAssignmentId: string | null };
+  };
+  const verifyAssignmentId = afterReviewSnapshot.workflowProgress.currentAssignmentId;
+  assert.ok(verifyAssignmentId, "expected workflow verify assignment after review advancement");
+
+  await store.writeJsonArtifact(
+    workflowArtifactPath("default", 1, "verify", verifyAssignmentId, 1),
+    {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "verify",
+      moduleAttempt: 1,
+      assignmentId: verifyAssignmentId,
+      createdAt: "2026-04-20T10:05:00.000Z",
+      payload: {
+        verdict: "verified",
+        verificationSummary: "Verification completed successfully.",
+        evidenceResultIds: ["result-cli-terminal-envelope-review"]
+      }
+    } satisfies WorkflowArtifactDocument
+  );
+
+  const envelopeBeforeRun = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    objective: string;
+    workflow?: { currentAssignmentId: string | null };
+    metadata: { activeAssignmentId: string | null };
+  };
+
+  assert.notEqual(envelopeBeforeRun.objective, "Workflow default complete.");
+  assert.notEqual(envelopeBeforeRun.workflow?.currentAssignmentId ?? null, null);
+  assert.notEqual(envelopeBeforeRun.metadata.activeAssignmentId, null);
+
+  const readyStatus = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot,
+    env
+  });
+  const run = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot,
+    env
+  });
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    objective: string;
+    writeScope: string[];
+    requiredOutputs: string[];
+    recoveryBrief: {
+      activeAssignments: Array<{ id: string }>;
+      nextRequiredAction: string;
+    };
+    workflow: {
+      id: string;
+      currentModuleId: string;
+      currentModuleState: string;
+      currentAssignmentId: string | null;
+      lastDurableAdvancement?: string | null;
+    };
+    metadata: {
+      activeAssignmentId: string | null;
+    };
+  };
+
+  assert.equal(readyStatus.exitCode, 0);
+  assert.match(readyStatus.stdout, /Current module: verify/);
+  assert.match(readyStatus.stdout, /Active assignments: 1/);
+  assert.equal(readyStatus.stderr.trim(), "");
+  assert.equal(run.exitCode, 0);
+  assert.match(run.stdout, /Executed assignment/);
+  assert.match(run.stdout, /Host run: thread-cli-terminal-workflow/);
+  assert.match(run.stdout, /Result \(completed\): Workflow verification completed successfully\./);
+  assert.equal(persistedEnvelope.objective, "Workflow default complete.");
+  assert.deepEqual(persistedEnvelope.writeScope, []);
+  assert.deepEqual(persistedEnvelope.requiredOutputs, []);
+  assert.deepEqual(persistedEnvelope.recoveryBrief.activeAssignments, []);
+  assert.equal(persistedEnvelope.recoveryBrief.nextRequiredAction, "Workflow default complete.");
+  assert.equal(persistedEnvelope.workflow.id, "default");
+  assert.equal(persistedEnvelope.workflow.currentModuleId, "verify");
+  assert.equal(persistedEnvelope.workflow.currentModuleState, "completed");
+  assert.equal(persistedEnvelope.workflow.currentAssignmentId, null);
+  assert.equal(persistedEnvelope.metadata.activeAssignmentId, null);
+});
+
 test("ctx inspect recovers terminal workflow results after completion", async () => {
   const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
     await createCompletedWorkflowTerminalResultRecoverySetup();
