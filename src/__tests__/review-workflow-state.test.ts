@@ -1996,6 +1996,448 @@ test("fixer trace helper validates final-fix records before appending", async ()
   );
 });
 
+test("fixer trace helper validates per-family return-review round counts", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
+  const traceFile = join(tempDir, "coordinator.jsonl");
+
+  const valid = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "review-fixer-20260420T120000Z",
+      timestamp_utc: "2026-04-20T12:00:00Z",
+      skill: "review-fixer",
+      mode: "native-intake",
+      phase: "family_commit",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001", "F-002"],
+      commit_sha: "abc1234",
+      return_review_rounds_taken_by_family: {
+        "F-001": 2,
+        "F-002": 0
+      }
+    })
+  ]);
+
+  assert.equal(valid.exitCode, 0);
+  assert.deepEqual(valid.json, {
+    appended: true,
+    status: "ok",
+    trace_file: traceFile
+  });
+
+  const invalid = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "review-fixer-20260420T120100Z",
+      timestamp_utc: "2026-04-20T12:01:00Z",
+      skill: "review-fixer",
+      mode: "native-intake",
+      phase: "family_commit",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001", "F-002"],
+      commit_sha: "def5678",
+      return_review_rounds_taken_by_family: {
+        "F-001": 1
+      }
+    })
+  ]);
+
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as {
+    appended: boolean;
+    errors: string[];
+    status: string;
+  };
+  assert.equal(invalidJson.appended, false);
+  assert.equal(invalidJson.status, "error");
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("return_review_rounds_taken_by_family keys must match family_ids exactly")
+    )
+  );
+});
+
+test("fixer helper plans repair slices by seam, overlap, and blocker waves", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-fix-plan-"));
+  const reviewHandoffPath = join(tempDir, "review-handoff.json");
+
+  await writeFile(
+    reviewHandoffPath,
+    JSON.stringify(
+      {
+        review_handoff: {
+          review_target: {
+            mode: "branch",
+            scope_summary: "branch delta"
+          },
+          families: [
+            {
+              family_id: "F-A",
+              title: "A",
+              review_hints: {
+                likely_owning_seam: "src/a.ts",
+                secondary_seams: [],
+                candidate_write_set: ["src/a.ts"],
+                candidate_test_set: ["src/__tests__/a.test.ts"],
+                candidate_doc_set: [],
+                parallelizable: true
+              }
+            },
+            {
+              family_id: "F-B",
+              title: "B",
+              review_hints: {
+                likely_owning_seam: "src/a.ts",
+                secondary_seams: [],
+                candidate_write_set: ["src/a.ts"],
+                candidate_test_set: ["src/__tests__/a.test.ts"],
+                candidate_doc_set: [],
+                parallelizable: true
+              }
+            },
+            {
+              family_id: "F-C",
+              title: "C",
+              review_hints: {
+                likely_owning_seam: "src/c.ts",
+                secondary_seams: [],
+                candidate_write_set: ["src/c.ts"],
+                candidate_test_set: ["src/__tests__/c.test.ts"],
+                candidate_doc_set: [],
+                parallelizable: true
+              }
+            },
+            {
+              family_id: "F-D",
+              title: "D",
+              review_hints: {
+                likely_owning_seam: "src/d.ts",
+                secondary_seams: [],
+                candidate_write_set: ["src/d.ts"],
+                candidate_test_set: ["src/__tests__/d.test.ts"],
+                candidate_doc_set: [],
+                parallelizable: true
+              },
+              carry_forward_context: {
+                reason_kind: "sequenced-after-overlapping-family",
+                blocking_family_ids: ["F-C"]
+              }
+            }
+          ]
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const result = await runPythonJson(fixResultStateScript, [
+    "plan-repair-slices",
+    "--review-handoff",
+    reviewHandoffPath
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  const json = result.json as {
+    status: string;
+    orchestration_mode: string;
+    lane_ids: string[];
+    slices: Array<{ lane_id: string; family_ids: string[]; wave_id: string; execution_mode: string }>;
+    waves: Array<{ wave_id: string; slice_ids: string[] }>;
+  };
+  assert.equal(json.status, "ok");
+  assert.equal(json.orchestration_mode, "coordinated-sequenced");
+  assert.deepEqual(json.lane_ids, ["L-001", "L-002", "L-003"]);
+  assert.equal(json.slices[0]?.lane_id, "L-001");
+  assert.deepEqual(json.slices[0]?.family_ids, ["F-A", "F-B"]);
+  assert.equal(json.slices[0]?.wave_id, "W-001");
+  assert.equal(json.slices[0]?.execution_mode, "sequential-within-slice");
+  assert.equal(json.slices[1]?.lane_id, "L-002");
+  assert.deepEqual(json.slices[1]?.family_ids, ["F-C"]);
+  assert.equal(json.slices[1]?.wave_id, "W-001");
+  assert.equal(json.slices[1]?.execution_mode, "single-family");
+  assert.equal(json.slices[2]?.lane_id, "L-003");
+  assert.deepEqual(json.slices[2]?.family_ids, ["F-D"]);
+  assert.equal(json.slices[2]?.wave_id, "W-002");
+  assert.equal(json.slices[2]?.execution_mode, "single-family");
+  assert.deepEqual(json.waves, [
+    { wave_id: "W-001", slice_ids: ["S-001", "S-002"] },
+    { wave_id: "W-002", slice_ids: ["S-003"] }
+  ]);
+});
+
+test("fixer helper builds and validates same-lane continuation packets", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-lane-continuation-"));
+  const reviewHandoffPath = join(tempDir, "review-handoff.json");
+  const lanePlanPath = join(tempDir, "lane-plan.json");
+  const continuationPath = join(tempDir, "lane-continuation.json");
+
+  await writeFile(
+    reviewHandoffPath,
+    JSON.stringify(
+      {
+        review_handoff: {
+          review_target: {
+            mode: "branch",
+            scope_summary: "actionable family lane"
+          },
+          families: [
+            {
+              family_id: "F-001",
+              title: "Actionable family",
+              review_hints: {
+                likely_owning_seam: "src/core/reclaim.ts"
+              }
+            }
+          ]
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await writeFile(
+    lanePlanPath,
+    JSON.stringify(
+      {
+        slices: [
+          {
+            slice_id: "S-001",
+            lane_id: "L-001",
+            family_ids: ["F-001"],
+            family_metadata: [
+              {
+                family_id: "F-001",
+                title: "Actionable family",
+                likely_owning_seam: "src/core/reclaim.ts",
+                identity_token: "F-001::Actionable family::src/core/reclaim.ts"
+              }
+            ],
+            continuation_policy: "same-lane-until-approved"
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const built = await runPythonJson(fixResultStateScript, [
+    "build-lane-continuation",
+    "--review-handoff",
+    reviewHandoffPath,
+    "--lane-plan-json",
+    lanePlanPath,
+    "--lane-id",
+    "L-001",
+    "--worker-session-id",
+    "worker-7",
+    "--reviewer-run-id",
+    "review-orchestrator-return-review-20260420T180000Z",
+    "--return-review-round",
+    "2"
+  ]);
+
+  assert.equal(built.exitCode, 0);
+  await writeFile(continuationPath, JSON.stringify(built.json, null, 2), "utf8");
+  const continuation = built.json as {
+    lane_continuation: {
+      lane_id: string;
+      worker_session_id: string;
+      slice_id: string;
+      family_ids: string[];
+      original_lane_family_ids: string[];
+      original_lane_family_metadata: Array<{
+        family_id: string;
+        title: string;
+        likely_owning_seam: string | null;
+        identity_token: string;
+      }>;
+      return_review_round: number;
+      review_source: { skill: string; mode: string; reviewer_run_id: string };
+    };
+  };
+  assert.equal(continuation.lane_continuation.lane_id, "L-001");
+  assert.equal(continuation.lane_continuation.worker_session_id, "worker-7");
+  assert.equal(continuation.lane_continuation.slice_id, "S-001");
+  assert.deepEqual(continuation.lane_continuation.family_ids, ["F-001"]);
+  assert.deepEqual(continuation.lane_continuation.original_lane_family_ids, ["F-001"]);
+  assert.deepEqual(continuation.lane_continuation.original_lane_family_metadata, [
+    {
+      family_id: "F-001",
+      title: "Actionable family",
+      likely_owning_seam: "src/core/reclaim.ts",
+      identity_token: "F-001::Actionable family::src/core/reclaim.ts"
+    }
+  ]);
+  assert.equal(continuation.lane_continuation.return_review_round, 2);
+  assert.deepEqual(continuation.lane_continuation.review_source, {
+    skill: "review-orchestrator",
+    mode: "targeted-return-review",
+    reviewer_run_id: "review-orchestrator-return-review-20260420T180000Z"
+  });
+
+  const validated = await runPythonJson(fixResultStateScript, [
+    "validate-lane-continuation",
+    "--lane-continuation",
+    continuationPath,
+    "--expected-lane-id",
+    "L-001",
+    "--expected-worker-session-id",
+    "worker-7",
+    "--expected-slice-id",
+    "S-001",
+    "--lane-plan-json",
+    lanePlanPath
+  ]);
+
+  assert.equal(validated.exitCode, 0);
+  const validatedJson = validated.json as {
+    status: string;
+    lane_id: string;
+    worker_session_id: string;
+    slice_id: string;
+    family_ids: string[];
+    original_lane_family_ids: string[];
+    original_lane_family_metadata: Array<{
+      family_id: string;
+      title: string;
+      likely_owning_seam: string | null;
+      identity_token: string;
+    }>;
+    return_review_round: number;
+  };
+  assert.equal(validatedJson.status, "ok");
+  assert.equal(validatedJson.lane_id, "L-001");
+  assert.equal(validatedJson.worker_session_id, "worker-7");
+  assert.equal(validatedJson.slice_id, "S-001");
+  assert.deepEqual(validatedJson.family_ids, ["F-001"]);
+  assert.deepEqual(validatedJson.original_lane_family_ids, ["F-001"]);
+  assert.deepEqual(validatedJson.original_lane_family_metadata, [
+    {
+      family_id: "F-001",
+      title: "Actionable family",
+      likely_owning_seam: "src/core/reclaim.ts",
+      identity_token: "F-001::Actionable family::src/core/reclaim.ts"
+    }
+  ]);
+  assert.equal(validatedJson.return_review_round, 2);
+});
+
+test("fixer helper rejects continuation packets with mismatched lane metadata", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-lane-continuation-invalid-"));
+  const lanePlanPath = join(tempDir, "lane-plan.json");
+  const continuationPath = join(tempDir, "lane-continuation.json");
+
+  await writeFile(
+    lanePlanPath,
+    JSON.stringify(
+      {
+        slices: [
+          {
+            slice_id: "S-001",
+            lane_id: "L-001",
+            family_ids: ["F-001"],
+            family_metadata: [
+              {
+                family_id: "F-001",
+                title: "Expected family",
+                likely_owning_seam: "src/core/reclaim.ts",
+                identity_token: "F-001::Expected family::src/core/reclaim.ts"
+              }
+            ],
+            continuation_policy: "same-lane-until-approved"
+          }
+        ]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await writeFile(
+    continuationPath,
+    JSON.stringify(
+      {
+        lane_continuation: {
+          lane_id: "L-001",
+          worker_session_id: "worker-7",
+          slice_id: "S-001",
+          family_ids: ["F-001"],
+          original_lane_family_ids: ["F-001"],
+          original_lane_family_metadata: [
+            {
+              family_id: "F-001",
+              title: "Wrong family",
+              likely_owning_seam: "src/core/reclaim.ts",
+              identity_token: "F-001::Wrong family::src/core/reclaim.ts"
+            }
+          ],
+          continuation_policy: "same-lane-until-approved",
+          return_review_round: 2,
+          review_source: {
+            skill: "review-orchestrator",
+            mode: "targeted-return-review",
+            reviewer_run_id: "review-orchestrator-return-review-20260420T180000Z"
+          },
+          review_handoff: {
+            review_target: {
+              mode: "branch",
+              scope_summary: "actionable family lane"
+            },
+            families: [
+              {
+                family_id: "F-001",
+                title: "Wrong family"
+              }
+            ]
+          }
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const validated = await runPythonJson(fixResultStateScript, [
+    "validate-lane-continuation",
+    "--lane-continuation",
+    continuationPath,
+    "--lane-plan-json",
+    lanePlanPath,
+    "--expected-lane-id",
+    "L-001",
+    "--expected-worker-session-id",
+    "worker-7",
+    "--expected-slice-id",
+    "S-001"
+  ]);
+
+  assert.equal(validated.exitCode, 2);
+  const validatedJson = validated.json as {
+    status: string;
+    errors: string[];
+  };
+  assert.equal(validatedJson.status, "error");
+  assert.ok(
+    validatedJson.errors.some((error) =>
+      error.includes("original_lane_family_metadata does not match the provided lane plan")
+    )
+  );
+});
+
 test("family ledger records reopen-after-closed and surfaces it for the current run", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-family-ledger-"));
 

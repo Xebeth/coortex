@@ -66,6 +66,9 @@ Rules:
 
 Emit a mandatory `review_return_handoff` for downstream re-review.
 
+This is the worker lane's output to the independent reviewer. It does not grant
+closure or commit authority by itself.
+
 Before finalizing it, run the bundled helper:
 
 ```bash
@@ -139,6 +142,8 @@ Rules:
 - `residual_risks` must be explicit. Use `none` only when nothing material remains open.
 - When any input families were intentionally left for a later slice, also emit `deferred_families` using the deferred/refused-family contract below so targeted return review can preserve or reopen them structurally instead of rediscovering them from prose.
 - Emit this handoff for every claimed closure status, including `family-closed` and `verification-blocked`.
+- Worker lanes do not commit from this handoff. The fixer coordinator commits
+  only after `$review-orchestrator` targeted return review approves closure.
 
 ## Final output
 

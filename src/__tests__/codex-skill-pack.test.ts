@@ -144,6 +144,24 @@ test("seam walkback explicitly forbids offer-to-continue stops after successful 
   }
 });
 
+test("review fixer explicitly requires same-worker continuation semantics", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-fixer/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/review-fixer/references/lane-continuation.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /same worker|same-worker|resume the same worker|do not close that worker|do not .*respawn|do not .*restart.*from scratch/i,
+      path
+    );
+  }
+});
+
 async function walk(
   dir: string,
   visitFile: (path: string) => Promise<void>

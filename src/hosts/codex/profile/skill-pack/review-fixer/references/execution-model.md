@@ -4,14 +4,16 @@
 
 1. Trace start
 2. Intake and normalization
-3. Owning-seam and write-set validation
-4. Execution decision
-5. Repair lanes
-6. Batch verification
-7. Family closeout checkpoint
-8. Closure synthesis
-9. Return handoff emission
-10. Trace close
+3. Deterministic slice/wave planning
+4. Owning-seam and write-set validation
+5. Execution decision
+6. Repair lanes
+7. Lane-local self-review and self-deslop
+8. Independent targeted return review
+9. Same-lane continuation or approval
+10. Family closeout checkpoint
+11. Coordinator-side commit
+12. Trace close
 
 ## Repair unit
 
@@ -52,6 +54,21 @@ If a family is sequenced later instead of handled now:
 - state what would make the deferred family actionable next
 - do not use placeholder reasons such as "untouched in this slice"
 
+Use `scripts/fix_result_state.py plan-repair-slices --review-handoff ...` to
+derive the initial slices and waves deterministically.
+
+The helper's role is mechanical:
+- group families into slices using likely owning seam, candidate write overlap,
+  and carry-forward blocker links
+- assign stable `slice_id`, `lane_id`, and `wave_id` values
+- choose an orchestration mode:
+  - `single-lane`
+  - `coordinated-parallel`
+  - `coordinated-sequenced`
+
+The model still owns the judgment about whether a reported seam/write overlap
+really makes sense for the current family set.
+
 ## Lane obligations
 
 Every repair lane must:
@@ -75,6 +92,58 @@ Every repair lane must:
 - if using `verification-blocked`, record the blocker suite, blocking failure summary, probable seam, and why it is believed separate from the repaired family
 - record the actual touched write set, tests, docs, verification runs, broader-suite status, satisfied closure-gate items, unsatisfied closure-gate items, residual risks, and any exposed threads followed or deferred for the downstream `review_return_handoff`
 - append phase-boundary records to the on-disk trace file described in `references/trace-artifact.md`
+
+## Lane-local review loop
+
+Each repair lane is owned by one worker and stays attached to that worker until
+the family is terminal.
+
+Rules:
+- after the worker implements the slice, it must run lane-local
+  `$coortex-review`
+- after that, it must run lane-local `$coortex-deslop`
+- the worker reruns targeted verification after that self-cleanup
+- the worker emits `review_return_handoff`
+- the worker does **not** commit
+
+The fixer coordinator then:
+- invokes `$review-orchestrator` in targeted return-review mode
+- supplies the original `review_handoff`, the worker's
+  `review_return_handoff`, and the actual diff
+- waits for the reviewer result before deciding the next step
+
+If return review keeps the family actionable:
+- build a lane-local continuation packet with
+  `scripts/fix_result_state.py build-lane-continuation ...`
+- validate it in the receiving worker with
+  `scripts/fix_result_state.py validate-lane-continuation ...`, passing the
+  original lane plan JSON when available so the worker can deterministically
+  reject mismatched lane identity or family metadata
+- send that packet back to the **same original implementer lane**
+- resume the same worker thread for that lane after validation
+- preserve lane-local context instead of restarting first-pass analysis from
+  scratch
+- do not close that worker, reassign the family, or replace the worker by
+  default
+
+If return review approves closure:
+- the fixer coordinator may run one final bounded coordinator-side
+  `$coortex-deslop` pass if maintainability cleanup is still needed
+- rerun verification as needed
+- append a `family_commit` trace record with per-family
+  `return_review_rounds_taken_by_family` counts so the trace shows how many
+  return-review send-back rounds it took each family to close
+- commit and close the family lane
+
+## Closure authority
+
+`review-orchestrator` targeted return review is the independent closure
+authority for this transitional orchestrated fixer model.
+
+That means:
+- worker self-review and self-deslop are required but not sufficient
+- fixer coordinator batching is required but not sufficient
+- only reviewer-approved families may be committed as closed
 
 ## Family closeout checkpoint
 

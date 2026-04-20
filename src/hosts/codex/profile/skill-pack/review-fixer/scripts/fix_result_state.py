@@ -11,10 +11,14 @@ from typing import Any
 TRACE_PHASES = {
     "trace_started",
     "intake",
+    "batch_plan",
     "execution_plan",
     "family_closeout",
     "verification",
+    "return_review_loop",
+    "lane_continuation",
     "review_return_handoff",
+    "family_commit",
     "final_fix",
 }
 
@@ -24,6 +28,13 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "family_ids": "list",
         "closure_gate_summaries": "list",
         "candidate_write_sets": "list",
+    },
+    "batch_plan": {
+        "slice_ids": "list",
+        "lane_ids": "list",
+        "family_ids": "list",
+        "wave_ids": "list",
+        "orchestration_mode": "string",
     },
     "execution_plan": {
         "family_id": "string",
@@ -53,7 +64,27 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "verification_run": "list",
         "broader_suite_status": "string",
     },
+    "return_review_loop": {
+        "lane_id": "string",
+        "worker_session_id": "string",
+        "family_ids": "list",
+        "reviewer_run_id": "string",
+        "review_result": "string",
+        "return_review_round": "int",
+    },
+    "lane_continuation": {
+        "lane_id": "string",
+        "worker_session_id": "string",
+        "family_ids": "list",
+        "continuation_reason": "string",
+        "return_review_round": "int",
+    },
     "review_return_handoff": {},
+    "family_commit": {
+        "family_ids": "list",
+        "commit_sha": "string",
+        "return_review_rounds_taken_by_family": "mapping",
+    },
     "final_fix": {
         "family_ids_handled": "list",
         "final_statuses": "list",
@@ -159,6 +190,268 @@ def family_entry_touched_paths(entry: dict[str, Any]) -> set[str]:
     return touched
 
 
+def family_review_hints(family: dict[str, Any]) -> dict[str, Any]:
+    review_hints = family.get("review_hints")
+    return review_hints if isinstance(review_hints, dict) else {}
+
+
+def family_identity_token(family_id: str, title: str, likely_owning_seam: str | None) -> str:
+    return "::".join([family_id.strip(), title.strip(), (likely_owning_seam or "").strip()])
+
+
+def family_identity_metadata(family: dict[str, Any]) -> dict[str, Any]:
+    review_hints = family_review_hints(family)
+    family_id = str(family.get("family_id") or "").strip()
+    title = str(family.get("title") or "").strip()
+    likely_owning_seam = str(review_hints.get("likely_owning_seam") or "").strip() or None
+    return {
+        "family_id": family_id,
+        "title": title,
+        "likely_owning_seam": likely_owning_seam,
+        "identity_token": family_identity_token(family_id, title, likely_owning_seam),
+    }
+
+
+def empty_family_identity_metadata(family_id: str) -> dict[str, Any]:
+    return {
+        "family_id": family_id,
+        "title": "",
+        "likely_owning_seam": None,
+        "identity_token": family_identity_token(family_id, "", None),
+    }
+
+
+def normalize_family_metadata_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        family_id = str(item.get("family_id") or "").strip()
+        title = str(item.get("title") or "").strip()
+        likely_owning_seam = str(item.get("likely_owning_seam") or "").strip() or None
+        if not family_id:
+            continue
+        normalized.append(
+            {
+                "family_id": family_id,
+                "title": title,
+                "likely_owning_seam": likely_owning_seam,
+                "identity_token": str(item.get("identity_token") or family_identity_token(family_id, title, likely_owning_seam)),
+            }
+        )
+    return sorted(normalized, key=lambda entry: entry["family_id"])
+
+
+def family_planning_record(family: dict[str, Any]) -> dict[str, Any]:
+    review_hints = family_review_hints(family)
+    carry_forward_context = family.get("carry_forward_context")
+    carry_forward = carry_forward_context if isinstance(carry_forward_context, dict) else {}
+    return {
+        "family_id": str(family.get("family_id") or ""),
+        "title": str(family.get("title") or ""),
+        "owning_seam": str(review_hints.get("likely_owning_seam") or "") or None,
+        "secondary_seams": normalize_string_list(review_hints.get("secondary_seams")),
+        "candidate_write_set": normalize_string_list(review_hints.get("candidate_write_set")),
+        "candidate_test_set": normalize_string_list(review_hints.get("candidate_test_set")),
+        "candidate_doc_set": normalize_string_list(review_hints.get("candidate_doc_set")),
+        "parallelizable": review_hints.get("parallelizable") is True,
+        "blocking_family_ids": normalize_string_list(carry_forward.get("blocking_family_ids")),
+        "carry_forward_reason_kind": str(carry_forward.get("reason_kind") or "") or None,
+        "family_metadata": family_identity_metadata(family),
+    }
+
+
+def has_overlap(left: set[str], right: set[str]) -> bool:
+    return bool(left.intersection(right))
+
+
+def same_or_missing_seam(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_seam = left.get("owning_seam")
+    right_seam = right.get("owning_seam")
+    if not left_seam or not right_seam:
+        return False
+    return left_seam == right_seam
+
+
+def plan_family_slices(families: list[dict[str, Any]], selected_family_ids: list[str] | None = None) -> dict[str, Any]:
+    selected = [str(family_id) for family_id in (selected_family_ids or []) if str(family_id).strip()]
+    family_records = [family_planning_record(family) for family in families if isinstance(family, dict)]
+    available_ids = [record["family_id"] for record in family_records if record["family_id"]]
+    missing = sorted(set(selected).difference(available_ids))
+    if missing:
+        raise ValueError(f"requested family ids are missing from review_handoff: {missing}")
+    if selected:
+        selected_set = set(selected)
+        family_records = [record for record in family_records if record["family_id"] in selected_set]
+    selected_ids = [record["family_id"] for record in family_records]
+
+    slices: list[dict[str, Any]] = []
+    consumed: set[str] = set()
+    slice_by_family_id: dict[str, str] = {}
+
+    for record in family_records:
+        family_id = record["family_id"]
+        if family_id in consumed:
+            continue
+
+        same_seam_records = [
+            candidate
+            for candidate in family_records
+            if candidate["family_id"] not in consumed and same_or_missing_seam(record, candidate)
+        ]
+        grouped_records: list[dict[str, Any]] = []
+        if record.get("owning_seam") and len(same_seam_records) > 1:
+            candidate_pool = [
+                (
+                    candidate,
+                    set(candidate["candidate_write_set"] + candidate["candidate_test_set"] + candidate["candidate_doc_set"]),
+                )
+                for candidate in same_seam_records
+            ]
+            overlapping = False
+            for index, (left, left_paths) in enumerate(candidate_pool):
+                if left.get("blocking_family_ids"):
+                    overlapping = True
+                    break
+                for right, right_paths in candidate_pool[index + 1 :]:
+                    if right.get("blocking_family_ids") or has_overlap(left_paths, right_paths):
+                        overlapping = True
+                        break
+                if overlapping:
+                    break
+            if overlapping:
+                grouped_records = same_seam_records
+
+        if grouped_records:
+            family_ids = [item["family_id"] for item in grouped_records]
+            slice_id = f"S-{len(slices) + 1:03d}"
+            slice_entry = {
+                "slice_id": slice_id,
+                "lane_id": f"L-{len(slices) + 1:03d}",
+                "family_ids": family_ids,
+                "primary_owning_seam": record.get("owning_seam"),
+                "secondary_seams": sorted({path for item in grouped_records for path in item["secondary_seams"]}),
+                "candidate_write_set": sorted({path for item in grouped_records for path in item["candidate_write_set"]}),
+                "candidate_test_set": sorted({path for item in grouped_records for path in item["candidate_test_set"]}),
+                "candidate_doc_set": sorted({path for item in grouped_records for path in item["candidate_doc_set"]}),
+                "family_metadata": normalize_family_metadata_list([item["family_metadata"] for item in grouped_records]),
+                "execution_mode": "sequential-within-slice",
+                "blocking_family_ids": sorted({fid for item in grouped_records for fid in item["blocking_family_ids"]}),
+                "return_review_mode": "targeted-return-review",
+                "continuation_policy": "same-lane-until-approved",
+                "reasons": [
+                    "families share an owning seam and overlapping write/test/doc scope requires one bounded sequential slice"
+                ],
+            }
+            slices.append(slice_entry)
+            for item in grouped_records:
+                consumed.add(item["family_id"])
+                slice_by_family_id[item["family_id"]] = slice_id
+            continue
+
+        slice_id = f"S-{len(slices) + 1:03d}"
+        slice_entry = {
+            "slice_id": slice_id,
+            "lane_id": f"L-{len(slices) + 1:03d}",
+            "family_ids": [family_id],
+            "primary_owning_seam": record.get("owning_seam"),
+            "secondary_seams": record["secondary_seams"],
+            "candidate_write_set": record["candidate_write_set"],
+            "candidate_test_set": record["candidate_test_set"],
+            "candidate_doc_set": record["candidate_doc_set"],
+            "family_metadata": normalize_family_metadata_list([record["family_metadata"]]),
+            "execution_mode": "single-family",
+            "blocking_family_ids": record["blocking_family_ids"],
+            "return_review_mode": "targeted-return-review",
+            "continuation_policy": "same-lane-until-approved",
+            "reasons": ["single family slice"],
+        }
+        if not record["parallelizable"]:
+            slice_entry["reasons"].append(
+                "review_hints.parallelizable is not true, so this slice stays isolated by default"
+            )
+        slices.append(slice_entry)
+        consumed.add(family_id)
+        slice_by_family_id[family_id] = slice_id
+
+    dependency_ids: dict[str, set[str]] = {slice_entry["slice_id"]: set() for slice_entry in slices}
+    for slice_entry in slices:
+        for blocking_family_id in slice_entry["blocking_family_ids"]:
+            blocking_slice_id = slice_by_family_id.get(blocking_family_id)
+            if blocking_slice_id and blocking_slice_id != slice_entry["slice_id"]:
+                dependency_ids[slice_entry["slice_id"]].add(blocking_slice_id)
+
+    def slice_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+        left_scope = set(left["candidate_write_set"] + left["candidate_test_set"] + left["candidate_doc_set"])
+        right_scope = set(right["candidate_write_set"] + right["candidate_test_set"] + right["candidate_doc_set"])
+        return has_overlap(left_scope, right_scope)
+
+    waves: list[dict[str, Any]] = []
+    wave_index_by_slice_id: dict[str, int] = {}
+    slice_lookup = {slice_entry["slice_id"]: slice_entry for slice_entry in slices}
+
+    def assign_wave(slice_id: str, visiting: set[str]) -> int:
+        existing = wave_index_by_slice_id.get(slice_id)
+        if existing is not None:
+            return existing
+        if slice_id in visiting:
+            raise ValueError(f"blocking_family_ids produced a cycle involving slice {slice_id}")
+        visiting.add(slice_id)
+
+        slice_entry = slice_lookup[slice_id]
+        dependency_wave_floor = 0
+        if dependency_ids[slice_id]:
+            dependency_wave_floor = max(assign_wave(dependency_id, visiting) for dependency_id in dependency_ids[slice_id]) + 1
+
+        target_index: int | None = None
+        for index in range(dependency_wave_floor, len(waves)):
+            wave_slice_ids = waves[index]["slice_ids"]
+            wave_slices = [slice_lookup[item] for item in wave_slice_ids]
+            if any(slice_overlap(slice_entry, existing_slice) for existing_slice in wave_slices):
+                continue
+            target_index = index
+            break
+
+        if target_index is None:
+            target_index = len(waves)
+            waves.append({"wave_id": f"W-{target_index + 1:03d}", "slice_ids": []})
+
+        waves[target_index]["slice_ids"].append(slice_id)
+        wave_index_by_slice_id[slice_id] = target_index
+        visiting.remove(slice_id)
+        return target_index
+
+    for slice_entry in slices:
+        assign_wave(slice_entry["slice_id"], set())
+
+    for slice_entry in slices:
+        slice_entry["wave_id"] = waves[wave_index_by_slice_id[slice_entry["slice_id"]]]["wave_id"]
+        if slice_entry["blocking_family_ids"]:
+            slice_entry["reasons"].append("carry-forward blocking family ids require a later execution wave")
+
+    if len(slices) == 1 and slices[0]["execution_mode"] == "single-family":
+        orchestration_mode = "single-lane"
+    elif len(waves) == 1 and len(slices) == len(waves[0]["slice_ids"]):
+        orchestration_mode = "coordinated-parallel"
+    else:
+        orchestration_mode = "coordinated-sequenced"
+
+    return {
+        "selected_family_ids": selected_ids,
+        "orchestration_mode": orchestration_mode,
+        "slices": slices,
+        "waves": waves,
+        "summary": {
+            "family_count": len(selected_ids),
+            "slice_count": len(slices),
+            "wave_count": len(waves),
+        },
+        "lane_ids": [slice_entry["lane_id"] for slice_entry in slices],
+    }
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "item"
@@ -198,6 +491,14 @@ def require_trace_field_type(
         if not isinstance(value, list):
             errors.append(f"{prefix} field {field} must be a list")
         return
+    if expected == "mapping":
+        if not isinstance(value, dict):
+            errors.append(f"{prefix} field {field} must be a mapping")
+        return
+    if expected == "int":
+        if not isinstance(value, int) or value < 0:
+            errors.append(f"{prefix} field {field} must be a non-negative integer")
+        return
 
 
 def validate_trace_record(record: dict[str, Any]) -> list[str]:
@@ -229,6 +530,21 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
 
     if phase in {"execution_plan", "family_closeout", "verification"} and "family_id" not in record:
         errors.append(f"{prefix} phase {phase!r} missing family_id")
+
+    if phase == "family_commit":
+        family_ids = normalize_string_list(record.get("family_ids"))
+        rounds_taken = record.get("return_review_rounds_taken_by_family")
+        if isinstance(rounds_taken, dict):
+            mapping_keys = sorted(str(key) for key in rounds_taken.keys())
+            if sorted(family_ids) != mapping_keys:
+                errors.append(
+                    f"{prefix} phase 'family_commit' return_review_rounds_taken_by_family keys must match family_ids exactly"
+                )
+            for family_id, round_count in rounds_taken.items():
+                if not isinstance(round_count, int) or round_count < 0:
+                    errors.append(
+                        f"{prefix} phase 'family_commit' round-trip count for family {family_id!r} must be a non-negative integer"
+                    )
 
     return errors
 
@@ -383,6 +699,280 @@ def validate_deferred_family(
         errors.append(
             f"{prefix} uses overlap touch_state {touch_state!r} without blocking_family_ids"
         )
+
+
+def plan_repair_slices(args: argparse.Namespace) -> int:
+    data = unwrap_root(load_json_object(pathlib.Path(args.review_handoff)), "review_handoff")
+    families = data.get("families")
+    if not isinstance(families, list):
+        print(json.dumps({
+            "status": "error",
+            "message": "review_handoff.families must be a list",
+        }, indent=2, sort_keys=True))
+        return 2
+    try:
+        plan = plan_family_slices(families, args.family_id)
+    except ValueError as exc:
+        print(json.dumps({
+            "status": "error",
+            "message": str(exc),
+        }, indent=2, sort_keys=True))
+        return 2
+    print(json.dumps({
+        "status": "ok",
+        **plan,
+    }, indent=2, sort_keys=True))
+    return 0
+
+
+def build_lane_continuation(args: argparse.Namespace) -> int:
+    review_handoff_data = unwrap_root(load_json_object(pathlib.Path(args.review_handoff)), "review_handoff")
+    lane_plan = load_json_object(pathlib.Path(args.lane_plan_json))
+
+    families = review_handoff_data.get("families")
+    if not isinstance(families, list):
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "message": "review_handoff.families must be a list",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
+
+    slices = lane_plan.get("slices")
+    if not isinstance(slices, list):
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "message": "lane plan must contain a slices list",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
+
+    lane = next(
+        (
+            slice_entry
+            for slice_entry in slices
+            if isinstance(slice_entry, dict) and str(slice_entry.get("lane_id") or "") == args.lane_id
+        ),
+        None,
+    )
+    if lane is None:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "message": f"lane_id {args.lane_id!r} was not found in the lane plan",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
+
+    lane_family_ids = normalize_string_list(lane.get("family_ids"))
+    lane_family_id_set = set(lane_family_ids)
+    filtered_families = [
+        family
+        for family in families
+        if isinstance(family, dict) and str(family.get("family_id") or "") in lane_family_id_set
+    ]
+    returned_family_ids = [
+        str(family.get("family_id") or "")
+        for family in filtered_families
+        if isinstance(family, dict) and family.get("family_id")
+    ]
+
+    if not returned_family_ids:
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "message": "refreshed review_handoff does not contain any actionable families for the requested lane",
+                    "original_lane_family_ids": lane_family_ids,
+                    "returned_family_ids": returned_family_ids,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
+    if not set(returned_family_ids).issubset(lane_family_id_set):
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "message": "refreshed review_handoff contains families outside the requested lane",
+                    "original_lane_family_ids": lane_family_ids,
+                    "returned_family_ids": returned_family_ids,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 2
+
+    seam_summary = review_handoff_data.get("seam_summary")
+    lane_family_metadata = normalize_family_metadata_list(lane.get("family_metadata"))
+    if not lane_family_metadata:
+        refreshed_family_metadata = {
+            str(family.get("family_id") or ""): family_identity_metadata(family)
+            for family in families
+            if isinstance(family, dict) and family.get("family_id")
+        }
+        lane_family_metadata = normalize_family_metadata_list(
+            [
+                refreshed_family_metadata.get(family_id, empty_family_identity_metadata(family_id))
+                for family_id in lane_family_ids
+            ]
+        )
+
+    filtered_handoff: dict[str, Any] = {
+        "review_target": review_handoff_data.get("review_target"),
+        "families": filtered_families,
+    }
+    if seam_summary is not None:
+        filtered_handoff["seam_summary"] = seam_summary
+
+    continuation = {
+        "lane_continuation": {
+            "lane_id": args.lane_id,
+            "worker_session_id": args.worker_session_id,
+            "slice_id": str(lane.get("slice_id") or ""),
+            "family_ids": returned_family_ids,
+            "original_lane_family_ids": lane_family_ids,
+            "original_lane_family_metadata": lane_family_metadata,
+            "continuation_policy": str(lane.get("continuation_policy") or "same-lane-until-approved"),
+            "return_review_round": args.return_review_round,
+            "review_source": {
+                "skill": "review-orchestrator",
+                "mode": "targeted-return-review",
+                "reviewer_run_id": args.reviewer_run_id or "unknown",
+            },
+            "review_handoff": filtered_handoff,
+        }
+    }
+    print(json.dumps(continuation, indent=2, sort_keys=True))
+    return 0
+
+
+def validate_lane_continuation(args: argparse.Namespace) -> int:
+    data = unwrap_root(load_json_object(pathlib.Path(args.lane_continuation)), "lane_continuation")
+    errors: list[str] = []
+
+    lane_id = data.get("lane_id")
+    worker_session_id = data.get("worker_session_id")
+    slice_id = data.get("slice_id")
+    family_ids = normalize_string_list(data.get("family_ids"))
+    original_lane_family_ids = normalize_string_list(data.get("original_lane_family_ids"))
+    original_lane_family_metadata = normalize_family_metadata_list(data.get("original_lane_family_metadata"))
+    continuation_policy = data.get("continuation_policy")
+    return_review_round = data.get("return_review_round")
+    review_source = data.get("review_source")
+    review_handoff = data.get("review_handoff")
+
+    if not isinstance(lane_id, str) or not lane_id.strip():
+        errors.append("lane_continuation.lane_id must be a non-empty string")
+    if not isinstance(worker_session_id, str) or not worker_session_id.strip():
+        errors.append("lane_continuation.worker_session_id must be a non-empty string")
+    if not isinstance(slice_id, str) or not slice_id.strip():
+        errors.append("lane_continuation.slice_id must be a non-empty string")
+    if not family_ids:
+        errors.append("lane_continuation.family_ids must contain at least one family id")
+    if not original_lane_family_ids:
+        errors.append("lane_continuation.original_lane_family_ids must contain at least one family id")
+    if not original_lane_family_metadata:
+        errors.append("lane_continuation.original_lane_family_metadata must contain at least one family metadata entry")
+    if family_ids and original_lane_family_ids and not set(family_ids).issubset(set(original_lane_family_ids)):
+        errors.append("lane_continuation.family_ids must be a subset of lane_continuation.original_lane_family_ids")
+    if original_lane_family_metadata:
+        metadata_ids = [entry["family_id"] for entry in original_lane_family_metadata]
+        if sorted(original_lane_family_ids) != sorted(metadata_ids):
+            errors.append(
+                "lane_continuation.original_lane_family_metadata must cover lane_continuation.original_lane_family_ids exactly"
+            )
+    if continuation_policy != "same-lane-until-approved":
+        errors.append("lane_continuation.continuation_policy must be 'same-lane-until-approved'")
+    if not isinstance(return_review_round, int) or return_review_round < 1:
+        errors.append("lane_continuation.return_review_round must be a positive integer")
+    if not isinstance(review_source, dict):
+        errors.append("lane_continuation.review_source must be a mapping")
+    else:
+        if review_source.get("skill") != "review-orchestrator":
+            errors.append("lane_continuation.review_source.skill must be 'review-orchestrator'")
+        if review_source.get("mode") != "targeted-return-review":
+            errors.append("lane_continuation.review_source.mode must be 'targeted-return-review'")
+    if not isinstance(review_handoff, dict):
+        errors.append("lane_continuation.review_handoff must be a mapping")
+    else:
+        handoff_families = review_handoff.get("families")
+        if not isinstance(handoff_families, list):
+            errors.append("lane_continuation.review_handoff.families must be a list")
+        else:
+            handoff_family_ids = sorted(
+                str(family.get("family_id") or "")
+                for family in handoff_families
+                if isinstance(family, dict) and family.get("family_id")
+            )
+            if sorted(family_ids) != handoff_family_ids:
+                errors.append("lane_continuation.review_handoff families must match lane_continuation.family_ids exactly")
+
+    if args.lane_plan_json:
+        lane_plan = load_json_object(pathlib.Path(args.lane_plan_json))
+        slices = lane_plan.get("slices")
+        if not isinstance(slices, list):
+            errors.append("lane plan must contain a slices list")
+        else:
+            planned_lane = next(
+                (
+                    slice_entry
+                    for slice_entry in slices
+                    if isinstance(slice_entry, dict) and str(slice_entry.get("lane_id") or "") == str(lane_id or "")
+                ),
+                None,
+            )
+            if planned_lane is None:
+                errors.append("lane_continuation.lane_id was not found in the provided lane plan")
+            else:
+                planned_family_ids = normalize_string_list(planned_lane.get("family_ids"))
+                if sorted(planned_family_ids) != sorted(original_lane_family_ids):
+                    errors.append(
+                        "lane_continuation.original_lane_family_ids do not match the provided lane plan"
+                    )
+                planned_family_metadata = normalize_family_metadata_list(planned_lane.get("family_metadata"))
+                if planned_family_metadata and planned_family_metadata != original_lane_family_metadata:
+                    errors.append(
+                        "lane_continuation.original_lane_family_metadata does not match the provided lane plan"
+                    )
+
+    if args.expected_lane_id and lane_id != args.expected_lane_id:
+        errors.append("lane_continuation.lane_id does not match the expected lane id")
+    if args.expected_worker_session_id and worker_session_id != args.expected_worker_session_id:
+        errors.append("lane_continuation.worker_session_id does not match the expected worker session id")
+    if args.expected_slice_id and slice_id != args.expected_slice_id:
+        errors.append("lane_continuation.slice_id does not match the expected slice id")
+
+    output = {
+        "status": "ok" if not errors else "error",
+        "lane_id": lane_id,
+        "worker_session_id": worker_session_id,
+        "slice_id": slice_id,
+        "family_ids": family_ids,
+        "original_lane_family_ids": original_lane_family_ids,
+        "original_lane_family_metadata": original_lane_family_metadata,
+        "return_review_round": return_review_round,
+        "errors": errors,
+    }
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return 0 if not errors else 2
 
 
 def validate_review_return(args: argparse.Namespace) -> int:
@@ -578,6 +1168,57 @@ def build_parser() -> argparse.ArgumentParser:
     append_group.add_argument("--record-json")
     append_group.add_argument("--record-file")
     append.set_defaults(func=append_trace)
+
+    plan_batches = subparsers.add_parser(
+        "plan-repair-slices",
+        help="Derive deterministic repair slices and execution waves from a review_handoff.",
+    )
+    plan_batches.add_argument(
+        "--review-handoff",
+        required=True,
+        help="Path to the review_handoff JSON file.",
+    )
+    plan_batches.add_argument(
+        "--family-id",
+        action="append",
+        help="Optional family_id filter; repeat to narrow the plan to specific families.",
+    )
+    plan_batches.set_defaults(func=plan_repair_slices)
+
+    continuation = subparsers.add_parser(
+        "build-lane-continuation",
+        help="Build a lane-local continuation packet from a refreshed actionable review_handoff.",
+    )
+    continuation.add_argument(
+        "--review-handoff",
+        required=True,
+        help="Path to the refreshed actionable review_handoff JSON file.",
+    )
+    continuation.add_argument(
+        "--lane-plan-json",
+        required=True,
+        help="Path to the JSON output from plan-repair-slices.",
+    )
+    continuation.add_argument("--lane-id", required=True)
+    continuation.add_argument("--worker-session-id", required=True)
+    continuation.add_argument("--reviewer-run-id")
+    continuation.add_argument("--return-review-round", required=True, type=int)
+    continuation.set_defaults(func=build_lane_continuation)
+
+    validate_continuation = subparsers.add_parser(
+        "validate-lane-continuation",
+        help="Validate a lane-local continuation packet before resuming the same implementer lane.",
+    )
+    validate_continuation.add_argument(
+        "--lane-continuation",
+        required=True,
+        help="Path to the lane_continuation JSON file.",
+    )
+    validate_continuation.add_argument("--expected-lane-id")
+    validate_continuation.add_argument("--expected-worker-session-id")
+    validate_continuation.add_argument("--expected-slice-id")
+    validate_continuation.add_argument("--lane-plan-json")
+    validate_continuation.set_defaults(func=validate_lane_continuation)
 
     validate = subparsers.add_parser(
         "validate-review-return",

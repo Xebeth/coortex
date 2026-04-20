@@ -65,6 +65,10 @@ review_return_handoff:
 ## Rules
 
 - This handoff is mandatory for every handled family.
+- It is the worker-to-reviewer exchange artifact. It is **not** the
+  worker-continuation artifact; if return review keeps the family actionable,
+  the fixer coordinator must build a lane continuation packet addressed back to
+  the same implementer lane.
 - It exists so the reviewer can compare:
 - the original `review_handoff`
 - the original `closure_gate` embedded in that `review_handoff`
@@ -108,3 +112,5 @@ review_return_handoff:
 - If nothing remains unsatisfied, set `unsatisfied_items` to `none`.
 - If no new threads were followed or deferred, set those fields to `none`.
 - If no residual risks remain, set `residual_risks` to `none`.
+- The original implementer lane should remain open until targeted return review
+  either approves closure or a genuine blocker makes the lane terminal.

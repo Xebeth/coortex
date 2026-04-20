@@ -8,6 +8,23 @@ description: Repair code from structured review output with root-cause-driven fi
 Turn review output into root-cause-driven fixes that close defect families at the
 owning seam rather than patching the nearest manifestation.
 
+## Transitional orchestrated fixer
+
+This skill is the current workflow-level approximation of the post-M3 fixer
+specialization model.
+
+It is **not** the final runtime lane system. In the current repo state:
+
+- `review_handoff` families are transformed into bounded repair lanes/slices
+- likely owning seam and write overlap drive batching
+- worker lanes implement fixes
+- `review-orchestrator` remains the independent closure authority through
+  targeted return review
+- the fixer coordinator commits only after that reviewer approval
+
+Treat this as a transitional coordinator workflow in the skill pack, not as the
+final runtime-owned implementation.
+
 ## Conversation-visible plan
 
 Keep a short conversation-visible plan/progress list updated while this
@@ -34,6 +51,7 @@ workflow runs so the user can tell which family or phase is active.
 2. Load these references as needed:
    - `references/intake-and-normalization.md`
    - `references/execution-model.md`
+   - `references/lane-continuation.md`
    - `references/result-contract.md`
    - `references/review-return-handoff.md`
    - `references/trace-artifact.md`
@@ -43,17 +61,37 @@ workflow runs so the user can tell which family or phase is active.
    - lane-local repair when already scoped to one family or one repair slice
 4. Create or resume the run trace directory/files via the bundled helper described in `references/trace-artifact.md`.
 5. Normalize the input into repair families and closure gates before editing.
-6. Validate the likely owning seam and candidate write set.
-7. Choose execution mode:
-   - single-lane repair when the batch is one coherent family or one coherent write set
-   - coordinated repair lanes when families are disjoint
-   - sequential repair when families overlap in files, ownership, or invariants
-8. Implement the fix by editing code, tests, and docs as needed to close the family at the owning seam.
-9. Verify the fix.
-10. Before moving to a different family, emit a short family closeout checkpoint.
-11. Report family closure and emit a mandatory `review_return_handoff`.
-11a. Serialize the machine handoff blocks to JSON and run the bundled result-state helper against the final `review_return_handoff` before finalizing.
-12. Append the final trace records on disk.
+6. Use the bundled helper to derive deterministic repair slices and execution
+   waves from the incoming `review_handoff`.
+7. Validate the likely owning seam and candidate write set for each slice.
+8. Choose execution mode from the planned slices:
+   - single-lane repair when one slice cleanly covers the family set
+   - coordinated parallel lanes when slices are disjoint
+   - coordinated sequenced lanes when overlap or blocker links require waves
+9. For each repair lane:
+   - keep one worker attached to that lane until the family reaches a terminal
+     state
+   - implement the fix by editing code, tests, and docs at the owning seam
+   - run targeted verification
+   - run lane-local `$coortex-review`
+   - run lane-local `$coortex-deslop`
+   - rerun targeted verification
+   - emit a mandatory `review_return_handoff`
+10. The fixer coordinator must send every lane result through
+    `$review-orchestrator` targeted return review using the original
+    `review_handoff`, the lane's `review_return_handoff`, and the actual diff.
+11. If targeted return review approves the family closure, the fixer
+    coordinator may run one final bounded coordinator-side `$coortex-deslop`
+    pass if needed, rerun verification, commit, and close that family lane.
+12. If targeted return review keeps the family actionable, build a lane-local
+    continuation packet and send it back to the **same original implementer
+    lane**. Resume the same worker thread for that lane. Do not close that
+    worker, do not spawn a replacement worker for the same family, and do not
+    hand the family to a new lane unless the workflow has a genuine blocker or
+    explicit operator override.
+13. Before moving to a different family, emit a short family closeout
+    checkpoint.
+14. Append the final trace records on disk.
 
 ## Hard Rules
 
@@ -91,6 +129,20 @@ workflow runs so the user can tell which family or phase is active.
 - Spawn coordinated repair lanes with `fork_context: false`.
 - Do not use `explorer` as the final repair worker for any lane.
 - Do not rely on inherited thread context for repair lanes. Pass only the scoped family/slice prompt plus the relevant `review_handoff` and closure-gate data.
+- Do not let a worker lane commit. Commits are coordinator-only after
+  independent targeted return review approves closure.
+- Do not let the fixer coordinator self-certify closure. Independent review is
+  provided by `$review-orchestrator` targeted return review.
+- If targeted return review returns an actionable downstream handoff for a
+  family lane, route it back to the same original implementer lane. Do not
+  restart the family from a fresh worker by default.
+- Treat same-lane continuation as thread continuity, not just lane-id reuse.
+  When a lane receives a valid continuation packet, resume that same worker's
+  family-local context instead of redoing first-pass analysis from scratch.
+- Only treat a lane as terminal when reviewer approval lands, a genuine blocker
+  makes the lane terminal, or an explicit operator override supersedes the lane.
+- Do not silently replace a live lane with coordinator-local patching just
+  because return review found more work.
 - Always emit a `review_return_handoff`. Do not rely on fixer self-audit as the terminal acceptance step.
 - Use the bundled `scripts/fix_result_state.py` helper to validate the final `review_return_handoff` and deferred-family structure before finalizing. Serialize the relevant handoff blocks to JSON before invoking it.
 - Use the bundled `scripts/fix_result_state.py` helper for deterministic trace path/file handling as well as final handoff validation. Keep the model focused on repair judgments and evidence.
@@ -113,10 +165,31 @@ Use `references/intake-and-normalization.md`.
 
 - If the input is already lane-local, do not re-coordinate. Repair the family, verify it, and report closure.
 - If the input contains multiple families:
+  - derive slices/waves with `scripts/fix_result_state.py plan-repair-slices`
   - group by owning seam and write-set overlap
   - parallelize only disjoint repair slices
   - sequence overlapping families
-- Run each coordinated repair lane in a Codex `worker` subagent and invoke `$review-fixer` inside the lane prompt, scoped to that family or repair slice only.
+- Run each coordinated repair lane in a Codex `worker` subagent and invoke
+  `$review-fixer` inside the lane prompt, scoped to that family or repair slice
+  only.
+- Keep the same worker attached to the same lane until
+  `$review-orchestrator` targeted return review either approves closure or a
+  genuine blocker forces the lane terminal.
+- Each worker lane must run lane-local `$coortex-review` and lane-local
+  `$coortex-deslop` before handing results back to the coordinator.
+- The coordinator must then send the lane output to `$review-orchestrator`
+  targeted return review. If return review rejects closure, use
+  `scripts/fix_result_state.py build-lane-continuation ...` to send the
+  actionable families back to the same worker lane, and have that lane validate
+  the packet with `scripts/fix_result_state.py validate-lane-continuation ...`
+  before resuming, passing the original lane plan JSON when available so the
+  worker can reject mismatched family metadata deterministically. After
+  validation, resume the same worker thread for that lane and preserve its
+  lane-local context rather than spawning a fresh worker or restarting the
+  family from scratch.
+- Coordinator-side `$coortex-deslop` is optional and only happens after return
+  review approval, before commit, when a final bounded cleanup pass is still
+  warranted.
 
 Use `references/execution-model.md`.
 

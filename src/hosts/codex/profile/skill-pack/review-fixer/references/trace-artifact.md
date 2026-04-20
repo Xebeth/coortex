@@ -6,6 +6,9 @@ Use the bundled helper for deterministic path/file management:
 
 ```bash
 python scripts/fix_result_state.py init-trace
+python scripts/fix_result_state.py plan-repair-slices --review-handoff <path>
+python scripts/fix_result_state.py build-lane-continuation --review-handoff <path> --lane-plan-json <path> --lane-id <lane_id> --worker-session-id <worker_session_id>
+python scripts/fix_result_state.py validate-lane-continuation --lane-continuation <path> --lane-plan-json <path> --expected-lane-id <lane_id> --expected-worker-session-id <worker_session_id> --expected-slice-id <slice_id>
 python scripts/fix_result_state.py lane-trace-file --trace-dir <dir> --lane-type <type> --session-id <id> --family-id <family_id> --family-name "<family name>"
 python scripts/fix_result_state.py append-trace --trace-file <path> --record-file <json-file>
 ```
@@ -51,10 +54,14 @@ Inside that run directory:
 At minimum, append these record types when applicable:
 - `trace_started`
 - `intake`
+- `batch_plan`
 - `execution_plan`
 - `family_closeout`
 - `verification`
+- `return_review_loop`
+- `lane_continuation`
 - `review_return_handoff`
+- `family_commit`
 - `final_fix`
 
 ## Common fields
@@ -77,12 +84,50 @@ Include:
 ## Execution-plan record
 
 Include:
+- `lane_id` when the family belongs to a coordinated lane
 - `family_id`
 - `owning_seam`
 - `planned_write_set`
 - `planned_test_set`
 - `planned_doc_set`
 - `execution_mode`
+
+## Batch-plan record
+
+Include:
+- `slice_ids`
+- `lane_ids`
+- `family_ids`
+- `wave_ids`
+- `orchestration_mode`
+
+## Return-review-loop record
+
+Include:
+- `lane_id`
+- `worker_session_id`
+- `family_ids`
+- `reviewer_run_id`
+- `review_result`
+- `return_review_round`
+
+## Lane-continuation record
+
+Include:
+- `lane_id`
+- `worker_session_id`
+- `family_ids`
+- `continuation_reason`
+- `return_review_round`
+
+## Family-commit record
+
+Include:
+- `family_ids`
+- `commit_sha`
+- `return_review_rounds_taken_by_family`
+  - mapping from `family_id` to the number of targeted return-review send-back
+    rounds it took for that family to close
 
 ## Family-closeout record
 
