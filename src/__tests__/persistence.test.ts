@@ -1650,3 +1650,86 @@ test("runtime store preserves the snapshot when the event log has no replayable 
   assert.equal(await readFile(store.eventsPath, "utf8"), '{"broken":\n{"stillBroken"\n');
   assert.deepEqual(persistedSnapshot, snapshot);
 });
+
+test("projection recovery syncProjectionSnapshot preserves malformed replay warnings during snapshot fallback sync", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-fallback-sync-warning-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const service = new ProjectionRecoveryService(store);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await store.writeSnapshot(toSnapshot(await store.rebuildProjection()));
+  await writeFile(store.eventsPath, `${await readFile(store.eventsPath, "utf8")}{"broken":\n`, "utf8");
+
+  const synced = await service.syncProjectionSnapshot({ snapshotFallback: true });
+
+  assert.match(synced.warning ?? "", /skipped malformed line \d+/);
+  assert.equal(synced.projection.assignments.size, 1);
+  assert.deepEqual(synced.projection.status.activeAssignmentIds, [bootstrap.initialAssignmentId]);
+});
+
+test("projection recovery applyRecoveryProjectionEvents preserves malformed replay warnings during snapshot fallback repair", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-fallback-apply-warning-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const service = new ProjectionRecoveryService(store);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  const baseProjection = await store.rebuildProjection();
+  await store.writeSnapshot(toSnapshot(baseProjection));
+  await writeFile(store.eventsPath, `${await readFile(store.eventsPath, "utf8")}{"broken":\n`, "utf8");
+
+  const updatedObjective = "Snapshot fallback warning propagation test.";
+  const timestamp = nowIso();
+  const repaired = await service.applyRecoveryProjectionEvents(
+    baseProjection,
+    [{
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...baseProjection.status,
+          currentObjective: updatedObjective,
+          lastDurableOutputAt: timestamp
+        }
+      }
+    }],
+    { snapshotFallback: true }
+  );
+
+  assert.match(repaired.warning ?? "", /skipped malformed line \d+/);
+  assert.equal(repaired.projection.status.currentObjective, updatedObjective);
+  assert.equal((await store.loadSnapshot())?.status.currentObjective, updatedObjective);
+});

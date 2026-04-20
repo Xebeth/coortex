@@ -52,6 +52,10 @@ export interface ProjectionRecoveryStore {
   withSnapshotLock<T>(action: () => Promise<T>): Promise<T>;
 }
 
+type ProjectionRecoveryWarningBearingError = Error & {
+  projectionRecoveryWarning?: string;
+};
+
 export class ProjectionRecoveryService {
   constructor(private readonly store: ProjectionRecoveryStore) {}
 
@@ -91,11 +95,18 @@ export class ProjectionRecoveryService {
   async loadProjectionWithRecovery(): Promise<ProjectionRecoveryResult> {
     const snapshot = await this.store.loadSnapshot();
     const { events, warning } = await this.loadReplayableEvents();
-    const fallbackToSnapshot = (reason: string): ProjectionRecoveryResult => ({
-      projection: fromSnapshot(snapshot!),
-      warning: [warning, reason].filter(Boolean).join(" ").trim(),
-      snapshotFallback: true
-    });
+    const fallbackToSnapshot = (reason: string): ProjectionRecoveryResult => {
+      const recoveryWarning = [warning, reason].filter(Boolean).join(" ").trim();
+      try {
+        return {
+          projection: fromSnapshot(snapshot!),
+          warning: recoveryWarning,
+          snapshotFallback: true
+        };
+      } catch (error) {
+        throw attachProjectionRecoveryWarning(error, recoveryWarning);
+      }
+    };
     const replayAfterSnapshot = () => {
       try {
         return {
@@ -103,7 +114,7 @@ export class ProjectionRecoveryService {
         };
       } catch (error) {
         if (isRuntimeAuthorityIntegrityError(error)) {
-          throw error;
+          throw attachProjectionRecoveryWarning(error, warning);
         }
         const detail = error instanceof Error ? error.message : String(error);
         return {
@@ -167,7 +178,7 @@ export class ProjectionRecoveryService {
         return warning ? { projection, warning, snapshotFallback: false } : { projection, snapshotFallback: false };
       } catch (error) {
         if (isRuntimeAuthorityIntegrityError(error)) {
-          throw error;
+          throw attachProjectionRecoveryWarning(error, warning);
         }
         if (!snapshot) {
           throw error;
@@ -311,9 +322,7 @@ export class ProjectionRecoveryService {
 
   async syncProjectionSnapshot(options: { snapshotFallback: boolean }): Promise<ProjectionSyncResult> {
     if (options.snapshotFallback) {
-      return {
-        projection: await this.mutateSnapshotFallbackProjection((latestProjection) => latestProjection)
-      };
+      return this.mutateSnapshotFallbackProjection((latestProjection) => latestProjection);
     }
     return this.syncSnapshotFromEventsWithRecovery();
   }
@@ -331,11 +340,9 @@ export class ProjectionRecoveryService {
       return this.syncSnapshotFromEventsWithRecovery();
     }
 
-    return {
-      projection: await this.mutateSnapshotFallbackProjection((latestProjection) =>
-        applyRuntimeEventsToProjection(latestProjection, events)
-      )
-    };
+    return this.mutateSnapshotFallbackProjection((latestProjection) =>
+      applyRuntimeEventsToProjection(latestProjection, events)
+    );
   }
 
   private async repairEventLogLocked(): Promise<string | undefined> {
@@ -383,26 +390,43 @@ export class ProjectionRecoveryService {
 
   private async mutateSnapshotFallbackProjection(
     mutate: (projection: RuntimeProjection) => RuntimeProjection | Promise<RuntimeProjection>
-  ): Promise<RuntimeProjection> {
+  ): Promise<ProjectionSyncResult> {
     return this.store.withEventsLock(async () =>
       this.store.withSnapshotLock(async () => {
         const latestSnapshot = await this.store.loadSnapshot();
         if (!latestSnapshot) {
           throw new Error("Snapshot-fallback reconciliation requires a durable snapshot.");
         }
-        const replayableEvents = (await this.loadReplayableEvents()).events;
+        const { events: replayableEvents, warning } = await this.loadReplayableEvents();
         const hydrated = this.hydrateProjectionFromReplayableEvents(
           fromSnapshot(latestSnapshot),
           replayableEvents,
           latestSnapshot.lastEventId
         );
         const nextProjection = await mutate(hydrated.projection);
-        return this.store.writeProjectionSnapshot(nextProjection, {
+        const projection = await this.store.writeProjectionSnapshot(nextProjection, {
           boundaryEventId: latestSnapshot.lastEventId
         });
+        return warning ? { projection, warning } : { projection };
       })
     );
   }
+}
+
+function attachProjectionRecoveryWarning(error: unknown, warning: string | undefined): Error {
+  const normalized = error instanceof Error ? error : new Error(String(error));
+  if (!warning) {
+    return normalized;
+  }
+  const existingWarning = (normalized as ProjectionRecoveryWarningBearingError).projectionRecoveryWarning;
+  (normalized as ProjectionRecoveryWarningBearingError).projectionRecoveryWarning = [
+    warning,
+    existingWarning
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  return normalized;
 }
 
 export function selectReplayableSuffixEvents(

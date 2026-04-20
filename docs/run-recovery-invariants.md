@@ -425,6 +425,10 @@ snapshot truth instead of overwriting it with older event-derived state.
   outcomes that were durably recorded.
 - `ctx run` returns non-zero when the persisted result status is
   `failed`.
+- `ctx run` and `ctx resume` must still emit any already-collected
+  structured diagnostics on stderr when a later command failure forces a
+  non-zero exit. Those diagnostics must print before the terminal error
+  message instead of being dropped.
 - diagnostics must not silently hide operator-relevant failures in the
   main execution or cancellation paths.
 

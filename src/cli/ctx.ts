@@ -21,6 +21,10 @@ import {
 } from "./commands.js";
 import { createRunCancellationController } from "./run-cancellation.js";
 
+type DiagnosticsBearingError = {
+  diagnostics?: CommandDiagnostic[];
+};
+
 async function main(): Promise<void> {
   const [command, assignmentIdArg] = process.argv.slice(2);
   const projectRoot = process.cwd();
@@ -133,64 +137,68 @@ async function statusCommand(store: RuntimeStore, adapter: HostAdapter): Promise
 
   const { projection, diagnostics, activeLeases, hiddenActiveLeases } =
     await loadReconciledProjectionWithDiagnostics(store, adapter);
-  const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
-    projection.status.activeAssignmentIds.includes(assignment.id)
-  );
-  const openDecisions = listOpenDecisions(projection);
-  const attachments = [...projection.attachments.values()].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt)
-  );
-  const activeClaimBindings = listActiveClaimBindings(projection);
-  const activeClaimByAttachmentId = new Map(
-    activeClaimBindings.map(({ attachment, claim }) => [attachment.id, claim] as const)
-  );
-  const provisionalAttachments = attachments.filter((attachment) => attachment.state === "provisional");
-  const authoritativeAttachments = attachments.filter((attachment) =>
-    attachment.state === "attached" ||
-    attachment.state === "detached_resumable"
-  );
-  const resumableAttachments = attachments.filter((attachment) =>
-    isWrappedResumeCapableAttachment(attachment)
-  );
-
-  console.log(`Session: ${projection.sessionId}`);
-  console.log(`Objective: ${projection.status.currentObjective}`);
-  console.log(`Host: ${projection.status.activeHost}`);
-  console.log(`Adapter: ${projection.status.activeAdapter}`);
-  console.log(`Last durable output: ${projection.status.lastDurableOutputAt || "n/a"}`);
-  console.log(`Active assignments: ${activeAssignments.length}`);
-  console.log(`Provisional attachments: ${provisionalAttachments.length}`);
-  console.log(`Authoritative attachments: ${authoritativeAttachments.length}`);
-  console.log(`Resumable attachments: ${resumableAttachments.length}`);
-  console.log(`Active attachment claims: ${activeClaimBindings.length}`);
-  console.log(`Live host run leases: ${activeLeases.length}`);
-  console.log(`Results: ${projection.results.size}`);
-  console.log(`Open decisions: ${openDecisions.length}`);
-  for (const assignment of activeAssignments) {
-    console.log(`- ${assignment.id} ${assignment.state} ${assignment.objective}`);
-  }
-  for (const attachment of attachments) {
-    const claim = activeClaimByAttachmentId.get(attachment.id);
-    console.log(
-      `- attachment ${attachment.id} ${attachment.state} assignment ${claim?.assignmentId ?? "n/a"} native-session ${
-        attachment.nativeSessionId ?? "n/a"
-      }`
+  try {
+    const activeAssignments = [...projection.assignments.values()].filter((assignment) =>
+      projection.status.activeAssignmentIds.includes(assignment.id)
     );
-  }
-  for (const assignmentId of activeLeases) {
-    if (hiddenActiveLeases.includes(assignmentId)) {
-      console.log(`- ${assignmentId} active host run lease outside the current projection`);
-      continue;
+    const openDecisions = listOpenDecisions(projection);
+    const attachments = [...projection.attachments.values()].sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt)
+    );
+    const activeClaimBindings = listActiveClaimBindings(projection);
+    const activeClaimByAttachmentId = new Map(
+      activeClaimBindings.map(({ attachment, claim }) => [attachment.id, claim] as const)
+    );
+    const provisionalAttachments = attachments.filter((attachment) => attachment.state === "provisional");
+    const authoritativeAttachments = attachments.filter((attachment) =>
+      attachment.state === "attached" ||
+      attachment.state === "detached_resumable"
+    );
+    const resumableAttachments = attachments.filter((attachment) =>
+      isWrappedResumeCapableAttachment(attachment)
+    );
+
+    console.log(`Session: ${projection.sessionId}`);
+    console.log(`Objective: ${projection.status.currentObjective}`);
+    console.log(`Host: ${projection.status.activeHost}`);
+    console.log(`Adapter: ${projection.status.activeAdapter}`);
+    console.log(`Last durable output: ${projection.status.lastDurableOutputAt || "n/a"}`);
+    console.log(`Active assignments: ${activeAssignments.length}`);
+    console.log(`Provisional attachments: ${provisionalAttachments.length}`);
+    console.log(`Authoritative attachments: ${authoritativeAttachments.length}`);
+    console.log(`Resumable attachments: ${resumableAttachments.length}`);
+    console.log(`Active attachment claims: ${activeClaimBindings.length}`);
+    console.log(`Live host run leases: ${activeLeases.length}`);
+    console.log(`Results: ${projection.results.size}`);
+    console.log(`Open decisions: ${openDecisions.length}`);
+    for (const assignment of activeAssignments) {
+      console.log(`- ${assignment.id} ${assignment.state} ${assignment.objective}`);
     }
-    if (!projection.status.activeAssignmentIds.includes(assignmentId)) {
+    for (const attachment of attachments) {
+      const claim = activeClaimByAttachmentId.get(attachment.id);
       console.log(
-        `- ${assignmentId} active host run lease within the current projection but outside the current active assignment set`
+        `- attachment ${attachment.id} ${attachment.state} assignment ${claim?.assignmentId ?? "n/a"} native-session ${
+          attachment.nativeSessionId ?? "n/a"
+        }`
       );
-      continue;
     }
-    console.log(`- ${assignmentId} active host run lease on the current active assignment`);
+    for (const assignmentId of activeLeases) {
+      if (hiddenActiveLeases.includes(assignmentId)) {
+        console.log(`- ${assignmentId} active host run lease outside the current projection`);
+        continue;
+      }
+      if (!projection.status.activeAssignmentIds.includes(assignmentId)) {
+        console.log(
+          `- ${assignmentId} active host run lease within the current projection but outside the current active assignment set`
+        );
+        continue;
+      }
+      console.log(`- ${assignmentId} active host run lease on the current active assignment`);
+    }
+    printDiagnostics(diagnostics);
+  } catch (error) {
+    throw attachErrorDiagnostics(error, diagnostics);
   }
-  printDiagnostics(diagnostics);
 }
 
 async function resumeCommand(store: RuntimeStore, adapter: HostAdapter): Promise<void> {
@@ -282,13 +290,19 @@ async function inspectCommand(
     return;
   }
 
-  const inspection = await inspectRuntimeRunWithContext(store, adapter, assignmentId);
-  if (!inspection) {
-    console.log("No recorded host run found.");
-    process.exitCode = 1;
-    return;
+  const { projection, diagnostics } = await loadOperatorProjectionWithDiagnostics(store);
+  try {
+    const inspection = await inspectRuntimeRunWithContext(store, adapter, assignmentId, projection);
+    printDiagnostics(diagnostics);
+    if (!inspection) {
+      console.log("No recorded host run found.");
+      process.exitCode = 1;
+      return;
+    }
+    console.log(toPrettyJson(inspection).trimEnd());
+  } catch (error) {
+    throw attachErrorDiagnostics(error, diagnostics);
   }
-  console.log(toPrettyJson(inspection).trimEnd());
 }
 
 function printUsage(): void {
@@ -301,7 +315,37 @@ function printDiagnostics(diagnostics: CommandDiagnostic[]): void {
   }
 }
 
+function getErrorDiagnostics(error: unknown): CommandDiagnostic[] {
+  if (!error || typeof error !== "object") {
+    return [];
+  }
+  const diagnostics = (error as DiagnosticsBearingError).diagnostics;
+  return Array.isArray(diagnostics) ? diagnostics : [];
+}
+
+function attachErrorDiagnostics(error: unknown, diagnostics: CommandDiagnostic[]): Error {
+  const normalized = error instanceof Error ? error : new Error(String(error));
+  if (diagnostics.length === 0) {
+    return normalized;
+  }
+  const existingDiagnostics = getErrorDiagnostics(normalized);
+  (normalized as DiagnosticsBearingError).diagnostics = [
+    ...diagnostics,
+    ...existingDiagnostics.filter(
+      (existingDiagnostic) =>
+        !diagnostics.some(
+          (diagnostic) =>
+            diagnostic.level === existingDiagnostic.level &&
+            diagnostic.code === existingDiagnostic.code &&
+            diagnostic.message === existingDiagnostic.message
+        )
+    )
+  ];
+  return normalized;
+}
+
 main().catch((error: unknown) => {
+  printDiagnostics(getErrorDiagnostics(error));
   const message = error instanceof Error ? error.message : String(error);
   console.error(message);
   process.exitCode = 1;

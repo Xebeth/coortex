@@ -7,7 +7,13 @@ import { join, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
+import type { RuntimeConfig } from "../config/types.js";
+import { createBootstrapRuntime } from "../core/runtime.js";
+import { CodexAdapter } from "../hosts/codex/adapter/index.js";
+import { toSnapshot } from "../projections/runtime-projection.js";
+import { reconcileActiveRuns } from "../cli/run-reconciliation.js";
 import { RuntimeStore } from "../persistence/store.js";
+import { nowIso } from "../utils/time.js";
 
 const execFileAsync = promisify(execFile);
 const liveCodexEnv = {
@@ -666,6 +672,98 @@ async function corruptSnapshotBoundary(runtimeDir: string): Promise<void> {
   await writeFile(join(runtimeDir, "runtime", "events.ndjson"), `${eventLines.join("\n")}\n`, "utf8");
 }
 
+async function createNoActiveAssignmentSalvageSetup() {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-no-active-salvaged-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshotPath = join(runtimeDir, "runtime", "snapshot.json");
+  const snapshot = JSON.parse(await readFile(snapshotPath, "utf8")) as {
+    status: {
+      activeMode: string;
+      currentObjective: string;
+      activeAssignmentIds: string[];
+      activeHost: string;
+      activeAdapter: string;
+      lastDurableOutputAt: string;
+      resumeReady: boolean;
+    };
+  };
+  const idleAt = new Date(Date.now() - 1_000).toISOString();
+  await writeFile(
+    snapshotPath,
+    JSON.stringify(
+      {
+        ...snapshot,
+        status: {
+          ...snapshot.status,
+          activeMode: "idle",
+          currentObjective: "Await the next assignment.",
+          activeAssignmentIds: [],
+          lastDurableOutputAt: idleAt,
+          resumeReady: true
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await corruptSnapshotBoundary(runtimeDir);
+
+  return { projectRoot, cliPath };
+}
+
+async function createMalformedClaimGraphSalvageSetup() {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-broken-claim-salvaged-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const store = RuntimeStore.forProject(projectRoot);
+  const projection = await store.loadProjection();
+  const snapshot = (await store.loadSnapshot())!;
+  const assignmentId = projection.status.activeAssignmentIds[0]!;
+  const timestamp = new Date().toISOString();
+  const hostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: timestamp,
+    heartbeatAt: timestamp,
+    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+    adapterData: {
+      nativeRunId: "thread-cli-broken-claim-salvaged"
+    }
+  };
+
+  snapshot.claims ??= [];
+  snapshot.claims.push({
+    id: "broken-claim",
+    assignmentId,
+    attachmentId: "missing-attachment",
+    state: "active",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    provenance: {
+      kind: "resume",
+      source: "ctx.resume"
+    }
+  });
+  await store.writeSnapshot(snapshot);
+  await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, hostRunRecord);
+  await store.writeJsonArtifact("adapters/codex/last-run.json", hostRunRecord);
+  await corruptSnapshotBoundary(runtimeDir);
+
+  return { projectRoot, cliPath };
+}
+
 test("ctx init, status, resume, run, inspect, and doctor work against persisted runtime state", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
@@ -959,7 +1057,107 @@ test("ctx inspect ignores a parseable but invalid convenience last-run pointer",
   assert.equal(inspect.stderr.trim(), "");
 });
 
-test("ctx inspect stays read-only when host metadata is stale", async () => {
+test("ctx inspect surfaces salvage warnings when no host run is recorded", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-inspect-salvaged-empty-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshotPath = join(runtimeDir, "runtime", "snapshot.json");
+  const snapshotBefore = await readFile(snapshotPath, "utf8");
+  await corruptSnapshotBoundary(runtimeDir);
+  const eventsPath = join(runtimeDir, "runtime", "events.ndjson");
+  const brokenEventsContent = await readFile(eventsPath, "utf8");
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+
+  assert.equal(inspect.exitCode, 1);
+  assert.equal(inspect.stdout.trim(), "No recorded host run found.");
+  assert.match(inspect.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
+  assert.equal(await readFile(snapshotPath, "utf8"), snapshotBefore);
+  assert.equal(await readFile(eventsPath, "utf8"), brokenEventsContent);
+});
+
+test("ctx resume preserves salvage diagnostics before no-active-assignment failures", async () => {
+  const { projectRoot, cliPath } = await createNoActiveAssignmentSalvageSetup();
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "resume"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /No active assignment is available to resume\./);
+      assert.match(
+        error.stderr ?? "",
+        /WARNING event-log-salvaged .*Fell back to .*snapshot\.json[\s\S]*No active assignment is available to resume\./
+      );
+      return true;
+    }
+  );
+});
+
+test("ctx run preserves salvage diagnostics before no-active-assignment failures", async () => {
+  const { projectRoot, cliPath } = await createNoActiveAssignmentSalvageSetup();
+
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, "run"], {
+      cwd: projectRoot
+    }),
+    (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /No active assignment is available to run\./);
+      assert.match(
+        error.stderr ?? "",
+        /WARNING event-log-salvaged .*Fell back to .*snapshot\.json[\s\S]*No active assignment is available to run\./
+      );
+      return true;
+    }
+  );
+});
+
+test("ctx status preserves salvage diagnostics before malformed claim graph failures", async () => {
+  const { projectRoot, cliPath } = await createMalformedClaimGraphSalvageSetup();
+
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+
+  assert.equal(status.exitCode, 1);
+  assert.equal(status.stdout.trim(), "");
+  assert.match(status.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
+  assert.match(status.stderr, /Invalid runtime state: claim graph references missing attachments/);
+  assert.ok(
+    status.stderr.indexOf("WARNING event-log-salvaged")
+      < status.stderr.indexOf("Invalid runtime state: claim graph references missing attachments"),
+    "expected salvage warning before integrity failure"
+  );
+});
+
+test("ctx inspect preserves salvage diagnostics before malformed claim graph failures", async () => {
+  const { projectRoot, cliPath } = await createMalformedClaimGraphSalvageSetup();
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+
+  assert.equal(inspect.exitCode, 1);
+  assert.equal(inspect.stdout.trim(), "");
+  assert.match(inspect.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
+  assert.match(inspect.stderr, /Invalid runtime state: claim graph references missing attachments/);
+  assert.ok(
+    inspect.stderr.indexOf("WARNING event-log-salvaged")
+      < inspect.stderr.indexOf("Invalid runtime state: claim graph references missing attachments"),
+    "expected salvage warning before integrity failure"
+  );
+});
+
+test("ctx inspect stays read-only when stale host metadata is loaded through salvaged projection recovery", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-inspect-stale-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
 
@@ -997,6 +1195,9 @@ test("ctx inspect stays read-only when host metadata is stale", async () => {
     "utf8"
   );
   await writeFile(leasePath, JSON.stringify(staleRecord, null, 2), "utf8");
+  await corruptSnapshotBoundary(runtimeDir);
+  const eventsPath = join(runtimeDir, "runtime", "events.ndjson");
+  const brokenEventsContent = await readFile(eventsPath, "utf8");
 
   const inspect = await runCliCommand(cliPath, "inspect", {
     cwd: projectRoot
@@ -1009,8 +1210,9 @@ test("ctx inspect stays read-only when host metadata is stale", async () => {
   assert.match(inspect.stdout, /"hostRun": \{/);
   assert.match(inspect.stdout, /"state": "completed"/);
   assert.match(inspect.stdout, /"staleReasonCode": "expired_lease"/);
-  assert.equal(inspect.stderr.trim(), "");
+  assert.match(inspect.stderr, /WARNING event-log-salvaged .*Fell back to .*snapshot\.json/);
   assert.equal(snapshotAfter.assignments[0]?.state, snapshotBefore.assignments[0]?.state);
+  assert.equal(await readFile(eventsPath, "utf8"), brokenEventsContent);
   assert.notEqual(await readFileIfExists(leasePath), undefined);
 });
 
@@ -1472,6 +1674,81 @@ test("ctx status repairs stale host run leases after snapshot fallback", async (
   assert.equal(await readFile(eventsPath, "utf8"), brokenEventsContent);
   await assert.rejects(
     readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
+test("run reconciliation forwards malformed replay warnings from snapshot-fallback projection sync", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-reconcile-sync-warning-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const adapter = new CodexAdapter();
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  await store.appendEvents(bootstrap.events);
+  await store.writeSnapshot(toSnapshot(await store.rebuildProjection()));
+  await writeFile(store.eventsPath, `${await readFile(store.eventsPath, "utf8")}{"broken":\n`, "utf8");
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const staleRecord = {
+    assignmentId,
+    state: "running",
+    adapterData: {
+      nativeRunId: "thread-cli-reconcile-sync-warning"
+    },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+  };
+  await mkdir(join(store.adaptersDir, "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(store.adaptersDir, "codex", "runs", `${assignmentId}.json`),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(store.adaptersDir, "codex", "runs", `${assignmentId}.lease.json`),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
+  await writeFile(
+    join(store.adaptersDir, "codex", "last-run.json"),
+    JSON.stringify(staleRecord, null, 2),
+    "utf8"
+  );
+
+  const reconciled = await reconcileActiveRuns(
+    store,
+    adapter,
+    await store.loadProjection(),
+    { snapshotFallback: true }
+  );
+
+  assert.ok(
+    reconciled.diagnostics.some((diagnostic) =>
+      diagnostic.code === "event-log-repaired" &&
+      /skipped malformed line \d+/.test(diagnostic.message)
+    )
+  );
+  assert.ok(
+    reconciled.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled")
+  );
+  await assert.rejects(
+    readFile(join(store.adaptersDir, "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
     /ENOENT/
   );
 });
@@ -2144,7 +2421,10 @@ test("ctx status, resume, and run repair a completed result despite older matchi
     (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /No active assignment is available to resume\./);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
+      assert.match(
+        error.stderr ?? "",
+        /WARNING event-log-salvaged .*Fell back to .*snapshot\.json[\s\S]*No active assignment is available to resume\./
+      );
       return true;
     }
   );
@@ -2156,7 +2436,10 @@ test("ctx status, resume, and run repair a completed result despite older matchi
     (error: NodeJS.ErrnoException & { stdout?: string; stderr?: string }) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /No active assignment is available to run\./);
-      assert.doesNotMatch(error.stderr ?? "", /WARNING completed-run-reconciled/);
+      assert.match(
+        error.stderr ?? "",
+        /WARNING event-log-salvaged .*Fell back to .*snapshot\.json[\s\S]*No active assignment is available to run\./
+      );
       return true;
     }
   );
