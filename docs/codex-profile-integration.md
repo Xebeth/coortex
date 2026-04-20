@@ -196,9 +196,10 @@ For the current hardening slice:
   `codex exec resume --full-auto` path unless bypass mode is enabled
 - the `-o` last-message file is the authoritative structured-output
   boundary; if Codex does not materialize that file, Coortex may fall
-  back to the streamed `agent_message` JSONL item, but only when that
-  text is itself the same raw JSON object with no surrounding prose or
-  code fences
+  back to the transcript carrier that preserves the same raw final JSON
+  object (for example `turn.completed.last_agent_message` or a streamed
+  `agent_message` item), but only when that text is itself the same raw
+  JSON object with no surrounding prose or code fences
 
 The native Codex session id remains metadata on the runtime-owned
 attachment, not a replacement for that attachment record.

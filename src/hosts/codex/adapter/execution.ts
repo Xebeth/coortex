@@ -164,16 +164,9 @@ function parseExecJsonl(stdout: string): {
             : {})
         };
       }
-      if (
-        event.type === "item.completed" &&
-        event.item &&
-        typeof event.item === "object" &&
-        !Array.isArray(event.item)
-      ) {
-        const item = event.item as Record<string, unknown>;
-        if (item.type === "agent_message" && typeof item.text === "string" && item.text.length > 0) {
-          lastAgentMessage = item.text;
-        }
+      const transcriptMessage = readTranscriptLastAgentMessage(event);
+      if (transcriptMessage) {
+        lastAgentMessage = transcriptMessage;
       }
     } catch {
       continue;
@@ -186,6 +179,28 @@ function parseExecJsonl(stdout: string): {
     ...(usage ? { usage } : {}),
     ...(lastAgentMessage ? { lastAgentMessage } : {})
   };
+}
+
+function readTranscriptLastAgentMessage(event: Record<string, unknown>): string | undefined {
+  if (
+    event.type === "turn.completed" &&
+    typeof event.last_agent_message === "string" &&
+    event.last_agent_message.length > 0
+  ) {
+    return event.last_agent_message;
+  }
+  if (
+    event.type === "item.completed" &&
+    event.item &&
+    typeof event.item === "object" &&
+    !Array.isArray(event.item)
+  ) {
+    const item = event.item as Record<string, unknown>;
+    if (item.type === "agent_message" && typeof item.text === "string" && item.text.length > 0) {
+      return item.text;
+    }
+  }
+  return undefined;
 }
 
 function normalizeStructuredOutcome(

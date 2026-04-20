@@ -638,6 +638,161 @@ test("codex adapter captures decision outcomes through the wrapped resume runner
   assert.deepEqual(persisted, resumeResult.run);
 });
 
+test("codex adapter falls back to turn-completed last-agent-message output when the launch artifact is unavailable", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-launch-last-agent-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec(input) {
+      await input.onEvent?.({ type: "thread.started", thread_id: "thread-launch-last-agent" });
+      return {
+        exitCode: 0,
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-launch-last-agent" }),
+          JSON.stringify({
+            type: "turn.completed",
+            last_agent_message: JSON.stringify({
+              outcomeType: "result",
+              resultStatus: "partial",
+              resultSummary: "Recovered launch output from turn.completed.last_agent_message.",
+              changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+              blockerSummary: "",
+              decisionOptions: [],
+              recommendedOption: ""
+            }),
+            usage: { input_tokens: 6, output_tokens: 4 }
+          })
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  await adapter.initialize(store, projection);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const execution = await adapter.executeAssignment(store, projection, envelope);
+
+  assert.equal(execution.outcome.kind, "result");
+  assert.equal(execution.outcome.capture.status, "partial");
+  assert.equal(
+    execution.outcome.capture.summary,
+    "Recovered launch output from turn.completed.last_agent_message."
+  );
+  assert.equal(getNativeRunId(execution.run), "thread-launch-last-agent");
+  assert.equal(execution.telemetry?.usage?.totalTokens, 10);
+});
+
+test("codex adapter falls back to turn-completed last-agent-message output when the wrapped-resume artifact is unavailable", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-last-agent-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const adapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in resume last-agent-message fallback coverage");
+    },
+    async startResume(input) {
+      return createImmediateRunningHandle((async () => {
+        await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            type: "turn.completed",
+            last_agent_message: JSON.stringify({
+              outcomeType: "result",
+              resultStatus: "partial",
+              resultSummary: "Recovered wrapped resume output from turn.completed.last_agent_message.",
+              changedFiles: ["src/hosts/codex/adapter/execution.ts"],
+              blockerSummary: "",
+              decisionOptions: [],
+              recommendedOption: ""
+            }),
+            usage: { input_tokens: 5, output_tokens: 4 }
+          }),
+          stderr: ""
+        };
+      })());
+    }
+  });
+
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-last-agent",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.verifiedSessionId, "thread-resume-last-agent");
+  assert.equal(resumeResult.outcome.kind, "result");
+  assert.equal(
+    resumeResult.outcome.capture.summary,
+    "Recovered wrapped resume output from turn.completed.last_agent_message."
+  );
+  assert.equal(resumeResult.telemetry?.usage?.totalTokens, 9);
+});
+
 test("codex adapter falls back to streamed wrapped-resume agent output when the last-message file is unavailable", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-stream-fallback-"));
   const store = RuntimeStore.forProject(projectRoot);
