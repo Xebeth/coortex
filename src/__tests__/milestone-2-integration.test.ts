@@ -1266,6 +1266,72 @@ test("milestone-2 integration: run surfaces a recovered verify completion after 
   assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
 });
 
+test("milestone-2 integration: run recovers a completed terminal workflow result after completion is already durable", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in completed terminal workflow recovery smoke test");
+  });
+  const completedAt = "2026-04-15T14:05:00.000Z";
+  const workflowAttempt = await currentWorkflowAttempt(setup.store, setup.assignmentId);
+  await rewriteCurrentWorkflowAsCompletedSnapshot(setup.store, setup.assignmentId, completedAt);
+
+  const completedRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "completed",
+    workflowAttempt,
+    adapterData: { nativeRunId: "terminal-workflow-recovered-thread" },
+    startedAt: "2026-04-15T14:04:00.000Z",
+    completedAt,
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered completed terminal workflow result.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "terminal-workflow-recovered-result",
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered completed terminal workflow result.",
+        changedFiles: ["src/workflows/modules/verify.ts"],
+        createdAt: completedAt
+      }
+    }
+  };
+  const activeLease: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    workflowAttempt,
+    adapterData: { nativeRunId: "terminal-workflow-leftover-lease" },
+    startedAt: "2026-04-15T14:04:30.000Z",
+    heartbeatAt: "2026-04-15T14:04:45.000Z",
+    leaseExpiresAt: "2999-04-15T14:06:00.000Z"
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, completedRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, activeLease);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(run.recoveredOutcome, true);
+  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.resultId, "terminal-workflow-recovered-result");
+  assert.equal(run.execution.outcome.capture.summary, "Recovered completed terminal workflow result.");
+  assert.equal(run.envelope.metadata.recoveredOutcome, true);
+  assert.equal(run.envelope.workflow?.currentAssignmentId, null);
+  assert.equal(run.envelope.metadata.activeAssignmentId, null);
+  assert.equal(run.envelope.objective, "Workflow default complete.");
+  assert.equal(run.projectionBefore.workflowProgress?.currentAssignmentId, null);
+  assert.equal(run.projectionAfter.workflowProgress?.currentAssignmentId, null);
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
+  await assert.rejects(
+    readFile(
+      join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
+      "utf8"
+    ),
+    /ENOENT/
+  );
+});
+
 test("milestone-2 integration: inspect converges onto a pre-created review assignment when rewind transition persistence is interrupted", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in interrupted rewind convergence smoke test");
@@ -2827,6 +2893,59 @@ async function stripWorkflowStateFromRuntime(store: RuntimeStore): Promise<void>
   await writeFile(store.eventsPath, `${filteredEvents.join("\n")}\n`, "utf8");
   const projection = await store.syncSnapshotFromEvents();
   assert.equal(projection.workflowProgress, undefined);
+}
+
+async function rewriteCurrentWorkflowAsCompletedSnapshot(
+  store: RuntimeStore,
+  assignmentId: string,
+  completedAt: string
+): Promise<void> {
+  const snapshot = await store.loadSnapshot();
+  assert.ok(snapshot, "expected a snapshot before completing the workflow");
+  snapshot.assignments = snapshot.assignments.map((assignment) =>
+    assignment.id === assignmentId
+      ? {
+          ...assignment,
+          state: "completed",
+          updatedAt: completedAt
+        }
+      : assignment
+  );
+  snapshot.status = {
+    ...snapshot.status,
+    activeMode: "idle",
+    currentObjective: "Workflow default complete.",
+    activeAssignmentIds: [],
+    lastDurableOutputAt: completedAt,
+    resumeReady: true
+  };
+  assert.ok(snapshot.workflowProgress, "expected workflow progress in snapshot");
+  const currentModule = snapshot.workflowProgress.modules[snapshot.workflowProgress.currentModuleId];
+  assert.ok(currentModule, "expected current module in workflow snapshot");
+  snapshot.workflowProgress = {
+    ...snapshot.workflowProgress,
+    currentAssignmentId: null,
+    modules: {
+      ...snapshot.workflowProgress.modules,
+      [snapshot.workflowProgress.currentModuleId]: {
+        ...currentModule,
+        assignmentId,
+        moduleState: "completed"
+      }
+    },
+    lastTransition: {
+      fromModuleId: snapshot.workflowProgress.currentModuleId,
+      toModuleId: snapshot.workflowProgress.currentModuleId,
+      workflowCycle: snapshot.workflowProgress.workflowCycle,
+      moduleAttempt: snapshot.workflowProgress.currentModuleAttempt,
+      transition: "complete",
+      previousAssignmentId: assignmentId,
+      nextAssignmentId: null,
+      appliedAt: completedAt
+    }
+  };
+  await store.writeSnapshot(snapshot);
+  await rm(store.eventsPath, { force: true });
 }
 
 async function writeStructuredOutput(outputPath: string, payload: unknown): Promise<void> {
