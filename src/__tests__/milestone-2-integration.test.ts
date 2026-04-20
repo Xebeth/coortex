@@ -434,6 +434,106 @@ test("milestone-2 integration: run recovers a durable outcome even if the adapte
   assert.equal(await countQueuedAssignmentUpdatedEvents(setup.store, setup.assignmentId), 1);
 });
 
+test("milestone-2 integration: normal plan advancement refreshes the persisted resume envelope to the converged review assignment", async () => {
+  const setup = await createSmokeSetup(async (input) => {
+    const projection = await loadOperatorProjection(setup.store);
+    const workflow = projection.workflowProgress;
+    assert.ok(workflow, "expected workflow progress while the plan assignment runs");
+
+    await setup.store.writeJsonArtifact(
+      workflowArtifactPath(
+        workflow.workflowId,
+        workflow.workflowCycle,
+        workflow.currentModuleId,
+        setup.assignmentId,
+        workflow.currentModuleAttempt
+      ),
+      {
+        workflowId: workflow.workflowId,
+        workflowCycle: workflow.workflowCycle,
+        moduleId: workflow.currentModuleId,
+        moduleAttempt: workflow.currentModuleAttempt,
+        assignmentId: setup.assignmentId,
+        createdAt: nowIso(),
+        payload: {
+          planSummary: "Plan is ready to hand off to review.",
+          implementationSteps: ["Refresh the durable resume envelope after convergence."],
+          reviewEvidenceSummary: "Normal run progression should persist the review envelope."
+        }
+      } satisfies WorkflowArtifactDocument
+    );
+    await writeStructuredOutput(input.outputPath, {
+      outcomeType: "result",
+      resultStatus: "completed",
+      resultSummary: "Plan run completed and advanced into review.",
+      changedFiles: ["src/cli/commands.ts"],
+      blockerSummary: "",
+      decisionOptions: [],
+      recommendedOption: ""
+    });
+    await input.onEvent?.({ type: "thread.started", thread_id: "smoke-thread-plan-advance" });
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: ""
+    };
+  });
+
+  const planAssignmentId = setup.assignmentId;
+  const planAssignment = (await loadOperatorProjection(setup.store)).assignments.get(planAssignmentId);
+  const run = await runRuntime(setup.store, setup.adapter);
+  const reviewAssignmentId = run.projectionAfter.workflowProgress?.currentAssignmentId;
+  const reviewAssignment = reviewAssignmentId
+    ? run.projectionAfter.assignments.get(reviewAssignmentId)
+    : undefined;
+  const persistedEnvelope = JSON.parse(
+    await readFile(join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as typeof run.envelope;
+
+  assert.equal(run.recoveredOutcome, false);
+  assert.equal(run.assignment.id, planAssignmentId);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(run.execution.outcome.capture.status, "completed");
+  assert.equal(run.projectionBefore.workflowProgress?.currentModuleId, "plan");
+  assert.equal(run.projectionBefore.workflowProgress?.currentAssignmentId, planAssignmentId);
+  assert.equal(run.envelope.workflow?.currentModuleId, "plan");
+  assert.equal(run.envelope.workflow?.currentAssignmentId, planAssignmentId);
+  assert.equal(run.envelope.metadata.activeAssignmentId, planAssignmentId);
+  assert.equal(run.envelope.objective, planAssignment?.objective);
+  assert.deepEqual(run.envelope.requiredOutputs, planAssignment?.requiredOutputs);
+  assert.ok(reviewAssignmentId, "expected the normal run to advance into review");
+  assert.equal(run.projectionAfter.workflowProgress?.currentModuleId, "review");
+  assert.equal(run.projectionAfter.workflowProgress?.currentAssignmentId, reviewAssignmentId);
+  assert.equal(persistedEnvelope.workflow?.currentModuleId, "review");
+  assert.equal(persistedEnvelope.workflow?.currentAssignmentId, reviewAssignmentId);
+  assert.equal(persistedEnvelope.metadata.activeAssignmentId, reviewAssignmentId);
+  assert.equal(persistedEnvelope.objective, reviewAssignment?.objective);
+  assert.deepEqual(persistedEnvelope.requiredOutputs, reviewAssignment?.requiredOutputs);
+});
+
+test("milestone-2 integration: legacy normal runs skip unavailable envelope refresh", async () => {
+  const setup = await createSmokeSetup(
+    stableRunner("legacy-normal-run-thread", "Legacy normal run completed.")
+  );
+  await stripWorkflowStateFromRuntime(setup.store);
+
+  const initialEnvelope = await readFile(
+    join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"),
+    "utf8"
+  );
+  const run = await runRuntime(setup.store, setup.adapter);
+  const finalEnvelope = await readFile(
+    join(setup.projectRoot, ".coortex", "runtime", "last-resume-envelope.json"),
+    "utf8"
+  );
+
+  assert.equal(run.recoveredOutcome, false);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.deepEqual(run.projectionAfter.status.activeAssignmentIds, []);
+  assert.equal(run.projectionAfter.workflowProgress, undefined);
+  assert.equal(finalEnvelope, initialEnvelope);
+});
+
 test("milestone-2 integration: recovered plan advancement envelope matches the converged review assignment", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in recovered plan advancement smoke test");

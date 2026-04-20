@@ -28,6 +28,18 @@ export async function buildAndPersistWorkflowEnvelope(
   return envelope;
 }
 
+export async function refreshPersistedWorkflowEnvelope(
+  store: RuntimeStore,
+  adapter: HostAdapter,
+  projection: LoadedProjection
+): Promise<TaskEnvelope | undefined> {
+  const brief = buildRecoveryBrief(projection);
+  if (brief.activeAssignments.length === 0 && !projection.workflowProgress) {
+    return undefined;
+  }
+  return buildAndPersistWorkflowEnvelope(store, adapter, projection, brief);
+}
+
 export function buildEnvelopeTelemetryMetadata(envelope: TaskEnvelope): {
   envelopeChars: number;
   trimApplied: boolean;

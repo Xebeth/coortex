@@ -37,7 +37,8 @@ import {
   buildAndPersistWorkflowEnvelope,
   buildEnvelopeTelemetryMetadata,
   buildRecoveredExecutionEnvelope,
-  buildWorkflowAwareEnvelope
+  buildWorkflowAwareEnvelope,
+  refreshPersistedWorkflowEnvelope
 } from "./workflow-envelope.js";
 
 export type { CommandDiagnostic } from "./types.js";
@@ -271,6 +272,7 @@ export async function runRuntime(
     const projectionAfterResult = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
     const projectionAfter = projectionAfterResult.projection;
     diagnostics.push(...projectionAfterResult.diagnostics);
+    await refreshPersistedWorkflowEnvelope(store, adapter, projectionAfter);
 
     if (execution.telemetry) {
       diagnostics.push(...await recordTelemetryWarningDiagnostics(store, adapter, execution.telemetry));
