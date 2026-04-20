@@ -287,7 +287,9 @@ the new durable-output timestamp.
   workflow context even when no current host run is available. In
   workflow mode, it must prefer the workflow-owned inspect target,
   including a completed terminal assignment, over the convenience
-  last-run pointer.
+  last-run pointer. If that completed terminal run still needs recovery,
+  `ctx inspect` must reconcile it before returning the workflow-owned
+  assignment and run view.
 
 - `ctx resume`
   Must build its brief from reconciled runtime state. In workflow mode,

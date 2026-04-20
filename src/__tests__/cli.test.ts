@@ -1865,6 +1865,68 @@ test("ctx run recovers terminal workflow results before reporting completion", a
   );
 });
 
+test("ctx inspect recovers terminal workflow results after completion", async () => {
+  const { projectRoot, cliPath, runtimeDir, assignmentId, completedAt } =
+    await createCompletedWorkflowTerminalResultRecoverySetup();
+
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+  const payload = JSON.parse(inspect.stdout) as {
+    workflow: {
+      currentAssignmentId: string | null;
+      currentModuleId: string;
+      currentModuleState: string;
+    };
+    assignment: {
+      id: string;
+      state: string;
+    } | null;
+    run: {
+      assignmentId: string;
+      resultStatus?: string;
+      summary?: string;
+    } | null;
+  };
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{
+      resultId: string;
+      assignmentId: string;
+      producerId: string;
+      status: string;
+      summary: string;
+      changedFiles: string[];
+      createdAt: string;
+    }>;
+  };
+
+  assert.equal(inspect.exitCode, 0);
+  assert.match(inspect.stderr, /WARNING completed-run-reconciled/);
+  assert.equal(payload.workflow.currentAssignmentId, null);
+  assert.equal(payload.workflow.currentModuleId, "verify");
+  assert.equal(payload.workflow.currentModuleState, "completed");
+  assert.equal(payload.assignment?.id, assignmentId);
+  assert.equal(payload.assignment?.state, "completed");
+  assert.equal(payload.run?.assignmentId, assignmentId);
+  assert.equal(payload.run?.resultStatus, "completed");
+  assert.equal(payload.run?.summary, "Recovered completed terminal workflow result.");
+  assert.deepEqual(repairedSnapshot.results, [{
+    resultId: "result-cli-completed-workflow-result",
+    assignmentId,
+    producerId: "codex",
+    status: "completed",
+    summary: "Recovered completed terminal workflow result.",
+    changedFiles: ["src/cli/ctx.ts"],
+    createdAt: completedAt
+  }]);
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+});
+
 test("ctx inspect ignores a parseable but invalid convenience last-run pointer", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-invalid-last-run-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
