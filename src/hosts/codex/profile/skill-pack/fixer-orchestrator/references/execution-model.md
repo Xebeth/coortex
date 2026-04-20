@@ -34,7 +34,7 @@ Codex built-in subagent types for this workflow are `default`, `explorer`, and `
 Rules:
 - use a `worker` subagent for every coordinated repair lane
 - spawn each coordinated repair lane with `fork_context: false`
-- invoke `$review-fixer` explicitly inside the lane prompt
+- invoke `$coortex-fixer-lane` explicitly inside the lane prompt
 - keep the worker prompt family-local or slice-local
 - do not substitute `explorer` as the final repair worker
 

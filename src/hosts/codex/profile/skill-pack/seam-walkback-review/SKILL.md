@@ -62,7 +62,7 @@ Do not use this skill when:
 - you need a normal broad multi-surface review from an already-good baseline;
   use `$review-orchestrator`
 - you already have a structured review handoff and only need to repair it;
-  use `$review-fixer`
+  use `$fixer-orchestrator`
 
 ## Core stance
 

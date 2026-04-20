@@ -133,8 +133,10 @@ active.
 - In packet-driven exploration mode, refuse if the packet fails validation or
   no longer matches the current worktree/head state.
 - Standalone top-level orchestrator campaigns must not run concurrently with an
-  active seam-walk campaign in the same worktree.
+  active seam-walk or fixer-orchestrator campaign in the same worktree.
 - Packet-driven orchestrator exploration is allowed during an active seam-walk
+  campaign only when it is linked to that campaign id.
+- Targeted return review is allowed during an active fixer-orchestrator
   campaign only when it is linked to that campaign id.
 - Do not redo seam-walk archaeology inside packet-driven exploration mode.
 - Do not let packet candidate families bypass coordinator synthesis or ledger

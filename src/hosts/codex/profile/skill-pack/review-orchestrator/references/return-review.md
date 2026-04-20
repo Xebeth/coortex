@@ -1,7 +1,7 @@
 # Return Review
 
-Use this path when `review-fixer` has already completed work and emitted a
-`review_return_handoff`.
+Use this path when `fixer-orchestrator` or a `coortex-fixer-lane` worker has
+already completed work and emitted a `review_return_handoff`.
 
 The goal is not to redo broad family discovery. The goal is to independently
 check the completed fix against the already-known family and closure gate.

@@ -13,7 +13,7 @@ const returnReviewStateScript = resolve(
 );
 const fixResultStateScript = resolve(
   process.cwd(),
-  "src/hosts/codex/profile/skill-pack/review-fixer/scripts/fix_result_state.py"
+  "src/hosts/codex/profile/skill-pack/fixer-orchestrator/scripts/fix_result_state.py"
 );
 const seamWalkbackStateScript = resolve(
   process.cwd(),
@@ -1580,6 +1580,117 @@ test("orchestrator packet mode validates discovery packets and respects the acti
   assert.equal(standaloneAfterTerminal.exitCode, 0);
 });
 
+test("orchestrator targeted return review can run inside an active fixer campaign", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-orchestrator-fixer-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  const fixerInit = await runPythonJson(fixResultStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "fixer-orchestrator-campaign"
+  ]);
+  assert.equal(fixerInit.exitCode, 0);
+  const fixerInitJson = fixerInit.json as {
+    coordinator_file: string;
+    run_id: string;
+  };
+
+  const blockedStandalone = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "full-review"
+  ]);
+  assert.equal(blockedStandalone.exitCode, 2);
+  const blockedStandaloneJson = blockedStandalone.json as { reason: string; status: string };
+  assert.equal(blockedStandaloneJson.status, "error");
+  assert.equal(blockedStandaloneJson.reason, "concurrent-review-campaign");
+
+  const missingCampaign = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "targeted-return-review",
+    "--run-id",
+    "review-orchestrator-return-review-20260420T150000Z"
+  ]);
+  assert.equal(missingCampaign.exitCode, 2);
+  const missingCampaignJson = missingCampaign.json as { reason: string; status: string };
+  assert.equal(missingCampaignJson.status, "error");
+  assert.equal(missingCampaignJson.reason, "missing-campaign-id");
+
+  const targetedReturn = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "targeted-return-review",
+    "--campaign-id",
+    fixerInitJson.run_id,
+    "--run-id",
+    "review-orchestrator-return-review-20260420T150100Z"
+  ]);
+  assert.equal(targetedReturn.exitCode, 0);
+  const targetedReturnJson = targetedReturn.json as { campaign_id: string; run_id: string };
+  assert.equal(targetedReturnJson.campaign_id, fixerInitJson.run_id);
+  assert.equal(targetedReturnJson.run_id, "review-orchestrator-return-review-20260420T150100Z");
+
+  const finalFixPath = join(tempDir, "final-fix.json");
+  await writeFile(
+    finalFixPath,
+    JSON.stringify(
+      {
+        run_id: fixerInitJson.run_id,
+        timestamp_utc: "2026-04-20T15:10:00Z",
+        skill: "fixer-orchestrator",
+        mode: "native-intake",
+        phase: "final_fix",
+        review_target: { mode: "branch", scope_summary: "test" },
+        family_ids_handled: ["F-001"],
+        final_statuses: ["family-closed"]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const finalFix = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    fixerInitJson.coordinator_file,
+    "--record-file",
+    finalFixPath
+  ]);
+  assert.equal(finalFix.exitCode, 0);
+  const finalFixJson = finalFix.json as { active_campaign_cleared: boolean };
+  assert.equal(finalFixJson.active_campaign_cleared, true);
+
+  const standaloneAfterTerminal = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "full-review",
+    "--run-id",
+    "review-orchestrator-full-review-20260420T151000Z"
+  ]);
+  assert.equal(standaloneAfterTerminal.exitCode, 0);
+});
+
 test("orchestrator trace helper validates lane result records before appending", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");
@@ -1970,9 +2081,9 @@ test("fixer trace helper validates final-fix records before appending", async ()
     traceFile,
     "--record-json",
     JSON.stringify({
-      run_id: "review-fixer-20260418T120000Z",
+      run_id: "fixer-orchestrator-20260418T120000Z",
       timestamp_utc: "2026-04-18T12:00:00Z",
-      skill: "review-fixer",
+      skill: "fixer-orchestrator",
       mode: "native-intake",
       phase: "final_fix",
       review_target: { mode: "return-review", scope_summary: "test" },
@@ -2006,9 +2117,9 @@ test("fixer trace helper validates per-family return-review round counts", async
     traceFile,
     "--record-json",
     JSON.stringify({
-      run_id: "review-fixer-20260420T120000Z",
+      run_id: "fixer-orchestrator-20260420T120000Z",
       timestamp_utc: "2026-04-20T12:00:00Z",
-      skill: "review-fixer",
+      skill: "fixer-orchestrator",
       mode: "native-intake",
       phase: "family_commit",
       review_target: { mode: "return-review", scope_summary: "test" },
@@ -2023,6 +2134,7 @@ test("fixer trace helper validates per-family return-review round counts", async
 
   assert.equal(valid.exitCode, 0);
   assert.deepEqual(valid.json, {
+    active_campaign_cleared: false,
     appended: true,
     status: "ok",
     trace_file: traceFile
@@ -2034,9 +2146,9 @@ test("fixer trace helper validates per-family return-review round counts", async
     traceFile,
     "--record-json",
     JSON.stringify({
-      run_id: "review-fixer-20260420T120100Z",
+      run_id: "fixer-orchestrator-20260420T120100Z",
       timestamp_utc: "2026-04-20T12:01:00Z",
-      skill: "review-fixer",
+      skill: "fixer-orchestrator",
       mode: "native-intake",
       phase: "family_commit",
       review_target: { mode: "return-review", scope_summary: "test" },
@@ -2061,6 +2173,99 @@ test("fixer trace helper validates per-family return-review round counts", async
       error.includes("return_review_rounds_taken_by_family keys must match family_ids exactly")
     )
   );
+});
+
+test("fixer trace helper blocks concurrent campaigns and clears after final fix", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-fixer-campaign-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  const init = await runPythonJson(fixResultStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "fixer-orchestrator-campaign"
+  ]);
+
+  assert.equal(init.exitCode, 0);
+  const initJson = init.json as {
+    active_campaign_file: string;
+    coordinator_file: string;
+    resumed: boolean;
+    run_id: string;
+  };
+  assert.equal(initJson.resumed, false);
+  const started = await readFile(initJson.coordinator_file, "utf8");
+  assert.match(started, /"phase": "trace_started"/);
+
+  const activeCampaign = JSON.parse(await readFile(initJson.active_campaign_file, "utf8")) as {
+    campaign_id: string;
+    campaign_type: string;
+    state: string;
+    worktree_root: string;
+  };
+  assert.equal(activeCampaign.campaign_id, "fixer-orchestrator-campaign");
+  assert.equal(activeCampaign.campaign_type, "fixer-orchestrator");
+  assert.equal(activeCampaign.state, "active");
+  assert.equal(activeCampaign.worktree_root, tempDir);
+
+  const concurrent = await runPythonJson(fixResultStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "fixer-orchestrator-competing"
+  ]);
+  assert.equal(concurrent.exitCode, 2);
+  const concurrentJson = concurrent.json as { reason: string; status: string };
+  assert.equal(concurrentJson.status, "error");
+  assert.equal(concurrentJson.reason, "concurrent-fixer-run");
+
+  const finalFixPath = join(tempDir, "fixer-final-fix.json");
+  await writeFile(
+    finalFixPath,
+    JSON.stringify(
+      {
+        run_id: initJson.run_id,
+        timestamp_utc: "2026-04-20T16:00:00Z",
+        skill: "fixer-orchestrator",
+        mode: "native-intake",
+        phase: "final_fix",
+        review_target: { mode: "branch", scope_summary: "test" },
+        family_ids_handled: ["F-001"],
+        final_statuses: ["family-closed"]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const finalFix = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    initJson.coordinator_file,
+    "--record-file",
+    finalFixPath
+  ]);
+  assert.equal(finalFix.exitCode, 0);
+  const finalFixJson = finalFix.json as { active_campaign_cleared: boolean };
+  assert.equal(finalFixJson.active_campaign_cleared, true);
+
+  const fresh = await runPythonJson(fixResultStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "fixer-orchestrator-next"
+  ]);
+  assert.equal(fresh.exitCode, 0);
 });
 
 test("fixer helper plans repair slices by seam, overlap, and blocker waves", async () => {

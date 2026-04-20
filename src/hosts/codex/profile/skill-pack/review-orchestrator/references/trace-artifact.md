@@ -50,8 +50,12 @@ Inside that run directory:
   root.
 - Standalone orchestrator runs must not start while a seam-walk campaign is
   active in the same worktree.
+- Standalone orchestrator runs must not start while a fixer-orchestrator
+  campaign is active in the same worktree.
 - Packet-driven exploration may run only when it is linked to the active
   seam-walk campaign id.
+- Targeted return review may run during an active fixer-orchestrator campaign
+  only when it is linked to that fixer campaign id.
 - Append one JSON object per phase-boundary event.
 - Let `append-trace` validate the record shape before it is written.
 - Maintain a repository-level family ledger at:

@@ -158,7 +158,7 @@ Generated files include:
   `[agents].max_threads = 12` projection when inherited global
   top-level agents config does not already provide that capacity for
   project-local Codex integration
-- `.codex/skills/coortex-deslop`, `.codex/skills/coortex-review`, `.codex/skills/coortex-review-lane`, `.codex/skills/review-baseline`, `.codex/skills/review-orchestrator`, `.codex/skills/review-fixer`, and `.codex/skills/seam-walkback-review` as the Coortex-managed Codex review and cleanup skill pack
+- `.codex/skills/coortex-deslop`, `.codex/skills/coortex-fixer-lane`, `.codex/skills/coortex-review`, `.codex/skills/coortex-review-lane`, `.codex/skills/fixer-orchestrator`, `.codex/skills/review-baseline`, `.codex/skills/review-fixer`, `.codex/skills/review-orchestrator`, and `.codex/skills/seam-walkback-review` as the Coortex-managed Codex review and cleanup skill pack
 
 ## Local usage
 

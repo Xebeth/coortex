@@ -5,7 +5,7 @@ Persist a compact operational trace for every fixer run.
 Use the bundled helper for deterministic path/file management:
 
 ```bash
-python scripts/fix_result_state.py init-trace
+python scripts/fix_result_state.py init-trace --project-root .
 python scripts/fix_result_state.py plan-repair-slices --review-handoff <path>
 python scripts/fix_result_state.py build-lane-continuation --review-handoff <path> --lane-plan-json <path> --lane-id <lane_id> --worker-session-id <worker_session_id>
 python scripts/fix_result_state.py validate-lane-continuation --lane-continuation <path> --lane-plan-json <path> --expected-lane-id <lane_id> --expected-worker-session-id <worker_session_id> --expected-slice-id <slice_id>
@@ -15,6 +15,7 @@ python scripts/fix_result_state.py append-trace --trace-file <path> --record-fil
 
 The helper owns:
 - run-directory creation
+- active top-level review-campaign lock handling for the current worktree
 - coordinator file creation
 - lane filename construction
 - JSONL append mechanics
@@ -28,7 +29,11 @@ The model still owns the contents of each trace record.
   - `.coortex/review-trace/<run_id>/`
 
 Suggested `run_id` shape:
-- `review-fixer-<UTC timestamp>`
+- `fixer-orchestrator-<UTC timestamp>`
+
+Repository-level active-campaign lock while a top-level review campaign is
+running:
+- `.coortex/review-trace/active-review-campaign.json`
 
 Inside that run directory:
 - coordinator file:
@@ -42,6 +47,10 @@ Inside that run directory:
 ## Rules
 
 - Create the directory if it does not exist.
+- Allow only one concurrent top-level review campaign per worktree / `.coortex`
+  root.
+- Standalone fixer campaigns must not start while a seam-walk or standalone
+  review-orchestrator campaign is active in the same worktree.
 - Append one JSON object per phase-boundary event.
 - Let `append-trace` validate the record shape before it is written.
 - Do not write hidden reasoning or a full transcript.

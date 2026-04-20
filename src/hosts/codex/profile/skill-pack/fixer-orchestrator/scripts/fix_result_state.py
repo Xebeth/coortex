@@ -22,6 +22,9 @@ TRACE_PHASES = {
     "final_fix",
 }
 
+ACTIVE_CAMPAIGN_FILE = "active-review-campaign.json"
+FIXER_CAMPAIGN_TYPE = "fixer-orchestrator"
+
 TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     "trace_started": {},
     "intake": {
@@ -459,7 +462,47 @@ def slugify(value: str) -> str:
 
 def default_run_id() -> str:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"review-fixer-{timestamp}"
+    return f"fixer-orchestrator-{timestamp}"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def resolve_trace_root(project_root: pathlib.Path, raw_trace_root: str) -> pathlib.Path:
+    trace_root = pathlib.Path(raw_trace_root)
+    if trace_root.is_absolute():
+        return trace_root.resolve()
+    return (project_root / trace_root).resolve()
+
+
+def active_campaign_path(trace_root: pathlib.Path) -> pathlib.Path:
+    return trace_root / ACTIVE_CAMPAIGN_FILE
+
+
+def load_active_campaign(trace_root: pathlib.Path) -> dict[str, Any] | None:
+    path = active_campaign_path(trace_root)
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else None
+
+
+def write_active_campaign(trace_root: pathlib.Path, data: dict[str, Any]) -> pathlib.Path:
+    trace_root.mkdir(parents=True, exist_ok=True)
+    path = active_campaign_path(trace_root)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def clear_active_campaign(trace_root: pathlib.Path, campaign_id: str) -> bool:
+    path = active_campaign_path(trace_root)
+    active = load_active_campaign(trace_root)
+    if not active or str(active.get("campaign_id") or "") != campaign_id:
+        return False
+    if path.exists():
+        path.unlink()
+    return True
 
 
 def parse_json_record(record_json: str) -> dict[str, Any]:
@@ -1045,7 +1088,7 @@ def validate_review_return(args: argparse.Namespace) -> int:
                         errors.append(f"deferred family {family_id} has no matching family_id in review_handoff")
 
     output = {
-        "mode": "review-fixer",
+        "mode": "fixer-orchestrator",
         "validation": "review_return_handoff",
         "status": "ok" if not errors else "error",
         "warnings": warnings,
@@ -1056,18 +1099,94 @@ def validate_review_return(args: argparse.Namespace) -> int:
 
 
 def init_trace(args: argparse.Namespace) -> int:
+    project_root = pathlib.Path(args.project_root).resolve()
+    trace_root = resolve_trace_root(project_root, args.trace_root)
+    trace_root.mkdir(parents=True, exist_ok=True)
+
     run_id = args.run_id or default_run_id()
-    trace_root = pathlib.Path(args.trace_root)
+    campaign_id = run_id
+    active = load_active_campaign(trace_root)
+    resumed = False
+
+    if active and active.get("state") == "active":
+        active_type = str(active.get("campaign_type") or "")
+        active_campaign_id = str(active.get("campaign_id") or "")
+        active_run_id = str(active.get("run_id") or active_campaign_id)
+        if active_type != FIXER_CAMPAIGN_TYPE:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason": "concurrent-review-campaign",
+                        "message": "an active top-level review campaign already exists for this worktree",
+                        "active_campaign": active,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        if args.run_id and run_id != active_run_id:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason": "concurrent-fixer-run",
+                        "message": "a fixer campaign is already active for this worktree",
+                        "active_campaign": active,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        run_id = active_run_id
+        campaign_id = active_campaign_id
+        resumed = True
+    else:
+        write_active_campaign(
+            trace_root,
+            {
+                "campaign_id": campaign_id,
+                "campaign_type": FIXER_CAMPAIGN_TYPE,
+                "run_id": run_id,
+                "state": "active",
+                "worktree_root": str(project_root),
+                "started_at_utc": utc_now_iso(),
+            },
+        )
+
     trace_dir = trace_root / run_id
     trace_dir.mkdir(parents=True, exist_ok=True)
     coordinator_file = trace_dir / "coordinator.jsonl"
-    coordinator_file.touch(exist_ok=True)
+    if not coordinator_file.exists() or coordinator_file.stat().st_size == 0:
+        coordinator_file.write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "timestamp_utc": utc_now_iso(),
+                    "skill": FIXER_CAMPAIGN_TYPE,
+                    "mode": "native-intake",
+                    "phase": "trace_started",
+                    "review_target": {
+                        "mode": "unknown",
+                        "scope_summary": "pending intake",
+                    },
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     print(
         json.dumps(
             {
+                "campaign_id": campaign_id,
                 "run_id": run_id,
                 "trace_dir": str(trace_dir),
                 "coordinator_file": str(coordinator_file),
+                "active_campaign_file": str(active_campaign_path(trace_root)),
+                "resumed": resumed,
             },
             indent=2,
             sort_keys=True,
@@ -1119,12 +1238,17 @@ def append_trace(args: argparse.Namespace) -> int:
     with trace_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
+    trace_root = trace_file.parent.parent
+    active_cleared = False
+    if str(record.get("phase") or "") == "final_fix":
+        active_cleared = clear_active_campaign(trace_root, str(record.get("run_id") or ""))
     print(
         json.dumps(
             {
                 "trace_file": str(trace_file),
                 "appended": True,
                 "status": "ok",
+                "active_campaign_cleared": active_cleared,
             },
             indent=2,
             sort_keys=True,
@@ -1135,7 +1259,7 @@ def append_trace(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Deterministic helper for review-fixer output validation."
+        description="Deterministic helper for fixer-orchestrator output validation."
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1144,6 +1268,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create or resume the fixer run trace directory and coordinator file.",
     )
     init.add_argument("--trace-root", default=".coortex/review-trace")
+    init.add_argument("--project-root", default=".")
     init.add_argument("--run-id")
     init.set_defaults(func=init_trace)
 

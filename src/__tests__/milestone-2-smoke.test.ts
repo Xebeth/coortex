@@ -122,12 +122,20 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
     join(setup.projectRoot, ".codex", "skills", "coortex-deslop", "SKILL.md"),
     "utf8"
   );
+  const fixerLaneSkill = await readFile(
+    join(setup.projectRoot, ".codex", "skills", "coortex-fixer-lane", "SKILL.md"),
+    "utf8"
+  );
   const reviewSkill = await readFile(
     join(setup.projectRoot, ".codex", "skills", "coortex-review", "SKILL.md"),
     "utf8"
   );
-  const reviewFixerSkill = await readFile(
+  const standaloneFixerSkill = await readFile(
     join(setup.projectRoot, ".codex", "skills", "review-fixer", "SKILL.md"),
+    "utf8"
+  );
+  const fixerOrchestratorSkill = await readFile(
+    join(setup.projectRoot, ".codex", "skills", "fixer-orchestrator", "SKILL.md"),
     "utf8"
   );
   const reviewLaneSkill = await readFile(
@@ -137,8 +145,10 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
 
   assert.deepEqual(skillPackManifest.managedSkills, [
     "coortex-deslop",
+    "coortex-fixer-lane",
     "coortex-review",
     "coortex-review-lane",
+    "fixer-orchestrator",
     "review-baseline",
     "review-fixer",
     "review-orchestrator",
@@ -148,8 +158,10 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
     await readFile(join(setup.projectRoot, ".codex", "skills", skillName, "SKILL.md"), "utf8");
   }
   assert.match(deslopSkill, /Coortex Deslop/);
+  assert.match(fixerLaneSkill, /Coortex Fixer Lane/);
   assert.match(reviewSkill, /Coortex Review/);
-  assert.match(reviewFixerSkill, /Review Fixer/);
+  assert.match(standaloneFixerSkill, /Review Fixer/);
+  assert.match(fixerOrchestratorSkill, /Fixer Orchestrator/);
   assert.match(reviewLaneSkill, /Coortex Review Lane/);
 });
 

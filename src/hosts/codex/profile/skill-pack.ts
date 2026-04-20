@@ -8,8 +8,10 @@ import type { CodexSkillPackInstallation } from "./types.js";
 
 const MANAGED_SKILLS = [
   "coortex-deslop",
+  "coortex-fixer-lane",
   "coortex-review",
   "coortex-review-lane",
+  "fixer-orchestrator",
   "review-baseline",
   "review-fixer",
   "review-orchestrator",

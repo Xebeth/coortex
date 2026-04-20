@@ -26,8 +26,9 @@ Do not use this skill when:
 
 - you still need discovery review; use `$coortex-review` or
   `$review-orchestrator` first
-- you need root-cause repair from structured review output; use `$review-fixer`
-  first
+- you need actual repair rather than cleanup; use `$review-fixer` for a
+  bounded standalone fix, or `$fixer-orchestrator` when you already have a
+  structured `review_handoff` that needs coordinated repair
 - you want a broad refactor with no behavior lock or bounded scope
 
 ## Discovery/advisory mode

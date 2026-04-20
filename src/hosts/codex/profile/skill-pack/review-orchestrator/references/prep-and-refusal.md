@@ -182,4 +182,4 @@ When refusing because of baseline drift or stale mapping:
 When refusing because targeted return-review inputs are stale, malformed, or inconsistent:
 - explain which return artifacts are unusable
 - state whether the problem is missing family baseline, missing closure gate, malformed deferred-family data, malformed grounded deferred-thread data, or diff mismatch
-- direct the user to rerun `review-orchestrator` or `review-fixer` as appropriate
+- direct the user to rerun `review-orchestrator` or `fixer-orchestrator` as appropriate

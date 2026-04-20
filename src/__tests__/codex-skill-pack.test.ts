@@ -19,8 +19,10 @@ test("codex managed skill pack is self-contained", async () => {
 
   assert.deepEqual(managedSkills, [
     "coortex-deslop",
+    "coortex-fixer-lane",
     "coortex-review",
     "coortex-review-lane",
+    "fixer-orchestrator",
     "review-baseline",
     "review-fixer",
     "review-orchestrator",
@@ -70,12 +72,16 @@ test("managed workflow skills require conversation-visible progress guidance", a
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
     "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
     "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-baseline/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
@@ -92,12 +98,16 @@ test("managed workflow skills treat progress updates as non-blocking", async () 
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
     "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
     "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-baseline/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
@@ -114,12 +124,16 @@ test("managed workflow skills explicitly mention update_plan usage", async () =>
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
     "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
     "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-baseline/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
@@ -144,12 +158,12 @@ test("seam walkback explicitly forbids offer-to-continue stops after successful 
   }
 });
 
-test("review fixer explicitly requires same-worker continuation semantics", async () => {
+test("fixer orchestrator explicitly requires same-worker continuation semantics", async () => {
   const expectedFiles = [
-    "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
-    "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
-    "src/hosts/codex/profile/skill-pack/review-fixer/references/execution-model.md",
-    "src/hosts/codex/profile/skill-pack/review-fixer/references/lane-continuation.md"
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/lane-continuation.md"
   ].map((path) => resolve(process.cwd(), path));
 
   for (const path of expectedFiles) {

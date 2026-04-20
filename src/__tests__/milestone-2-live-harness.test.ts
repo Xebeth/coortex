@@ -64,8 +64,10 @@ liveHarness(
       ) as { managedSkills: string[] };
       assert.deepEqual(skillPackManifest.managedSkills, [
         "coortex-deslop",
+        "coortex-fixer-lane",
         "coortex-review",
         "coortex-review-lane",
+        "fixer-orchestrator",
         "review-baseline",
         "review-fixer",
         "review-orchestrator",

@@ -25,6 +25,7 @@ TRACE_PHASES = {
 
 ACTIVE_CAMPAIGN_FILE = "active-review-campaign.json"
 PACKET_EXPLORATION_MODE = "packet-exploration"
+TARGETED_RETURN_REVIEW_MODE = "targeted-return-review"
 DISCOVERY_PACKET_PHASES = {"prep", "coverage", "family-exploration", "synthesis"}
 
 TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
@@ -756,6 +757,7 @@ def init_trace(args: argparse.Namespace) -> int:
     trace_root.mkdir(parents=True, exist_ok=True)
 
     packet_mode = args.mode == PACKET_EXPLORATION_MODE
+    targeted_return_mode = args.mode == TARGETED_RETURN_REVIEW_MODE
     run_id = args.run_id or default_run_id(args.mode)
     active = load_active_campaign(trace_root)
     resumed = False
@@ -787,6 +789,40 @@ def init_trace(args: argparse.Namespace) -> int:
                             "status": "error",
                             "reason": "concurrent-review-campaign",
                             "message": "an active review campaign already exists for this worktree and does not match the requested seam-walk campaign",
+                            "active_campaign": active,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+            linked_campaign_id = active_campaign_id
+            active["child_run_id"] = run_id
+            active["child_skill"] = "review-orchestrator"
+            active["child_mode"] = args.mode
+            write_active_campaign(trace_root, active)
+        elif targeted_return_mode and active_type == "fixer-orchestrator":
+            if not args.campaign_id:
+                print(
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "reason": "missing-campaign-id",
+                            "message": "targeted return review during an active fixer campaign requires --campaign-id from that fixer campaign",
+                            "active_campaign": active,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+            if args.campaign_id != active_campaign_id:
+                print(
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "reason": "concurrent-review-campaign",
+                            "message": "an active fixer campaign already exists for this worktree and does not match the requested campaign id",
                             "active_campaign": active,
                         },
                         indent=2,
