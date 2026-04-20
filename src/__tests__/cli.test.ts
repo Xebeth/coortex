@@ -560,7 +560,7 @@ async function createCompletedWorkflowTerminalResultRecoverySetup() {
 }
 
 async function createInterruptedAdvanceCompletedRecoverySetup(
-  commandSurface: "inspect" | "status" | "resume"
+  commandSurface: "inspect" | "status" | "resume" | "run"
 ) {
   const projectRoot = await mkdtemp(
     join(tmpdir(), `coortex-cli-interrupted-advance-${commandSurface}-`)
@@ -2701,6 +2701,88 @@ test("ctx status and resume surface interrupted advance completed recovery befor
     assert.equal(payload.recoveryBrief.lastDurableResults[0]?.summary, recoveredReviewSummary);
     assert.equal(payload.recoveryBrief.lastDurableResults[0]?.status, "completed");
   }
+});
+
+test("ctx run surfaces interrupted advance completed recovery before the next workflow assignment", async () => {
+  const {
+    projectRoot,
+    cliPath,
+    runtimeDir,
+    reviewAssignmentId,
+    recoveredReviewSummary,
+    recoveredReviewResultId
+  } = await createInterruptedAdvanceCompletedRecoverySetup("run");
+
+  const firstRun = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot
+  });
+  const repairedSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string; state: string }>;
+    results: Array<{
+      resultId: string;
+      assignmentId: string;
+      status: string;
+      summary: string;
+    }>;
+    status: { activeAssignmentIds: string[] };
+    workflowProgress: {
+      currentAssignmentId: string | null;
+      currentModuleId: string;
+    };
+  };
+  const verifyAssignmentId = repairedSnapshot.workflowProgress.currentAssignmentId;
+  assert.ok(verifyAssignmentId, "expected ctx run recovery to advance into verify");
+
+  assert.equal(firstRun.exitCode, 0);
+  assert.match(firstRun.stdout, /Workflow: default/);
+  assert.match(firstRun.stdout, /Module: verify/);
+  assert.ok(firstRun.stdout.includes(`Result (completed): ${recoveredReviewSummary}`));
+  assert.doesNotMatch(firstRun.stdout, /Executed assignment/);
+  assert.doesNotMatch(firstRun.stdout, /Host run:/);
+  assert.match(firstRun.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(firstRun.stderr, /WARNING stale-run-reconciled/);
+  assert.equal(repairedSnapshot.workflowProgress.currentModuleId, "verify");
+  assert.equal(
+    repairedSnapshot.assignments.find((assignment) => assignment.id === reviewAssignmentId)?.state,
+    "completed"
+  );
+  assert.equal(
+    repairedSnapshot.assignments.find((assignment) => assignment.id === verifyAssignmentId)?.state,
+    "queued"
+  );
+  assert.deepEqual(repairedSnapshot.status.activeAssignmentIds, [verifyAssignmentId]);
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, reviewAssignmentId, "result.submitted"), 1);
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${reviewAssignmentId}.lease.json`), "utf8"),
+    /ENOENT/
+  );
+  await assert.rejects(
+    readFile(join(runtimeDir, "adapters", "codex", "runs", `${verifyAssignmentId}.json`), "utf8"),
+    /ENOENT/
+  );
+  assert.ok(
+    repairedSnapshot.results.some((result) =>
+      result.resultId === recoveredReviewResultId &&
+      result.assignmentId === reviewAssignmentId &&
+      result.status === "completed" &&
+      result.summary === recoveredReviewSummary
+    )
+  );
+
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+  assert.equal(status.exitCode, 0);
+  assert.match(status.stdout, /Current module: verify/);
+  assert.match(status.stdout, /Module state: queued/);
+  assert.match(status.stdout, /Active assignments: 1/);
+  assert.match(status.stdout, /Results: 2/);
+  assert.match(status.stdout, new RegExp(`- ${verifyAssignmentId} queued`));
+  assert.doesNotMatch(status.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(status.stderr, /WARNING stale-run-reconciled/);
+  assert.equal(await countRecoveredOutcomeEvents(runtimeDir, reviewAssignmentId, "result.submitted"), 1);
 });
 
 test("ctx inspect hides prior-attempt same-assignment runs after a rerun", async () => {
