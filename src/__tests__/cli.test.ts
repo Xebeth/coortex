@@ -1382,19 +1382,18 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
   assert.match(codexConfig, /model_instructions_file = "/);
 
-  const envelope = await readFile(
-    join(projectRoot, ".coortex", "runtime", "last-resume-envelope.json"),
-    "utf8"
-  );
-  assert.match(envelope, /"adapter": "codex"/);
-
   const snapshot = JSON.parse(
     await readFile(join(projectRoot, ".coortex", "runtime", "snapshot.json"), "utf8")
   ) as {
     assignments: Array<{ id: string; state: string }>;
     results: Array<{ status: string; summary: string }>;
     status: { activeAssignmentIds: string[] };
-    workflowProgress: { currentModuleId: string; currentModuleAttempt: number };
+    workflowProgress: {
+      workflowId: string;
+      workflowCycle: number;
+      currentModuleId: string;
+      currentModuleAttempt: number;
+    };
   };
   assert.equal(snapshot.results.length, 1);
   assert.equal(snapshot.results[0]?.status, "completed");
@@ -1402,6 +1401,52 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   assert.equal(snapshot.assignments[0]?.state, "queued");
   assert.equal(snapshot.workflowProgress.currentModuleId, "plan");
   assert.equal(snapshot.workflowProgress.currentModuleAttempt, 2);
+
+  const queuedOutputArtifact = `.coortex/${workflowArtifactPath(
+    snapshot.workflowProgress.workflowId,
+    snapshot.workflowProgress.workflowCycle,
+    snapshot.workflowProgress.currentModuleId,
+    snapshot.assignments[0]!.id,
+    snapshot.workflowProgress.currentModuleAttempt
+  )}`;
+  const launchedOutputArtifact = `.coortex/${workflowArtifactPath(
+    snapshot.workflowProgress.workflowId,
+    snapshot.workflowProgress.workflowCycle,
+    snapshot.workflowProgress.currentModuleId,
+    snapshot.assignments[0]!.id,
+    snapshot.workflowProgress.currentModuleAttempt - 1
+  )}`;
+  const envelope = JSON.parse(
+    await readFile(join(projectRoot, ".coortex", "runtime", "last-resume-envelope.json"), "utf8")
+  ) as {
+    adapter: string;
+    writeScope: string[];
+    recoveryBrief: {
+      activeAssignments: Array<{ id: string; state: string }>;
+    };
+    workflow?: {
+      currentAssignmentId: string | null;
+      currentModuleId: string;
+      currentModuleState: string;
+      outputArtifact: string | null;
+      lastDurableAdvancement: string | null;
+    };
+    metadata: {
+      activeAssignmentId: string | null;
+    };
+  };
+  assert.equal(envelope.adapter, "codex");
+  assert.equal(envelope.workflow?.currentAssignmentId, snapshot.assignments[0]!.id);
+  assert.equal(envelope.workflow?.currentModuleId, "plan");
+  assert.equal(envelope.workflow?.currentModuleState, "queued");
+  assert.equal(envelope.workflow?.outputArtifact, queuedOutputArtifact);
+  assert.equal(envelope.workflow?.lastDurableAdvancement, "Rerun plan attempt 2.");
+  assert.ok(envelope.writeScope.includes(queuedOutputArtifact));
+  assert.ok(!envelope.writeScope.includes(launchedOutputArtifact));
+  assert.equal(envelope.metadata.activeAssignmentId, snapshot.assignments[0]!.id);
+  assert.equal(envelope.recoveryBrief.activeAssignments.length, 1);
+  assert.equal(envelope.recoveryBrief.activeAssignments[0]?.id, snapshot.assignments[0]!.id);
+  assert.equal(envelope.recoveryBrief.activeAssignments[0]?.state, "queued");
 
   const telemetry = await readFile(join(projectRoot, ".coortex", "runtime", "telemetry.ndjson"), "utf8");
   assert.match(telemetry, /"eventType":"host.run.started"/);
