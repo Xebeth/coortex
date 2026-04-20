@@ -2874,7 +2874,8 @@ test("workflow-aware recovery matrix keeps cleanup truth-driven across current a
           [...loaded.projection.results.values()].find((result) => result.assignmentId === ctx.assignmentId)?.status,
           "completed"
         );
-        assert.equal(await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted"), 1);
+        // Missing event logs keep snapshot-fallback completion recovery snapshot-only.
+        assert.equal(await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted"), 0);
         assert.equal(
           await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
           undefined

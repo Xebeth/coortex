@@ -569,7 +569,15 @@ async function reconcileCompletedRunRecord(
 
   if (completedRecovery.events.length > 0) {
     changed = true;
-    if (options.snapshotFallback) {
+    if (
+      options.snapshotFallback &&
+      !hasReplayableSnapshotBoundary(
+        options.replayableEvents,
+        options.snapshotBoundaryEventId
+      )
+    ) {
+      // Without an anchored boundary, appending only recovery events can seed a
+      // partial log that eclipses older snapshot-owned runtime context.
       for (const event of completedRecovery.events) {
         applyRuntimeEvent(effectiveProjection, event);
       }
@@ -1287,6 +1295,17 @@ function selectReplayableSuffixEvents(
     return undefined;
   }
   return replayableEvents.slice(boundaryIndex + 1);
+}
+
+function hasReplayableSnapshotBoundary(
+  replayableEvents: RuntimeEvent[] | undefined,
+  snapshotBoundaryEventId: string | undefined
+): boolean {
+  return Boolean(
+    replayableEvents &&
+      snapshotBoundaryEventId &&
+      replayableEvents.some((event) => event.eventId === snapshotBoundaryEventId)
+  );
 }
 
 function hydrateMissingAssignmentFromReplayableEvents(
