@@ -272,7 +272,7 @@ export async function runRuntime(
     const projectionAfterResult = await loadWorkflowAwareProjectionWithDiagnostics(store, adapter);
     const projectionAfter = projectionAfterResult.projection;
     diagnostics.push(...projectionAfterResult.diagnostics);
-    await refreshPersistedWorkflowEnvelope(store, adapter, projectionAfter);
+    await refreshPersistedWorkflowEnvelope(store, adapter, projectionAfter, assignment.id);
 
     if (execution.telemetry) {
       diagnostics.push(...await recordTelemetryWarningDiagnostics(store, adapter, execution.telemetry));

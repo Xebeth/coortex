@@ -31,13 +31,18 @@ export async function buildAndPersistWorkflowEnvelope(
 export async function refreshPersistedWorkflowEnvelope(
   store: RuntimeStore,
   adapter: HostAdapter,
-  projection: LoadedProjection
+  projection: LoadedProjection,
+  activeAssignmentId?: string
 ): Promise<TaskEnvelope | undefined> {
-  const brief = buildRecoveryBrief(projection);
-  if (brief.activeAssignments.length === 0 && !projection.workflowProgress) {
+  const envelopeProjection = selectEnvelopeRefreshProjection(projection, activeAssignmentId);
+  if (!envelopeProjection) {
     return undefined;
   }
-  return buildAndPersistWorkflowEnvelope(store, adapter, projection, brief);
+  const brief = buildRecoveryBrief(envelopeProjection);
+  if (brief.activeAssignments.length === 0 && !envelopeProjection.workflowProgress) {
+    return undefined;
+  }
+  return buildAndPersistWorkflowEnvelope(store, adapter, envelopeProjection, brief);
 }
 
 export function buildEnvelopeTelemetryMetadata(envelope: TaskEnvelope): {
@@ -81,4 +86,20 @@ async function persistWorkflowEnvelope(
   envelope: TaskEnvelope
 ): Promise<void> {
   await store.writeJsonArtifact("runtime/last-resume-envelope.json", envelope);
+}
+
+function selectEnvelopeRefreshProjection(
+  projection: LoadedProjection,
+  activeAssignmentId?: string
+): LoadedProjection | undefined {
+  if (projection.workflowProgress) {
+    return projection;
+  }
+  if (!activeAssignmentId) {
+    return projection.status.activeAssignmentIds.length === 0 ? undefined : projection;
+  }
+  if (!projection.status.activeAssignmentIds.includes(activeAssignmentId)) {
+    return undefined;
+  }
+  return projectionForRunnableAssignment(projection, activeAssignmentId);
 }

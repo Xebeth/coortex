@@ -63,6 +63,12 @@ export async function synthesizeRecoveredExecutionFromReconciliation(
   if (!recoveredResult) {
     return undefined;
   }
+  if (shouldDeferRecoveredResultToLegacyBlocker(
+    projectionAfterReconciliation,
+    recoveredResult.assignment.id
+  )) {
+    return undefined;
+  }
   const envelope = await buildRecoveredExecutionEnvelope(
     store,
     adapter,
@@ -341,6 +347,27 @@ function findRecoveredResultCandidate(
   }
 
   return candidate;
+}
+
+function shouldDeferRecoveredResultToLegacyBlocker(
+  projection: LoadedProjection,
+  recoveredAssignmentId: string
+): boolean {
+  if (projection.workflowProgress) {
+    return false;
+  }
+
+  for (const assignmentId of projection.status.activeAssignmentIds) {
+    const assignment = projection.assignments.get(assignmentId);
+    if (!assignment) {
+      continue;
+    }
+    if (assignment.state === "blocked" || findLatestOpenDecision(projection, assignment.id)) {
+      return assignment.id !== recoveredAssignmentId;
+    }
+  }
+
+  return false;
 }
 
 function findLatestOpenDecision(
