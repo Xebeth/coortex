@@ -728,6 +728,106 @@ test("milestone-2 integration: interrupted advance recovers a completed run on t
   assert.equal(loaded.projection.workflowProgress?.workflowCycle, 1);
 });
 
+test("milestone-2 integration: run surfaces the interrupted advance completed recovery before rerunning the newly current assignment", async () => {
+  let runnerInvocations = 0;
+  const setup = await createSmokeSetup(async () => {
+    runnerInvocations += 1;
+    throw new Error("runner not used in interrupted advance completed run recovery smoke test");
+  });
+  const interruptedEvents = await appendWorkflowProgressionWithOmissions(setup.store, {
+    artifact: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "plan",
+      moduleAttempt: 1,
+      assignmentId: setup.assignmentId,
+      createdAt: "2026-04-18T09:13:00.000Z",
+      payload: {
+        planSummary: "Plan ready for review.",
+        implementationSteps: ["Surface the recovered review completion before rerunning it."],
+        reviewEvidenceSummary:
+          "Interrupted advance should still emit the durable review result on ctx run."
+      }
+    },
+    resultId: "plan-result-interrupted-advance-run-recovery",
+    summary: "Plan completed before transition persistence finished.",
+    createdAt: "2026-04-18T09:13:00.000Z",
+    progressionAt: "2026-04-18T09:13:01.000Z",
+    omitEventTypes: ["workflow.transition.applied"]
+  });
+  const reviewAssignmentId = interruptedEvents.find(
+    (event): event is Extract<RuntimeEvent, { type: "assignment.created" }> =>
+      event.type === "assignment.created"
+  )?.payload.assignment.id;
+  assert.ok(reviewAssignmentId, "expected interrupted advance to pre-create a review assignment");
+
+  await setup.store.writeJsonArtifact(
+    workflowArtifactPath("default", 1, "review", reviewAssignmentId, 1),
+    {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "review",
+      moduleAttempt: 1,
+      assignmentId: reviewAssignmentId,
+      createdAt: "2026-04-18T09:14:00.000Z",
+      payload: {
+        verdict: "approved",
+        rationaleSummary: "Review approved after the interrupted advance."
+      }
+    } satisfies WorkflowArtifactDocument
+  );
+  const completedReviewRun: HostRunRecord = {
+    assignmentId: reviewAssignmentId,
+    state: "completed",
+    workflowAttempt: {
+      workflowId: "default",
+      workflowCycle: 1,
+      moduleId: "review",
+      moduleAttempt: 1
+    },
+    adapterData: { nativeRunId: "interrupted-advance-review-run-recovered" },
+    startedAt: "2026-04-18T09:13:30.000Z",
+    completedAt: "2026-04-18T09:14:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Recovered review completion on run.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        resultId: "review-result-interrupted-advance-run-recovered",
+        producerId: "codex",
+        status: "completed",
+        summary: "Recovered review completion on run.",
+        changedFiles: ["src/workflows/modules/review.ts"],
+        createdAt: "2026-04-18T09:14:00.000Z"
+      }
+    }
+  };
+  await setup.store.writeJsonArtifact(
+    `adapters/codex/runs/${reviewAssignmentId}.json`,
+    completedReviewRun
+  );
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", completedReviewRun);
+
+  const run = await runRuntime(setup.store, setup.adapter);
+
+  assert.equal(runnerInvocations, 0);
+  assert.equal(run.recoveredOutcome, true);
+  assert.equal(run.assignment.id, reviewAssignmentId);
+  assert.equal(run.execution.outcome.kind, "result");
+  assert.equal(
+    run.execution.outcome.capture.resultId,
+    "review-result-interrupted-advance-run-recovered"
+  );
+  assert.equal(run.execution.outcome.capture.summary, "Recovered review completion on run.");
+  assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
+  assert.ok(!run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.equal(run.projectionBefore.workflowProgress?.currentModuleId, "verify");
+  assert.notEqual(run.projectionBefore.workflowProgress?.currentAssignmentId, reviewAssignmentId);
+  assert.equal(run.envelope.workflow?.currentModuleId, "verify");
+  assert.notEqual(run.envelope.workflow?.currentAssignmentId, reviewAssignmentId);
+});
+
 test("milestone-2 integration: interrupted advance treats a stale pre-created next assignment as current stale recovery, not hidden cleanup", async () => {
   const setup = await createSmokeSetup(async () => {
     throw new Error("runner not used in interrupted advance stale-recovery smoke test");
