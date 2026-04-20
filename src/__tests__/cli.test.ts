@@ -1582,6 +1582,84 @@ test("ctx run reports workflow completion when no workflow assignment remains", 
   assert.match(run.stderr, /Workflow default complete\./);
 });
 
+test("ctx status surfaces completed workflow guidance without active assignments", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-workflow-status-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+  await rewriteRuntimeAsCompletedWorkflow(projectRoot);
+
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+
+  assert.equal(status.exitCode, 0);
+  assert.match(status.stdout, /Objective: Workflow default complete\./);
+  assert.match(status.stdout, /Workflow: default/);
+  assert.match(status.stdout, /Current module: verify/);
+  assert.match(status.stdout, /Module state: completed/);
+  assert.match(status.stdout, /Rerun eligible: no/);
+  assert.match(status.stdout, /Last advancement: Workflow default complete\./);
+  assert.match(status.stdout, /Active assignments: 0/);
+  assert.match(status.stdout, /Results: 0/);
+  assert.match(status.stdout, /Open decisions: 0/);
+  assert.doesNotMatch(status.stdout, /Blocker:/);
+  assert.equal(status.stderr.trim(), "");
+});
+
+test("ctx resume emits a workflow-only envelope for completed workflows", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-completed-workflow-resume-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+  await rewriteRuntimeAsCompletedWorkflow(projectRoot);
+
+  const resume = await runCliCommand(cliPath, "resume", {
+    cwd: projectRoot
+  });
+  const payload = JSON.parse(
+    resume.stdout.slice(resume.stdout.indexOf("{"))
+  ) as {
+    objective: string;
+    writeScope: string[];
+    requiredOutputs: string[];
+    recoveryBrief: {
+      activeAssignments: Array<{ id: string }>;
+      nextRequiredAction: string;
+    };
+    workflow?: {
+      id: string;
+      currentModuleId: string;
+      currentModuleState: string;
+      currentAssignmentId: string | null;
+      blockerReason?: string;
+      lastDurableAdvancement?: string | null;
+    };
+    metadata: {
+      activeAssignmentId: string | null;
+    };
+  };
+
+  assert.equal(resume.exitCode, 0);
+  assert.match(resume.stdout, /Recovery brief generated for Workflow default complete\./);
+  assert.equal(payload.objective, "Workflow default complete.");
+  assert.deepEqual(payload.writeScope, []);
+  assert.deepEqual(payload.requiredOutputs, []);
+  assert.deepEqual(payload.recoveryBrief.activeAssignments, []);
+  assert.equal(payload.recoveryBrief.nextRequiredAction, "Workflow default complete.");
+  assert.equal(payload.workflow?.id, "default");
+  assert.equal(payload.workflow?.currentModuleId, "verify");
+  assert.equal(payload.workflow?.currentModuleState, "completed");
+  assert.equal(payload.workflow?.currentAssignmentId, null);
+  assert.equal(payload.workflow?.blockerReason ?? null, null);
+  assert.equal(payload.workflow?.lastDurableAdvancement, "Workflow default complete.");
+  assert.equal(payload.metadata.activeAssignmentId, null);
+});
+
 test("ctx inspect ignores a parseable but invalid convenience last-run pointer", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-invalid-last-run-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");

@@ -270,7 +270,11 @@ the new durable-output timestamp.
 
 - `ctx status`
   Must show the same reconciled state that `ctx resume` and `ctx run`
-  would see, including stale-run and completed-run reconciliation.
+  would see, including stale-run and completed-run reconciliation. In
+  workflow mode, when no current assignment remains because the
+  workflow is complete, it must still surface the workflow-owned
+  completion guidance rather than falling back to stale assignment
+  status.
 
 - `ctx inspect`
   Must read through the same workflow-aware load path and may return
@@ -280,7 +284,10 @@ the new durable-output timestamp.
   last-run pointer.
 
 - `ctx resume`
-  Must build its brief from reconciled runtime state.
+  Must build its brief from reconciled runtime state. In workflow mode,
+  when the workflow is complete and has no current assignment, it must
+  still emit a workflow-only envelope whose objective and next action
+  reflect workflow completion.
 
 - `ctx run`
   Must refuse execution if a valid active lease is present.
