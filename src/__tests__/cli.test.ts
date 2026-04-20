@@ -2469,6 +2469,132 @@ test("ctx inspect surfaces interrupted advance completed recovery before the nex
   );
 });
 
+test("ctx inspect does not replay interrupted advance completed recovery after the first inspection", async () => {
+  const {
+    projectRoot,
+    cliPath,
+    runtimeDir,
+    reviewAssignmentId,
+    recoveredReviewRunId,
+    recoveredReviewSummary,
+    recoveredReviewResultId
+  } = await createInterruptedAdvanceCompletedRecoverySetup("inspect");
+
+  const firstInspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+  const firstPayload = JSON.parse(firstInspect.stdout) as {
+    workflow: {
+      currentAssignmentId: string | null;
+      currentModuleId: string;
+    };
+    assignment: {
+      id: string;
+      state: string;
+    } | null;
+    run: HostRunRecord | null;
+  };
+  const firstSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{
+      resultId: string;
+      assignmentId: string;
+      status: string;
+      summary: string;
+    }>;
+    workflowProgress: {
+      currentAssignmentId: string | null;
+      currentModuleId: string;
+    };
+  };
+
+  assert.equal(firstInspect.exitCode, 0);
+  assert.match(firstInspect.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(firstInspect.stderr, /WARNING stale-run-reconciled/);
+  assert.equal(firstPayload.workflow.currentModuleId, "verify");
+  assert.notEqual(firstPayload.workflow.currentAssignmentId, reviewAssignmentId);
+  assert.equal(firstPayload.assignment?.id, reviewAssignmentId);
+  assert.equal(firstPayload.assignment?.state, "completed");
+  assert.equal(firstPayload.run?.assignmentId, reviewAssignmentId);
+  assert.equal(firstPayload.run?.adapterData?.nativeRunId, recoveredReviewRunId);
+  assert.equal(firstPayload.run?.resultStatus, "completed");
+  assert.equal(firstPayload.run?.summary, recoveredReviewSummary);
+  assert.equal(firstSnapshot.workflowProgress.currentModuleId, "verify");
+  assert.notEqual(firstSnapshot.workflowProgress.currentAssignmentId, reviewAssignmentId);
+  assert.ok(
+    firstSnapshot.results.some((result) =>
+      result.resultId === recoveredReviewResultId &&
+      result.assignmentId === reviewAssignmentId &&
+      result.status === "completed" &&
+      result.summary === recoveredReviewSummary
+    )
+  );
+
+  const verifyAssignmentId = firstSnapshot.workflowProgress.currentAssignmentId;
+  assert.ok(verifyAssignmentId, "expected first inspect recovery to advance into verify");
+  const firstRecoveryEventCount = await countRecoveredOutcomeEvents(
+    runtimeDir,
+    reviewAssignmentId,
+    "result.submitted"
+  );
+
+  const secondInspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+  const secondPayload = JSON.parse(secondInspect.stdout) as {
+    workflow: {
+      currentAssignmentId: string | null;
+      currentModuleId: string;
+    };
+    assignment: {
+      id: string;
+      state: string;
+    } | null;
+    run: HostRunRecord | null;
+  };
+  const secondSnapshot = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    results: Array<{
+      resultId: string;
+      assignmentId: string;
+      status: string;
+      summary: string;
+    }>;
+    workflowProgress: {
+      currentAssignmentId: string | null;
+      currentModuleId: string;
+    };
+  };
+  const secondRecoveryEventCount = await countRecoveredOutcomeEvents(
+    runtimeDir,
+    reviewAssignmentId,
+    "result.submitted"
+  );
+
+  assert.equal(secondInspect.exitCode, 0);
+  assert.doesNotMatch(secondInspect.stderr, /WARNING completed-run-reconciled/);
+  assert.doesNotMatch(secondInspect.stderr, /WARNING stale-run-reconciled/);
+  assert.equal(secondPayload.workflow.currentModuleId, "verify");
+  assert.equal(secondPayload.workflow.currentAssignmentId, verifyAssignmentId);
+  assert.equal(secondPayload.assignment?.id, verifyAssignmentId);
+  assert.equal(secondPayload.assignment?.state, "queued");
+  assert.equal(secondPayload.run, null);
+  assert.equal(secondSnapshot.workflowProgress.currentModuleId, "verify");
+  assert.equal(secondSnapshot.workflowProgress.currentAssignmentId, verifyAssignmentId);
+  assert.ok(
+    secondSnapshot.results.some((result) =>
+      result.resultId === recoveredReviewResultId &&
+      result.assignmentId === reviewAssignmentId &&
+      result.status === "completed" &&
+      result.summary === recoveredReviewSummary
+    )
+  );
+  assert.equal(firstRecoveryEventCount, 1);
+  assert.equal(secondRecoveryEventCount, firstRecoveryEventCount);
+});
+
 test("ctx status and resume surface interrupted advance completed recovery before the next workflow assignment", async () => {
   for (const command of ["status", "resume"] as const) {
     const {
