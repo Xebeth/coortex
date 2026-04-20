@@ -30,10 +30,7 @@ export class HostRunStore {
 
   async inspect(assignmentId?: string): Promise<HostRunRecord | undefined> {
     if (assignmentId) {
-      const runRecord = await this.store.readJsonArtifact<HostRunRecord>(
-        this.artifacts.runRecordPath(assignmentId),
-        `${this.adapterId} run record`
-      );
+      const runRecord = await this.readRunRecord(assignmentId);
       const leaseRecord = preserveMalformedLeaseRunContext(
         runRecord,
         await this.readLeaseRecord(assignmentId)
@@ -169,6 +166,26 @@ export class HostRunStore {
   private async persistRunRecordMetadata(record: HostRunRecord): Promise<void> {
     await this.store.writeJsonArtifact(this.artifacts.runRecordPath(record.assignmentId), record);
     await this.store.writeJsonArtifact(this.artifacts.lastRunPath(), record);
+  }
+
+  private async readRunRecord(assignmentId: string): Promise<HostRunRecord | undefined> {
+    const relativePath = this.artifacts.runRecordPath(assignmentId);
+    try {
+      return await this.store.readJsonArtifact<HostRunRecord>(
+        relativePath,
+        `${this.adapterId} run record`
+      );
+    } catch {
+      const content = await this.store.readTextArtifact(relativePath, `${this.adapterId} run record`);
+      if (content === undefined) {
+        return undefined;
+      }
+      try {
+        return parseJson<HostRunRecord>(content, `${this.adapterId} run record`);
+      } catch {
+        return undefined;
+      }
+    }
   }
 
   private async tryDeleteArtifact(relativePath: string, label: string): Promise<Error | undefined> {

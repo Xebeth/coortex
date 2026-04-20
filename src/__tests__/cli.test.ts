@@ -1419,6 +1419,43 @@ test("ctx status and resume ignore a malformed convenience last-run pointer", as
   assert.doesNotMatch(resume.stderr, /Failed to parse codex run record/);
 });
 
+test("ctx status and inspect ignore a malformed per-assignment run record", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-malformed-run-record-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const store = RuntimeStore.forProject(projectRoot);
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const snapshot = await store.loadSnapshot();
+  assert.ok(snapshot, "expected snapshot after init");
+  const assignmentId = snapshot.assignments[0]!.id;
+  const runtimeDir = join(projectRoot, ".coortex");
+  await mkdir(join(runtimeDir, "adapters", "codex", "runs"), { recursive: true });
+  await writeFile(
+    join(runtimeDir, "adapters", "codex", "runs", `${assignmentId}.json`),
+    "{",
+    "utf8"
+  );
+
+  const status = await runCliCommand(cliPath, "status", {
+    cwd: projectRoot
+  });
+  const inspect = await runCliCommand(cliPath, "inspect", {
+    cwd: projectRoot
+  });
+
+  assert.equal(status.exitCode, 0);
+  assert.match(status.stdout, /Active assignments: 1/);
+  assert.doesNotMatch(status.stderr, /Failed to parse codex run record/);
+
+  assert.equal(inspect.exitCode, 0);
+  assert.match(inspect.stdout, /"assignment": \{/);
+  assert.match(inspect.stdout, /"run": null/);
+  assert.doesNotMatch(inspect.stderr, /Failed to parse codex run record/);
+});
+
 test("ctx status ignores inactive legacy decisions that resume already filters", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-legacy-inactive-decision-"));
   const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
