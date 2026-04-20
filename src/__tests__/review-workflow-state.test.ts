@@ -24,6 +24,13 @@ const aiSlopCleanerStateScript = resolve(
   "src/hosts/codex/profile/skill-pack/coortex-deslop/scripts/deslop_state.py"
 );
 
+function parseJsonOutput(raw: string | undefined): unknown {
+  if (raw == null || raw.trim() === "") {
+    return {};
+  }
+  return JSON.parse(raw);
+}
+
 async function runPythonJson(
   scriptPath: string,
   args: string[]
@@ -32,7 +39,7 @@ async function runPythonJson(
     const result = await execFileAsync("python", [scriptPath, ...args]);
     return {
       exitCode: 0,
-      json: JSON.parse(result.stdout),
+      json: parseJsonOutput(result.stdout),
       stdout: result.stdout,
       stderr: result.stderr
     };
@@ -44,7 +51,7 @@ async function runPythonJson(
     };
     return {
       exitCode: typeof failure.code === "number" ? failure.code : 1,
-      json: JSON.parse(failure.stdout ?? "{}"),
+      json: parseJsonOutput(failure.stdout),
       stdout: failure.stdout ?? "",
       stderr: failure.stderr ?? ""
     };
@@ -326,6 +333,52 @@ test("coortex deslop helper runs verification gates and records artifacts", asyn
   assert.match(passLog, /\$ python -c/);
   assert.match(passLog, /\[stdout\][\s\S]*ok/);
   assert.match(failLog, /\[stderr\]/);
+});
+
+test("coortex deslop helper supports expected exit codes for search-style gates", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-deslop-"));
+  const artifactDir = join(tempDir, "artifacts");
+
+  const result = await runPythonJson(aiSlopCleanerStateScript, [
+    "run-gates",
+    "--project-root",
+    tempDir,
+    "--artifact-dir",
+    artifactDir,
+    "--gate",
+    `absence-check[expect=1]::python -c "import sys; sys.exit(1)"`,
+    "--gate",
+    `zero-or-two[expect=0,2]::python -c "import sys; sys.exit(2)"`
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  const json = result.json as {
+    all_passed: boolean;
+    gates: Array<{ label: string; ok: boolean; expected_exit_codes: number[]; exit_code: number }>;
+  };
+  assert.equal(json.all_passed, true);
+  assert.deepEqual(json.gates[0]?.expected_exit_codes, [1]);
+  assert.equal(json.gates[0]?.exit_code, 1);
+  assert.equal(json.gates[0]?.ok, true);
+  assert.deepEqual(json.gates[1]?.expected_exit_codes, [0, 2]);
+  assert.equal(json.gates[1]?.exit_code, 2);
+  assert.equal(json.gates[1]?.ok, true);
+});
+
+test("coortex deslop helper rejects malformed expect specs", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-deslop-"));
+
+  const result = await runPythonJson(aiSlopCleanerStateScript, [
+    "run-gates",
+    "--project-root",
+    tempDir,
+    "--gate",
+    `bad[expect=oops]::python -c "print('x')"`
+  ]);
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /Invalid expect code/);
 });
 
 test("return review helper marks scope-excluded non-started families as dormant and excludes them from the refreshed handoff by default", async () => {

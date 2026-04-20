@@ -53,6 +53,9 @@ Use the bundled helper for the mechanical parts that benefit from consistency:
   changed-files artifact into a bounded repo-relative scope
 - `scripts/deslop_state.py run-gates` to execute pre/post cleanup verification
   commands and capture their pass/fail status deterministically
+- gate specs accept `label::command` by default and treat exit code `0` as
+  success; use `label[expect=1]::command` or `label[expect=0,2]::command` when
+  a search-style or multi-exit check has a different acceptable exit set
 
 Keep the model focused on cleanup judgment. Let the helper handle scope intake
 and gate execution.
@@ -91,7 +94,8 @@ python scripts/deslop_state.py run-gates \
   --project-root . \
   --artifact-dir .coortex/deslop/gates-pre \
   --gate "typecheck::npm run build" \
-  --gate "targeted-tests::node --test dist/__tests__/cli.test.js"
+  --gate "targeted-tests::node --test dist/__tests__/cli.test.js" \
+  --gate "dead-symbol-absent[expect=1]::rg -n 'dead_symbol' src tests"
 ```
 
 If behavior is currently untested, add or run the narrowest regression coverage
@@ -134,7 +138,8 @@ python scripts/deslop_state.py run-gates \
   --project-root . \
   --artifact-dir .coortex/deslop/gates-post \
   --gate "typecheck::npm run build" \
-  --gate "targeted-tests::node --test dist/__tests__/cli.test.js"
+  --gate "targeted-tests::node --test dist/__tests__/cli.test.js" \
+  --gate "dead-symbol-absent[expect=1]::rg -n 'dead_symbol' src tests"
 ```
 
 Quality gates:

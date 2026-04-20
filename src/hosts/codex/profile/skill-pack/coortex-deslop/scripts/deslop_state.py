@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
+
+
+GATE_SPEC_PATTERN = re.compile(r"^(?P<label>[^\[\]]+?)(?:\[expect=(?P<expect>[^\]]+)\])?$")
 
 
 def read_scope_file(path: Path) -> list[str]:
@@ -70,6 +74,41 @@ def sanitize_label(label: str, index: int) -> str:
     return safe
 
 
+def parse_gate_spec(raw: str) -> tuple[str, set[int], str]:
+    if "::" not in raw:
+        raise SystemExit(f"Invalid gate spec (expected label::command): {raw}")
+    raw_label, command = raw.split("::", 1)
+    command = command.strip()
+    if not command:
+        raise SystemExit(f"Invalid gate spec (missing command): {raw}")
+
+    match = GATE_SPEC_PATTERN.fullmatch(raw_label.strip())
+    if match is None:
+        raise SystemExit(f"Invalid gate label spec: {raw_label}")
+
+    label = match.group("label").strip()
+    if not label:
+        raise SystemExit(f"Invalid gate spec (missing label): {raw}")
+
+    expected_text = match.group("expect")
+    if expected_text is None:
+        expected_codes = {0}
+    else:
+        expected_codes = set()
+        for item in expected_text.split(","):
+            trimmed = item.strip()
+            if not trimmed:
+                raise SystemExit(f"Invalid expect list in gate spec: {raw}")
+            try:
+                expected_codes.add(int(trimmed))
+            except ValueError as exc:
+                raise SystemExit(f"Invalid expect code {trimmed!r} in gate spec: {raw}") from exc
+        if not expected_codes:
+            raise SystemExit(f"Invalid expect list in gate spec: {raw}")
+
+    return label, expected_codes, command
+
+
 def run_gates(args: argparse.Namespace) -> int:
     project_root = Path(args.project_root).resolve()
     artifact_dir = resolve_input_path(args.artifact_dir, project_root) if args.artifact_dir else None
@@ -81,9 +120,7 @@ def run_gates(args: argparse.Namespace) -> int:
     results: list[dict[str, Any]] = []
     all_passed = True
     for index, gate in enumerate(args.gate, start=1):
-        if "::" not in gate:
-            raise SystemExit(f"Invalid gate spec (expected label::command): {gate}")
-        label, command = gate.split("::", 1)
+        label, expected_codes, command = parse_gate_spec(gate)
         completed = subprocess.run(
             command,
             cwd=project_root,
@@ -100,11 +137,12 @@ def run_gates(args: argparse.Namespace) -> int:
                 encoding="utf-8",
             )
             log_path = str(log_file)
-        ok = completed.returncode == 0
+        ok = completed.returncode in expected_codes
         all_passed = all_passed and ok
         results.append({
             "label": label,
             "command": command,
+            "expected_exit_codes": sorted(expected_codes),
             "exit_code": completed.returncode,
             "ok": ok,
             "log_path": log_path,
