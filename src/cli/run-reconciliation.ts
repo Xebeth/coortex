@@ -1,7 +1,16 @@
 import type { HostAdapter } from "../adapters/contract.js";
+import {
+  buildCompletedRunRecord,
+  buildCompletedHostExecutionOutcomeFromDecisionCapture,
+  buildCompletedHostExecutionOutcomeFromResultCapture
+} from "../adapters/host-run-records.js";
 import { getNativeRunId, getRunInstanceId, isRunLeaseExpired } from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { HostRunRecord, RuntimeProjection } from "../core/types.js";
+import {
+  findLatestAssignmentDecision,
+  findLatestTerminalAssignmentResult
+} from "../projections/assignment-outcome-queries.js";
 import { fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import {
   ProjectionRecoveryService,
@@ -11,7 +20,6 @@ import { RuntimeStore } from "../persistence/store.js";
 import { buildStaleRunReconciliation, createActiveRunDiagnostic } from "../recovery/host-runs.js";
 import {
   buildCompletedRunReconciliation,
-  buildCompletedRunRecordFromRuntimeOutcome,
   hydrateCompletedDecisionFromReplayableEvents
 } from "../recovery/completed-runs.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
@@ -639,6 +647,10 @@ async function reconcileInProjectionStaleRun(
       staleRecoveryState
     )
   ) {
+    const cleanupSource = options?.alreadyReconciledCleanupRecord ?? record;
+    const cleanupNeeded =
+      cleanupSource.state === "running" ||
+      await context.adapter.hasRunLease(context.store, assignmentId);
     const syncedProjection = await context.projectionRecovery.syncProjectionSnapshot({
       snapshotFallback: recoveryOptions.snapshotFallback
     });
@@ -648,6 +660,19 @@ async function reconcileInProjectionStaleRun(
       diagnostics,
       options?.alreadyReconciledCleanupRecord ?? reconciliation.staleRecord
     );
+    if (cleanupNeeded && shouldEmitAlreadyReconciledStaleRunSuccess(
+      recoveryOptions,
+      cleanupSource
+    )) {
+      await emitStaleRunReconciled(
+        context,
+        projection.sessionId,
+        assignmentId,
+        reconciliation.diagnostic,
+        reconciliation.telemetryMetadata,
+        diagnostics
+      );
+    }
     return syncedProjection.projection;
   }
 
@@ -679,17 +704,14 @@ async function reconcileInProjectionStaleRun(
     return nextProjection;
   }
 
-  diagnostics.push(reconciliation.diagnostic);
-  const telemetry = await recordNormalizedTelemetry(
-    context.store,
-    context.adapter.normalizeTelemetry({
-      eventType: "host.run.stale_reconciled",
-      taskId: projection.sessionId,
-      assignmentId,
-      metadata: reconciliation.telemetryMetadata
-    })
+  await emitStaleRunReconciled(
+    context,
+    projection.sessionId,
+    assignmentId,
+    reconciliation.diagnostic,
+    reconciliation.telemetryMetadata,
+    diagnostics
   );
-  diagnostics.push(...warningDiagnostics(telemetry.warning, "telemetry-write-failed"));
   return nextProjection;
 }
 
@@ -764,27 +786,22 @@ async function reconcileOutOfProjectionStaleRun(
   diagnostics: RunReconciliationDiagnostic[]
 ): Promise<void> {
   const reconciliation = buildStaleRunReconciliation(projection, assignmentId, record);
-  diagnostics.push({
-    level: "warning",
-    code: "stale-run-reconciled",
-    message: `Cleared stale host run artifacts for assignment ${assignmentId} after snapshot fallback could not safely hydrate the assignment into runtime state.`
-  });
-
-  const telemetry = await recordNormalizedTelemetry(
-    context.store,
-    context.adapter.normalizeTelemetry({
-      eventType: "host.run.stale_reconciled",
-      taskId: projection.sessionId,
-      assignmentId,
-      metadata: reconciliation.telemetryMetadata
-    })
-  );
-  diagnostics.push(...warningDiagnostics(telemetry.warning, "telemetry-write-failed"));
-
   const cleanupError = await reconcileStaleRunWithLeaseVerification(
     context.store,
     context.adapter,
     reconciliation.staleRecord
+  );
+  await emitStaleRunReconciled(
+    context,
+    projection.sessionId,
+    assignmentId,
+    {
+      level: "warning",
+      code: "stale-run-reconciled",
+      message: `Cleared stale host run artifacts for assignment ${assignmentId} after snapshot fallback could not safely hydrate the assignment into runtime state.`
+    },
+    reconciliation.telemetryMetadata,
+    diagnostics
   );
   if (cleanupError) {
     diagnostics.push(
@@ -794,6 +811,27 @@ async function reconcileOutOfProjectionStaleRun(
       )
     );
   }
+}
+
+async function emitStaleRunReconciled(
+  context: RunReconciliationContext,
+  sessionId: string,
+  assignmentId: string,
+  diagnostic: RunReconciliationDiagnostic,
+  metadata: ReturnType<typeof buildStaleRunReconciliation>["telemetryMetadata"],
+  diagnostics: RunReconciliationDiagnostic[]
+): Promise<void> {
+  diagnostics.push(diagnostic);
+  const telemetry = await recordNormalizedTelemetry(
+    context.store,
+    context.adapter.normalizeTelemetry({
+      eventType: "host.run.stale_reconciled",
+      taskId: sessionId,
+      assignmentId,
+      metadata
+    })
+  );
+  diagnostics.push(...warningDiagnostics(telemetry.warning, "telemetry-write-failed"));
 }
 
 function selectPendingStaleRecoveryEvents(
@@ -813,6 +851,39 @@ function selectPendingStaleRecoveryEvents(
   return pendingEvents;
 }
 
+function buildCompletedRunRecordFromRuntimeOutcome(
+  projection: RuntimeProjection,
+  record: HostRunRecord
+): HostRunRecord | undefined {
+  const assignmentId = record.assignmentId;
+  const startedAt = record.startedAt;
+  const decision = findLatestAssignmentDecision(projection, assignmentId, {
+    createdAtOnOrAfter: startedAt
+  });
+  const result = findLatestTerminalAssignmentResult(projection, assignmentId, {
+    createdAtOnOrAfter: startedAt
+  });
+
+  if (!decision && !result) {
+    return undefined;
+  }
+
+  if (result && (!decision || result.createdAt >= decision.createdAt)) {
+    const execution = buildCompletedHostExecutionOutcomeFromResultCapture(result);
+    return buildCompletedRunRecord(execution, assignmentId, startedAt, result.createdAt);
+  }
+
+  const execution = buildCompletedHostExecutionOutcomeFromDecisionCapture(decision!);
+  return buildCompletedRunRecord(execution, assignmentId, startedAt, decision!.createdAt);
+}
+
+function shouldEmitAlreadyReconciledStaleRunSuccess(
+  recoveryOptions: RecoveryProjectionOptions,
+  cleanupSource: HostRunRecord
+): boolean {
+  return !recoveryOptions.snapshotFallback && isStaleRunCleanupRecord(cleanupSource);
+}
+
 function isStaleRunAlreadyReconciled(
   projection: RuntimeProjection,
   assignmentId: string,
@@ -830,6 +901,15 @@ function isStaleRunAlreadyReconciled(
 function isDegradedRunRecord(record: HostRunRecord): boolean {
   return (record.state === "completed" && Boolean(record.staleReasonCode) && !record.terminalOutcome) ||
     isRunLeaseExpired(record);
+}
+
+function isStaleRunCleanupRecord(record: HostRunRecord): boolean {
+  return (
+    (record.state === "running" &&
+      record.staleReasonCode !== "malformed_lease_artifact" &&
+      isRunLeaseExpired(record)) ||
+    (record.state === "completed" && Boolean(record.staleReasonCode) && !record.terminalOutcome)
+  );
 }
 
 function isStaleRunReconciliationCandidate(record: HostRunRecord): boolean {

@@ -3647,19 +3647,25 @@ test("milestone-2 integration: stale reconciliation retries artifact cleanup aft
   );
   const snapshotAfterFirst = await setup.store.loadSnapshot();
   const inspectedAfterFirst = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const telemetryAfterFirst = await setup.store.loadTelemetry();
   const secondStatusProjection = await loadOperatorProjection(setup.store);
   const secondResume = await resumeRuntime(setup.store, setup.adapter);
   const inspectedAfterSecond = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
   const telemetry = await setup.store.loadTelemetry();
+  const staleTelemetryCountAfterFirst = telemetryAfterFirst.filter(
+    (event) => event.eventType === "host.run.stale_reconciled"
+  ).length;
   const staleTelemetryCount = telemetry.filter(
     (event) => event.eventType === "host.run.stale_reconciled"
   ).length;
 
-  assert.equal(snapshotAfterFirst?.assignments[0]?.state, "in_progress");
+  assert.equal(snapshotAfterFirst?.assignments[0]?.state, "queued");
   assert.equal(inspectedAfterFirst?.state, "completed");
   assert.equal(inspectedAfterFirst?.staleReasonCode, "expired_lease");
-  assert.equal(secondStatusProjection.assignments.get(setup.assignmentId)?.state, "in_progress");
+  assert.equal(staleTelemetryCountAfterFirst, 0);
+  assert.equal(secondStatusProjection.assignments.get(setup.assignmentId)?.state, "queued");
   assert.ok(secondResume.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(!secondResume.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
   assert.equal(inspectedAfterSecond?.state, "completed");
   await assert.rejects(
     readFile(
@@ -3670,6 +3676,55 @@ test("milestone-2 integration: stale reconciliation retries artifact cleanup aft
   );
   assert.equal(reconcileAttempts, 2);
   assert.equal(staleTelemetryCount, 1);
+});
+
+test("milestone-2 integration: stale reconciliation still reports success after a non-terminal cleanup warning", async () => {
+  const setup = await createSmokeSetup(async () => {
+    throw new Error("runner not used in stale reconciliation warning smoke test");
+  });
+
+  const staleRecord: HostRunRecord = {
+    assignmentId: setup.assignmentId,
+    state: "running",
+    adapterData: { nativeRunId: "smoke-thread-stale-warning-artifacts" },
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    heartbeatAt: new Date(Date.now() - 60_000).toISOString(),
+    leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
+  };
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, staleRecord);
+  await setup.store.writeJsonArtifact("adapters/codex/last-run.json", staleRecord);
+  await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, staleRecord);
+
+  const originalReconcile = setup.adapter.reconcileStaleRun.bind(setup.adapter);
+  let reconcileAttempts = 0;
+  setup.adapter.reconcileStaleRun = async (store, record) => {
+    reconcileAttempts += 1;
+    await originalReconcile(store, record);
+    throw new Error("simulated stale cleanup warning after lease release");
+  };
+
+  const resumed = await resumeRuntime(setup.store, setup.adapter);
+  const snapshot = await setup.store.loadSnapshot();
+  const inspected = await inspectRuntimeRun(setup.store, setup.adapter, setup.assignmentId);
+  const telemetry = await setup.store.loadTelemetry();
+  const staleTelemetryCount = telemetry.filter(
+    (event) => event.eventType === "host.run.stale_reconciled"
+  ).length;
+
+  assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+  assert.equal(snapshot?.assignments[0]?.state, "queued");
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.staleReasonCode, "expired_lease");
+  assert.equal(reconcileAttempts, 1);
+  assert.equal(staleTelemetryCount, 1);
+  await assert.rejects(
+    readFile(
+      join(setup.projectRoot, ".coortex", "adapters", "codex", "runs", `${setup.assignmentId}.lease.json`),
+      "utf8"
+    ),
+    /ENOENT/
+  );
 });
 
 test("milestone-2 integration: stale retries move back to in-progress before the replacement host run", async () => {

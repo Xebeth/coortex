@@ -1264,6 +1264,105 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
       }
     },
     {
+      name: "snapshot-fallback hidden stale cleanup emits success only after confirmed cleanup",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        await ctx.store.syncSnapshotFromEvents();
+        const hiddenAssignmentId = await appendAssignmentBeyondSnapshotBoundary(ctx);
+        await ctx.adapter.runStore.write(runningRecord(hiddenAssignmentId, "2000-01-01T00:00:00.000Z"));
+        await corruptSnapshotBoundary(ctx.store);
+
+        const originalReconcileStaleRun = ctx.adapter.reconcileStaleRun.bind(ctx.adapter);
+        let reconcileAttempts = 0;
+        ctx.adapter.reconcileStaleRun = async (store, record) => {
+          reconcileAttempts += 1;
+          if (reconcileAttempts === 1) {
+            throw new Error("simulated hidden stale cleanup failure");
+          }
+          await originalReconcileStaleRun(store, record);
+        };
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        await assert.rejects(
+          reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+            snapshotFallback: loaded.snapshotFallback
+          }),
+          /Host run reconciliation failed to clear the active lease for assignment/
+        );
+        assert.equal(
+          (await ctx.store.loadTelemetry()).filter((event) => event.eventType === "host.run.stale_reconciled").length,
+          0
+        );
+
+        const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
+          snapshotFallback: retried.snapshotFallback
+        });
+        const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
+
+        assert.equal(recovered.projection.assignments.has(hiddenAssignmentId), false);
+        assert.ok(recovered.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.ok(!recovered.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.staleReasonCode, "expired_lease");
+        assert.equal(reconcileAttempts, 2);
+        assert.equal(
+          (await ctx.store.loadTelemetry()).filter((event) => event.eventType === "host.run.stale_reconciled").length,
+          1
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
+      name: "snapshot-fallback hidden stale cleanup still reports success after a non-terminal warning",
+      run: async () => {
+        const adapter = new BriefingMatrixAdapter();
+        const ctx = await createMatrixContext(adapter);
+        await ctx.store.syncSnapshotFromEvents();
+        const hiddenAssignmentId = await appendAssignmentBeyondSnapshotBoundary(ctx);
+        await ctx.adapter.runStore.write(runningRecord(hiddenAssignmentId, "2000-01-01T00:00:00.000Z"));
+        await corruptSnapshotBoundary(ctx.store);
+
+        const originalReconcileStaleRun = ctx.adapter.reconcileStaleRun.bind(ctx.adapter);
+        let reconcileAttempts = 0;
+        ctx.adapter.reconcileStaleRun = async (store, record) => {
+          reconcileAttempts += 1;
+          await originalReconcileStaleRun(store, record);
+          throw new Error("simulated hidden stale cleanup warning after lease release");
+        };
+
+        const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+        assert.equal(loaded.snapshotFallback, true);
+
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
+          snapshotFallback: loaded.snapshotFallback
+        });
+        const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
+
+        assert.equal(result.projection.assignments.has(hiddenAssignmentId), false);
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+        assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "host-run-persist-failed"));
+        assert.ok(!result.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"));
+        assert.equal(inspected?.state, "completed");
+        assert.equal(inspected?.staleReasonCode, "expired_lease");
+        assert.equal(reconcileAttempts, 1);
+        assert.equal(
+          (await ctx.store.loadTelemetry()).filter((event) => event.eventType === "host.run.stale_reconciled").length,
+          1
+        );
+        assert.equal(
+          await ctx.store.readTextArtifact(`adapters/matrix/runs/${hiddenAssignmentId}.lease.json`, "matrix lease"),
+          undefined
+        );
+      }
+    },
+    {
       name: "snapshot-fallback stale repair preserves snapshot-owned assignments and status",
       run: async () => {
         const adapter = new BriefingMatrixAdapter();

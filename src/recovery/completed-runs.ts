@@ -1,18 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import {
-  buildCompletedRunRecord,
-  buildCompletedHostExecutionOutcomeFromDecisionCapture,
-  buildCompletedHostExecutionOutcomeFromResultCapture,
-  matchesCompletedRunDecision,
-  matchesCompletedRunResult
-} from "../adapters/host-run-records.js";
+import { matchesCompletedRunDecision, matchesCompletedRunResult } from "../core/outcome-identity.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { DecisionPacket, HostRunRecord, RuntimeProjection } from "../core/types.js";
-import {
-  findLatestAssignmentDecision,
-  findLatestTerminalAssignmentResult
-} from "../projections/assignment-outcome-queries.js";
 import { applyRuntimeEventsToProjection } from "../projections/runtime-projection.js";
 import { isRuntimeAuthorityIntegrityError } from "../projections/attachment-claim-queries.js";
 import { nowIso } from "../utils/time.js";
@@ -22,32 +12,6 @@ export interface CompletedRunRecoveryDiagnostic {
   level: "warning";
   code: "completed-run-reconciled";
   message: string;
-}
-
-export function buildCompletedRunRecordFromRuntimeOutcome(
-  projection: RuntimeProjection,
-  record: HostRunRecord
-): HostRunRecord | undefined {
-  const assignmentId = record.assignmentId;
-  const startedAt = record.startedAt;
-  const decision = findLatestAssignmentDecision(projection, assignmentId, {
-    createdAtOnOrAfter: startedAt
-  });
-  const result = findLatestTerminalAssignmentResult(projection, assignmentId, {
-    createdAtOnOrAfter: startedAt
-  });
-
-  if (!decision && !result) {
-    return undefined;
-  }
-
-  if (result && (!decision || result.createdAt >= decision.createdAt)) {
-    const execution = buildCompletedHostExecutionOutcomeFromResultCapture(result);
-    return buildCompletedRunRecord(execution, assignmentId, startedAt, result.createdAt);
-  }
-
-  const execution = buildCompletedHostExecutionOutcomeFromDecisionCapture(decision!);
-  return buildCompletedRunRecord(execution, assignmentId, startedAt, decision!.createdAt);
 }
 
 export function buildCompletedRunReconciliation(
