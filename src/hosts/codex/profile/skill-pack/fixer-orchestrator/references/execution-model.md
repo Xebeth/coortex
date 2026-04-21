@@ -37,6 +37,8 @@ Rules:
 - invoke `$coortex-fixer-lane` explicitly inside the lane prompt
 - keep the worker prompt family-local or slice-local
 - do not substitute `explorer` as the final repair worker
+- once a worker lane is running, wait for its terminal result instead of
+  interrupting or steering it by reflex
 
 ## Parallelization
 
@@ -111,6 +113,8 @@ The fixer coordinator then:
 - supplies the original `review_handoff`, the worker's
   `review_return_handoff`, and the actual diff
 - waits for the reviewer result before deciding the next step
+- does not interrupt, steer, close, or kill a live worker/reviewer lane merely
+  because it has been quiet for several minutes
 
 If return review keeps the family actionable:
 - build a lane-local continuation packet with
@@ -127,13 +131,33 @@ If return review keeps the family actionable:
   default
 
 If return review approves closure:
-- the fixer coordinator may run one final bounded coordinator-side
-  `$coortex-deslop` pass if maintainability cleanup is still needed
-- rerun verification as needed
+- the fixer coordinator must run a coordinator-side pre-commit gate on the
+  final approved diff:
+  - bounded `$coortex-review`
+  - bounded `$coortex-deslop` in advisory/read-only mode
+- if either pre-commit gate finds more work, send it back to the same
+  implementer lane and resume targeted return review; the coordinator does not
+  patch code, tests, or docs locally
 - append a `family_commit` trace record with per-family
   `return_review_rounds_taken_by_family` counts so the trace shows how many
   return-review send-back rounds it took each family to close
-- commit and close the family lane
+- make one atomic commit for that approved lane/slice and close the family lane
+- use a human semantic commit subject grounded in the approved family title,
+  root cause, or owning seam; do not use generated lane ids, slice ids, wave
+  ids, or worker-session identifiers in commit subjects
+
+## Waiting discipline
+
+After the coordinator spawns a worker lane or a targeted return-review lane:
+- treat silence as normal unless there is concrete blocker evidence
+- prefer patient waiting/polling over corrective mid-flight input
+- do not interrupt, steer, or kill a live lane just because a fixed timeout
+  elapsed
+- only interrupt or replace a lane when the user explicitly asks, a
+  deterministic validation/blocker failure appears, or the lane is clearly
+  stuck outside its contract and cannot make forward progress
+- if a coordinator-side review/deslop gate or targeted return review finds more
+  work, route it back to the same implementer lane instead of editing locally
 
 ## Closure authority
 

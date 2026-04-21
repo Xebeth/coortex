@@ -2125,6 +2125,7 @@ test("fixer trace helper validates per-family return-review round counts", async
       review_target: { mode: "return-review", scope_summary: "test" },
       family_ids: ["F-001", "F-002"],
       commit_sha: "abc1234",
+      commit_subject: "fix: align stale cleanup truth",
       return_review_rounds_taken_by_family: {
         "F-001": 2,
         "F-002": 0
@@ -2154,6 +2155,7 @@ test("fixer trace helper validates per-family return-review round counts", async
       review_target: { mode: "return-review", scope_summary: "test" },
       family_ids: ["F-001", "F-002"],
       commit_sha: "def5678",
+      commit_subject: "fix: lane L-001 cleanup",
       return_review_rounds_taken_by_family: {
         "F-001": 1
       }
@@ -2171,6 +2173,11 @@ test("fixer trace helper validates per-family return-review round counts", async
   assert.ok(
     invalidJson.errors.some((error) =>
       error.includes("return_review_rounds_taken_by_family keys must match family_ids exactly")
+    )
+  );
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("commit_subject must not include generated lane/slice/wave ids")
     )
   );
 });

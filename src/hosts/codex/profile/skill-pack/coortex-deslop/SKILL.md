@@ -33,10 +33,11 @@ Do not use this skill when:
 
 ## Discovery/advisory mode
 
-`seam-walkback-review` and packet-driven `review-orchestrator` may also use this
-skill as a **read-only advisory lens** during grouped discovery.
+`seam-walkback-review`, packet-driven `review-orchestrator`, and the
+coordinator-side pre-commit gate in `fixer-orchestrator` may also use this
+skill as a **read-only advisory lens**.
 
-In that discovery mode:
+In that read-only mode:
 
 - do **not** modify files
 - do **not** run cleanup passes
@@ -50,6 +51,9 @@ In that discovery mode:
   - cleanup debt
 - treat those signals as advisory until the combined coordinator synthesis
   grounds them alongside the primary review lens
+- when `fixer-orchestrator` uses this advisory mode in its coordinator-side
+  pre-commit gate, hand any actionable cleanup back to the same implementer
+  lane; do not patch the repo from the coordinator
 
 The mutating cleanup workflow below applies only to post-fix cleanup slices.
 

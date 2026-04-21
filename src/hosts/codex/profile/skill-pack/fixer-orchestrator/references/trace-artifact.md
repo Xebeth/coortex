@@ -134,9 +134,18 @@ Include:
 Include:
 - `family_ids`
 - `commit_sha`
+- `commit_subject`
 - `return_review_rounds_taken_by_family`
   - mapping from `family_id` to the number of targeted return-review send-back
     rounds it took for that family to close
+
+Rules:
+- `commit_subject` should match the actual atomic commit subject used for that
+  approved lane/slice
+- `commit_subject` must be a human semantic summary, not a generated internal
+  id
+- do not include generated `lane_id`, `slice_id`, or `wave_id` tokens in
+  `commit_subject`
 
 ## Family-closeout record
 

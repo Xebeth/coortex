@@ -176,6 +176,73 @@ test("fixer orchestrator explicitly requires same-worker continuation semantics"
   }
 });
 
+test("fixer orchestrator explicitly requires atomic semantic commits and patient waiting", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/trace-artifact.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /atomic commit|one atomic commit|do not batch several approved lanes|commit subject/i,
+      path
+    );
+    assert.match(
+      content,
+      /do not .*lane ids?|do not .*slice ids?|do not .*wave ids?|do not include generated .*lane_id|must not include .*lane ids?|must not include generated lane\/slice\/wave ids|must not include generated .*lane_id/i,
+      path
+    );
+  }
+
+  const waitingFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of waitingFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /wait patiently|do not steer|do not interrupt|do not .*kill|quiet/i,
+      path
+    );
+    assert.match(
+      content,
+      /\$coortex-review[\s\S]*\$coortex-deslop|\$coortex-deslop[\s\S]*\$coortex-review/i,
+      path
+    );
+  }
+});
+
+test("fixer coordinator stays read-only and hands findings back to the same lane", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /read-only|must not patch code, tests, or docs locally|must not edit code, tests, or docs itself/i,
+      path
+    );
+    assert.match(
+      content,
+      /same implementer\s+lane|same original implementer\s+lane|hand[\s\S]*back to the same implementer\s+lane/i,
+      path
+    );
+  }
+});
+
 async function walk(
   dir: string,
   visitFile: (path: string) => Promise<void>

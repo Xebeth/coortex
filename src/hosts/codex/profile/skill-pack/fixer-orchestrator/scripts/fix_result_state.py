@@ -86,6 +86,7 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     "family_commit": {
         "family_ids": "list",
         "commit_sha": "string",
+        "commit_subject": "string",
         "return_review_rounds_taken_by_family": "mapping",
     },
     "final_fix": {
@@ -145,6 +146,12 @@ FIXER_ORIENTED_ACTION_PATTERNS = (
     "rename ",
     "take the next fix slice",
     "land ",
+)
+
+GENERATED_COMMIT_ID_PATTERNS = (
+    re.compile(r"\bL-\d+\b"),
+    re.compile(r"\bS-\d+\b"),
+    re.compile(r"\bW-\d+\b"),
 )
 
 
@@ -576,7 +583,15 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
 
     if phase == "family_commit":
         family_ids = normalize_string_list(record.get("family_ids"))
+        commit_subject = record.get("commit_subject")
         rounds_taken = record.get("return_review_rounds_taken_by_family")
+        if isinstance(commit_subject, str):
+            for pattern in GENERATED_COMMIT_ID_PATTERNS:
+                if pattern.search(commit_subject):
+                    errors.append(
+                        f"{prefix} phase 'family_commit' commit_subject must not include generated lane/slice/wave ids"
+                    )
+                    break
         if isinstance(rounds_taken, dict):
             mapping_keys = sorted(str(key) for key in rounds_taken.keys())
             if sorted(family_ids) != mapping_keys:

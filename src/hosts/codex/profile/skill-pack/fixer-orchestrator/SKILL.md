@@ -78,18 +78,24 @@ workflow runs so the user can tell which family or phase is active.
 10. The fixer coordinator must send every lane result through
     `$review-orchestrator` targeted return review using the original
     `review_handoff`, the lane's `review_return_handoff`, and the actual diff.
-11. If targeted return review approves the family closure, the fixer
-    coordinator may run one final bounded coordinator-side `$coortex-deslop`
-    pass if needed, rerun verification, commit, and close that family lane.
-12. If targeted return review keeps the family actionable, build a lane-local
+11. If targeted return review approves the family closure, run an explicit
+    coordinator-side **read-only** pre-commit gate over the final approved
+    diff:
+    - bounded `$coortex-review`
+    - bounded `$coortex-deslop` in advisory/read-only mode
+    - rerun verification only if the same implementer lane had to make follow-up
+      changes after the gate handed back new work
+12. If that pre-commit gate stays clear, make one atomic commit for the
+    approved lane/slice, then close that family lane.
+13. If targeted return review keeps the family actionable, build a lane-local
     continuation packet and send it back to the **same original implementer
     lane**. Resume the same worker thread for that lane. Do not close that
     worker, do not spawn a replacement worker for the same family, and do not
     hand the family to a new lane unless the workflow has a genuine blocker or
     explicit operator override.
-13. Before moving to a different family, emit a short family closeout
+14. Before moving to a different family, emit a short family closeout
     checkpoint.
-14. Append the final trace records on disk.
+15. Append the final trace records on disk.
 
 ## Hard Rules
 
@@ -135,6 +141,17 @@ workflow runs so the user can tell which family or phase is active.
   independent targeted return review approves closure.
 - Do not let the fixer coordinator self-certify closure. Independent review is
   provided by `$review-orchestrator` targeted return review.
+- The coordinator-side pre-commit gate must call bounded `$coortex-review` and
+  bounded `$coortex-deslop` explicitly in **read-only** mode. That gate is
+  required before every commit and does not replace `$review-orchestrator` as
+  closure authority.
+- The fixer coordinator is read-only with respect to repo content. It must not
+  edit code, tests, or docs itself; only worker lanes may do that.
+- Make atomic commits only: one reviewer-approved lane/slice per commit. Do not
+  batch several approved lanes into one umbrella commit.
+- Commit subjects must be human semantic summaries grounded in the approved
+  family title, root cause, or owning seam. Do not use generated lane ids,
+  slice ids, wave ids, or worker session ids in commit subjects.
 - If targeted return review returns an actionable downstream handoff for a
   family lane, route it back to the same original implementer lane. Do not
   restart the family from a fresh worker by default.
@@ -145,6 +162,16 @@ workflow runs so the user can tell which family or phase is active.
   makes the lane terminal, or an explicit operator override supersedes the lane.
 - Do not silently replace a live lane with coordinator-local patching just
   because return review found more work.
+- After spawning a worker or reviewer lane, wait patiently for a terminal
+  result. Do not steer, interrupt, close, or kill a live lane merely because
+  it is quiet or because a fixed timeout elapsed.
+- Only interrupt or replace a live lane when the user explicitly asks, a
+  deterministic validation/blocker failure appears, or the lane is clearly
+  stuck outside its contract and cannot make forward progress.
+- If coordinator-side `$coortex-review`, coordinator-side `$coortex-deslop`, or
+  targeted return review finds more work, the coordinator must hand that work
+  back to the same implementer lane and resume the review loop. It must not
+  patch the repo locally to "finish the slice."
 - Always emit a `review_return_handoff`. Do not rely on fixer self-audit as the terminal acceptance step.
 - Use the bundled `scripts/fix_result_state.py` helper to validate the final `review_return_handoff` and deferred-family structure before finalizing. Serialize the relevant handoff blocks to JSON before invoking it.
 - Use the bundled `scripts/fix_result_state.py` helper for deterministic trace path/file handling as well as final handoff validation. Keep the model focused on repair judgments and evidence.
@@ -188,9 +215,19 @@ Use `references/intake-and-normalization.md`.
   validation, resume the same worker thread for that lane and preserve its
   lane-local context rather than spawning a fresh worker or restarting the
   family from scratch.
-- Coordinator-side `$coortex-deslop` is optional and only happens after return
-  review approval, before commit, when a final bounded cleanup pass is still
-  warranted.
+- After spawning a worker lane or targeted return-review lane, wait for the
+  lane to finish. Do not send mid-flight steering or kill the worker just
+  because the run has been quiet for several minutes.
+- Coordinator-side pre-commit gate is mandatory after return review approval
+  and before commit:
+  - run bounded `$coortex-review` on the final approved diff
+  - run bounded `$coortex-deslop` on that same bounded scope in advisory/read-
+    only mode
+  - if either gate finds more work, send it back to the same implementer lane
+    and resume the loop instead of patching locally
+  - if the gate stays clear, commit immediately for that approved lane/slice
+  - do not batch multiple already-approved lanes into one later umbrella
+    commit
 
 Use `references/execution-model.md`.
 
