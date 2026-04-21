@@ -134,6 +134,12 @@ rules:
   authority together, those runtime events must be durably appended as
   one batch. A persistence failure must not strand only half of the
   authority pair.
+- Shared host-run cleanup helpers and live running writes must refuse
+  to cross a newer live owner fence. If a durable `runInstanceId` proof
+  exists for the current live lease or running record, destructive
+  cleanup and running-state refreshes must present the same fence before
+  deleting or overwriting the artifacts, and lease mutation must still
+  confirm the same boundary at the write/cas step.
 - Runtime event batches must flow through the serialized append-only
   store boundary. Event-log repair may rewrite malformed logs, but it
   must use the same mutation boundary so concurrent runtime batches

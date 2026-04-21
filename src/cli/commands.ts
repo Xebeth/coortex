@@ -779,7 +779,7 @@ export async function runRuntime(
       authorityPersisted = true;
     } catch (error) {
       try {
-        await adapter.releaseRunLease(store, assignment.id);
+        await adapter.releaseRunLease(store, assignment.id, claimedRun);
       } catch (releaseError) {
         throw new Error(
           `Wrapped launch failed after claiming the host run lease and lease cleanup also failed. ${
@@ -877,7 +877,7 @@ export async function runRuntime(
       };
     } catch (error) {
       if (!executionStarted) {
-        await adapter.releaseRunLease(store, assignment.id);
+        await adapter.releaseRunLease(store, assignment.id, claimedRun);
         if (authorityPersisted) {
           projectionBefore = await AttachmentLifecycleService.releaseAttachmentClaim(
             store,

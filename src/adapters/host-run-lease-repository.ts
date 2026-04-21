@@ -154,10 +154,6 @@ export class HostRunLeaseRepository {
     );
   }
 
-  async writeLease(record: HostRunRecord): Promise<void> {
-    await this.store.writeJsonArtifact(this.artifacts.runLeasePath(record.assignmentId), record);
-  }
-
   async deleteLease(assignmentId: string): Promise<void> {
     await this.store.deleteArtifact(this.artifacts.runLeasePath(assignmentId));
   }

@@ -126,11 +126,15 @@ the ownership boundary for host execution.
 - Reclaim or adopt flows must mint or preserve one durable
   `runInstanceId` fence for the live owner.
 - Later heartbeat, completion, rollback, and destructive cleanup writes
-  must prove that same fence instead of deleting by path alone.
+  must prove that same fence instead of deleting by path alone, and
+  running lease writes must re-check that fence at the actual lease
+  mutation boundary instead of relying only on a prewrite read.
+- Adapter cleanup wrappers should carry the inspected or claimed fence
+  through to shared store cleanup so a newer reclaimed lease cannot be
+  cleared by stale assignment-scoped cleanup.
 - Degraded stale reconciliation may mint a fresh `runInstanceId` so the
   runtime can key stale-run idempotence durably.
 - That minted stale identity is not a substitute for a live adopted
   ownership fence; completed stale cleanup must not let it delete or
   overwrite a newer reclaimed lease, run record, or last-run pointer
   that belongs to a different live owner.
-

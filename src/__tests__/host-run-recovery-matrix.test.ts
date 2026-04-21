@@ -3959,14 +3959,22 @@ class MatrixAdapter implements HostAdapter {
     return this.runStore.hasLease(assignmentId);
   }
 
-  async clearRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
+  async clearRunLease(
+    store: RuntimeArtifactStore,
+    assignmentId: string,
+    proof?: HostRunRecord
+  ): Promise<void> {
     this.bindStore(store);
-    await this.runStore.clearLease(assignmentId);
+    await this.runStore.clearLease(assignmentId, proof);
   }
 
-  async releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
+  async releaseRunLease(
+    store: RuntimeArtifactStore,
+    assignmentId: string,
+    proof?: HostRunRecord
+  ): Promise<void> {
     this.bindStore(store);
-    await this.runStore.release(assignmentId);
+    await this.runStore.release(assignmentId, proof);
   }
 
   async reconcileStaleRun(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void> {

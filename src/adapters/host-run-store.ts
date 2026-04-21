@@ -119,14 +119,17 @@ export class HostRunStore {
     return adoptedRecord;
   }
 
-  async release(assignmentId: string): Promise<void> {
+  async release(assignmentId: string, proof?: HostRunRecord): Promise<void> {
     await this.cleanupLeaseArtifacts(assignmentId, {
+      ...(proof ? { proof } : {}),
       deleteRunRecord: true
     });
   }
 
-  async clearLease(assignmentId: string): Promise<void> {
-    await this.cleanupLeaseArtifacts(assignmentId);
+  async clearLease(assignmentId: string, proof?: HostRunRecord): Promise<void> {
+    await this.cleanupLeaseArtifacts(assignmentId, {
+      ...(proof ? { proof } : {})
+    });
   }
 
   async hasLease(assignmentId: string): Promise<boolean> {
@@ -136,14 +139,25 @@ export class HostRunStore {
   private async cleanupLeaseArtifacts(
     assignmentId: string,
     options?: {
+      proof?: HostRunRecord;
       deleteRunRecord?: boolean;
     }
   ): Promise<void> {
-    await this.repository.deleteLease(assignmentId);
-    if (options?.deleteRunRecord) {
-      await this.repository.deleteRunRecord(assignmentId);
+    const proofFence = getRunOwnerFence(options?.proof);
+    const leaseError = await this.tryDeleteLease(assignmentId, proofFence);
+    if (leaseError) {
+      throw leaseError;
     }
-    const lastRunCleanupError = await this.tryDeleteRunningLastRunPointerIfOwnedBy(assignmentId);
+    if (options?.deleteRunRecord) {
+      const recordError = await this.tryDeleteRunRecord(assignmentId, proofFence);
+      if (recordError) {
+        throw recordError;
+      }
+    }
+    const lastRunCleanupError = await this.tryDeleteRunningLastRunPointerIfOwnedBy(
+      assignmentId,
+      proofFence
+    );
     if (lastRunCleanupError) {
       throw lastRunCleanupError;
     }
@@ -171,7 +185,7 @@ export class HostRunStore {
         !hasMintedStaleRunInstanceId(record) &&
         !isHostRunOwnershipFenceError(error)
       ) {
-        const cleanupError = await this.tryDeleteLease(record.assignmentId);
+        const cleanupError = await this.tryDeleteLease(record.assignmentId, ownerFence);
         if (cleanupError) {
           const message = error instanceof Error ? error.message : String(error);
           throw new Error(
@@ -192,18 +206,35 @@ export class HostRunStore {
     return this.repository.inspectAll();
   }
 
-  private async cleanupClaimFailure(assignmentId: string): Promise<Error | undefined> {
+  private async cleanupClaimFailure(
+    assignmentId: string,
+    proof?: HostRunRecord
+  ): Promise<Error | undefined> {
     const cleanupErrors: string[] = [];
-    const leaseError = await this.tryDeleteLease(assignmentId);
+    try {
+      await this.ensureLiveOwnerFenceForCleanup(
+        assignmentId,
+        "claim rollback cleanup",
+        getRunOwnerFence(proof)
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return new Error(message);
+    }
+    const proofFence = getRunOwnerFence(proof);
+    const leaseError = await this.tryDeleteLease(assignmentId, proofFence);
     if (leaseError) {
       cleanupErrors.push(leaseError.message);
     }
-    const recordError = await this.tryDeleteRunRecord(assignmentId);
+    const recordError = await this.tryDeleteRunRecord(assignmentId, proofFence);
     if (recordError) {
       cleanupErrors.push(recordError.message);
     }
 
-    const lastRunError = await this.tryDeleteRunningLastRunPointerIfOwnedBy(assignmentId);
+    const lastRunError = await this.tryDeleteRunningLastRunPointerIfOwnedBy(
+      assignmentId,
+      proofFence
+    );
     if (lastRunError) {
       cleanupErrors.push(lastRunError.message);
     }
@@ -214,14 +245,51 @@ export class HostRunStore {
     return new Error(cleanupErrors.join(" "));
   }
 
-  private async tryDeleteLease(assignmentId: string): Promise<Error | undefined> {
+  private async tryDeleteLease(
+    assignmentId: string,
+    proofFence?: string
+  ): Promise<Error | undefined> {
+    const lease = await this.repository.readLease(assignmentId);
+    if (lease.state === "missing") {
+      return undefined;
+    }
+
+    const fenceError = await this.ensureCleanupMayTouchLiveArtifact(
+      assignmentId,
+      "run lease cleanup",
+      proofFence
+    );
+    if (fenceError) {
+      return fenceError;
+    }
+
+    if (lease.state === "valid" || lease.state === "malformed") {
+      return this.tryCleanupArtifact(async () => {
+        const deleted = await this.repository.deleteLeaseVersioned(assignmentId, lease.version);
+        if (!deleted.ok) {
+          throw new HostRunOwnershipFenceError(assignmentId, "run lease cleanup");
+        }
+      }, "run lease cleanup");
+    }
+
     return this.tryCleanupArtifact(
       () => this.repository.deleteLease(assignmentId),
       "run lease cleanup"
     );
   }
 
-  private async tryDeleteRunRecord(assignmentId: string): Promise<Error | undefined> {
+  private async tryDeleteRunRecord(
+    assignmentId: string,
+    proofFence?: string
+  ): Promise<Error | undefined> {
+    const fenceError = await this.ensureCleanupMayTouchLiveArtifact(
+      assignmentId,
+      "run record cleanup",
+      proofFence
+    );
+    if (fenceError) {
+      return fenceError;
+    }
     return this.tryCleanupArtifact(
       () => this.repository.deleteRunRecord(assignmentId),
       "run record cleanup"
@@ -233,6 +301,19 @@ export class HostRunStore {
       () => this.repository.deleteLastRunPointer(),
       "last-run pointer cleanup"
     );
+  }
+
+  private async ensureCleanupMayTouchLiveArtifact(
+    assignmentId: string,
+    operation: string,
+    proofFence?: string
+  ): Promise<Error | undefined> {
+    try {
+      await this.ensureLiveOwnerFenceForCleanup(assignmentId, operation, proofFence);
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
   }
 
   private async tryCleanupArtifact(
@@ -249,17 +330,22 @@ export class HostRunStore {
   }
 
   private async tryDeleteRunningLastRunPointerIfOwnedBy(
-    assignmentId: string
+    assignmentId: string,
+    proofFence?: string
   ): Promise<Error | undefined> {
-    if (!(await this.hasRunningLastRunPointer(assignmentId))) {
+    const lastRun = await this.repository.readLastRunPointer();
+    if (
+      lastRun.state !== "valid" ||
+      lastRun.record.assignmentId !== assignmentId ||
+      lastRun.record.state !== "running"
+    ) {
       return undefined;
     }
+    const liveFence = getRunOwnerFence(lastRun.record);
+    if (liveFence && liveFence !== proofFence) {
+      return new HostRunOwnershipFenceError(assignmentId, "last-run pointer cleanup");
+    }
     return this.tryDeleteLastRunPointer();
-  }
-
-  private async hasRunningLastRunPointer(assignmentId: string): Promise<boolean> {
-    const lastRun = await this.repository.readLastRunPointer();
-    return shouldDeleteRunningLastRunPointer(lastRun, assignmentId);
   }
 
   private async claimUnlocked(record: HostRunRecord): Promise<void> {
@@ -276,7 +362,7 @@ export class HostRunStore {
       await this.repository.writeRunRecord(record);
       await this.repository.writeLastRunPointer(record);
     } catch (error) {
-      const cleanupError = await this.cleanupClaimFailure(record.assignmentId);
+      const cleanupError = await this.cleanupClaimFailure(record.assignmentId, record);
       if (cleanupError) {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(
@@ -352,27 +438,50 @@ export class HostRunStore {
     const ownerFence = getRunOwnerFence(record);
     if (!ownerFence) {
       if (record.state === "running") {
-        await this.repository.writeLease(record);
+        const currentLiveFence = await this.getCurrentLiveOwnerFence(record.assignmentId);
+        if (currentLiveFence) {
+          throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
+        }
+        const currentLease = await this.repository.readLease(record.assignmentId);
+        if (currentLease.state === "valid" && getRunOwnerFence(currentLease.record)) {
+          throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
+        }
+        const written = await this.repository.swapLease(
+          record.assignmentId,
+          currentLease.version,
+          record
+        );
+        if (!written.ok) {
+          throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
+        }
         return;
       }
-      const currentLease = await this.repository.readLease(record.assignmentId);
-      if (currentLease.state === "valid") {
-        ensureTerminalWriteBoundary(
-          record.assignmentId,
-          "completed lease finalization",
-          record,
-          currentLease.record
-        );
-        await this.repository.deleteLease(record.assignmentId);
-      } else if (currentLease.state === "malformed") {
-        await this.repository.deleteLease(record.assignmentId);
+      const leaseError = await this.tryDeleteLease(record.assignmentId);
+      if (leaseError) {
+        throw leaseError;
       }
-    } else if (record.state === "running") {
+      return;
+    }
+
+    const currentLiveFence = await this.getCurrentLiveOwnerFence(record.assignmentId);
+    if (currentLiveFence && currentLiveFence !== ownerFence) {
+      throw new HostRunOwnershipFenceError(
+        record.assignmentId,
+        record.state === "running" ? "running lease refresh" : "completed lease finalization"
+      );
+    }
+
+    if (record.state === "running") {
       const currentLease = await this.repository.readLease(record.assignmentId);
       if (currentLease.state !== "valid") {
         throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
       }
-      ensureMatchingRunOwnerFence(record.assignmentId, "running lease refresh", ownerFence, currentLease.record);
+      ensureMatchingRunOwnerFence(
+        record.assignmentId,
+        "running lease refresh",
+        ownerFence,
+        currentLease.record
+      );
       const swapped = await this.repository.swapLease(record.assignmentId, currentLease.version, record);
       if (!swapped.ok) {
         throw new HostRunOwnershipFenceError(record.assignmentId, "running lease refresh");
@@ -380,34 +489,55 @@ export class HostRunStore {
       return;
     }
 
-    const currentLease = await this.repository.readLease(record.assignmentId);
-    if (currentLease.state === "valid") {
-      ensureMatchingRunOwnerFence(
-        record.assignmentId,
-        "completed lease finalization",
-        ownerFence!,
-        currentLease.record
-      );
-      const refreshed = await this.repository.swapLease(
-        record.assignmentId,
-        currentLease.version,
-        currentLease.record
-      );
-      if (!refreshed.ok) {
-        throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
-      }
-      const deleted = await this.repository.deleteLeaseVersioned(
-        record.assignmentId,
-        refreshed.version
-      );
-      if (!deleted.ok) {
-        throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
-      }
-    } else if (currentLease.state === "malformed") {
-      throw new HostRunOwnershipFenceError(record.assignmentId, "completed lease finalization");
+    const leaseError = await this.tryDeleteLease(record.assignmentId, ownerFence);
+    if (leaseError) {
+      throw leaseError;
     }
 
     await this.ensureCompletedMetadataBoundaries(record);
+  }
+
+  private async ensureLiveOwnerFenceForCleanup(
+    assignmentId: string,
+    operation: string,
+    proofFence?: string
+  ): Promise<void> {
+    const liveFence = await this.getCurrentLiveOwnerFence(assignmentId);
+    if (liveFence && liveFence !== proofFence) {
+      throw new HostRunOwnershipFenceError(assignmentId, operation);
+    }
+  }
+
+  private async getCurrentLiveOwnerFence(assignmentId: string): Promise<string | undefined> {
+    const lease = await this.repository.readLease(assignmentId);
+    if (lease.state === "valid" && lease.record.state === "running") {
+      const leaseFence = getRunOwnerFence(lease.record);
+      if (leaseFence) {
+        return leaseFence;
+      }
+    }
+
+    const runRecord = await this.repository.readRunRecord(assignmentId);
+    if (runRecord?.state === "running") {
+      const runFence = getRunOwnerFence(runRecord);
+      if (runFence) {
+        return runFence;
+      }
+    }
+
+    const lastRun = await this.repository.readLastRunPointer();
+    if (
+      lastRun.state === "valid" &&
+      lastRun.record.assignmentId === assignmentId &&
+      lastRun.record.state === "running"
+    ) {
+      const lastRunFence = getRunOwnerFence(lastRun.record);
+      if (lastRunFence) {
+        return lastRunFence;
+      }
+    }
+
+    return undefined;
   }
 
   private async ensureCompletedMetadataBoundaries(record: HostRunRecord): Promise<void> {
@@ -512,15 +642,4 @@ function ensureMatchingRunOwnerFence(
   if (actualFence && actualFence !== expectedFence) {
     throw new HostRunOwnershipFenceError(assignmentId, operation);
   }
-}
-
-function shouldDeleteRunningLastRunPointer(
-  pointer: Awaited<ReturnType<HostRunLeaseRepository["readLastRunPointer"]>>,
-  assignmentId: string
-): boolean {
-  return (
-    pointer.state === "valid" &&
-    pointer.record.assignmentId === assignmentId &&
-    pointer.record.state === "running"
-  );
 }

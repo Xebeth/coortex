@@ -12,7 +12,9 @@ import { RuntimeStore } from "../persistence/store.js";
 import type { RuntimeConfig } from "../config/types.js";
 import { createBootstrapRuntime } from "../core/runtime.js";
 import { getNativeRunId } from "../core/run-state.js";
+import type { HostRunRecord } from "../core/types.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
+import { cleanupHostRunArtifactsWithLeaseVerification } from "../cli/host-run-cleanup.js";
 import { nowIso } from "../utils/time.js";
 
 test("codex adapter normalizes host result, decision, and telemetry captures", () => {
@@ -2458,6 +2460,71 @@ test("codex adapter claimRunLease persists a readable running lease", async () =
   assert.equal(inspected?.state, "running");
   assert.equal(inspected?.startedAt, claimed.startedAt);
   assert.equal(inspected?.leaseExpiresAt, claimed.leaseExpiresAt);
+});
+
+test("codex adapter cleanup preserves a newer live fence when a stale completion is inspected", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-cleanup-fence-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const adapter = new CodexAdapter();
+  const assignmentId = "assignment-cleanup-fence";
+  const staleFence = "run-instance-stale-fence";
+  const liveFence = "run-instance-live-fence";
+  const staleCompleted: HostRunRecord = {
+    assignmentId,
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    runInstanceId: staleFence,
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "result",
+    resultStatus: "completed",
+    summary: "Stale completion should not clear a newer live lease.",
+    terminalOutcome: {
+      kind: "result",
+      result: {
+        producerId: "codex",
+        status: "completed",
+        summary: "Stale completion should not clear a newer live lease.",
+        changedFiles: [],
+        createdAt: "2026-04-11T10:01:00.000Z"
+      }
+    },
+    adapterData: {
+      nativeRunId: "thread-stale-fence"
+    }
+  };
+  const liveLease: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    runInstanceId: liveFence,
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-live-fence",
+      coortexReclaimLease: true
+    }
+  };
+
+  await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, staleCompleted);
+  await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.lease.json`, liveLease);
+
+  const inspected = await adapter.inspectRun(store, assignmentId);
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.runInstanceId, staleFence);
+
+  await assert.rejects(
+    cleanupHostRunArtifactsWithLeaseVerification(store, adapter, assignmentId, {
+      inspectedRecord: inspected
+    }),
+    /lost host run ownership/
+  );
+
+  const lease = await store.readJsonArtifact<HostRunRecord>(
+    `adapters/codex/runs/${assignmentId}.lease.json`,
+    "lease"
+  );
+  assert.equal(lease?.runInstanceId, liveFence);
+  assert.equal(lease?.adapterData?.coortexReclaimLease, true);
 });
 
 async function createMockRunningExec(

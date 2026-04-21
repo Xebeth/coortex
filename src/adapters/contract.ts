@@ -194,8 +194,16 @@ export interface HostAdapter {
     assignmentId: string
   ): Promise<HostRunRecord>;
   hasRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<boolean>;
-  clearRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void>;
-  releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void>;
+  clearRunLease(
+    store: RuntimeArtifactStore,
+    assignmentId: string,
+    proof?: HostRunRecord
+  ): Promise<void>;
+  releaseRunLease(
+    store: RuntimeArtifactStore,
+    assignmentId: string,
+    proof?: HostRunRecord
+  ): Promise<void>;
   reconcileStaleRun(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void>;
   cancelActiveRun?(signal?: "graceful" | "force"): Promise<void>;
   inspectRun(store: RuntimeArtifactStore, assignmentId?: string): Promise<HostRunRecord | undefined>;

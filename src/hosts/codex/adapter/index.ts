@@ -437,12 +437,20 @@ export class CodexAdapter implements HostAdapter {
     return this.runStore(store).hasLease(assignmentId);
   }
 
-  async clearRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
-    await this.runStore(store).clearLease(assignmentId);
+  async clearRunLease(
+    store: RuntimeArtifactStore,
+    assignmentId: string,
+    proof?: HostRunRecord
+  ): Promise<void> {
+    await this.runStore(store).clearLease(assignmentId, proof);
   }
 
-  async releaseRunLease(store: RuntimeArtifactStore, assignmentId: string): Promise<void> {
-    await this.runStore(store).release(assignmentId);
+  async releaseRunLease(
+    store: RuntimeArtifactStore,
+    assignmentId: string,
+    proof?: HostRunRecord
+  ): Promise<void> {
+    await this.runStore(store).release(assignmentId, proof);
   }
 
   async reconcileStaleRun(store: RuntimeArtifactStore, record: HostRunRecord): Promise<void> {

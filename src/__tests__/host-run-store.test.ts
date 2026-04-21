@@ -896,6 +896,200 @@ test("host run store keeps a newer adopted lease when stale owner failed persist
   assert.equal(lastRun?.adapterData?.coortexReclaimLease, true);
 });
 
+test("host run store refuses fenced cleanup when a newer live lease was adopted", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const staleOwnerFence = "run-instance-owner-1";
+  const adoptedOwnerFence = "run-instance-owner-2";
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-cleanup-fence",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    runInstanceId: staleOwnerFence,
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-cleanup-fence-1"
+    }
+  };
+
+  await runStore.claim(runningRecord);
+  const adopted = await runStore.claimOrAdopt(
+    {
+      ...runningRecord,
+      runInstanceId: adoptedOwnerFence
+    },
+    (current) =>
+      current.adapterData?.nativeRunId === "thread-cleanup-fence-1" &&
+      current.adapterData?.coortexReclaimLease !== true,
+    (current) => ({
+      ...current,
+      heartbeatAt: "2026-04-11T10:00:05.000Z",
+      leaseExpiresAt: "2999-04-11T10:00:35.000Z",
+      adapterData: {
+        ...(current.adapterData ?? {}),
+        nativeRunId: "thread-cleanup-fence-1",
+        coortexReclaimLease: true
+      }
+    })
+  );
+
+  await assert.rejects(
+    runStore.clearLease(runningRecord.assignmentId, runningRecord),
+    /lost host run ownership/
+  );
+
+  const inspected = await runStore.inspect(runningRecord.assignmentId);
+  const lease = await store.readJsonArtifact<HostRunRecord>(
+    artifacts.runLeasePath(runningRecord.assignmentId),
+    "lease"
+  );
+
+  assert.equal(adopted.runInstanceId, adoptedOwnerFence);
+  assert.equal(inspected?.runInstanceId, adoptedOwnerFence);
+  assert.equal(lease?.runInstanceId, adoptedOwnerFence);
+  assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+});
+
+test("host run store refuses an unfenced running write when a newer live lease exists", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const staleOwnerFence = "run-instance-owner-1";
+  const adoptedOwnerFence = "run-instance-owner-2";
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-write-fence",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    runInstanceId: staleOwnerFence,
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-write-fence-1"
+    }
+  };
+
+  await runStore.claim(runningRecord);
+  const adopted = await runStore.claimOrAdopt(
+    {
+      ...runningRecord,
+      runInstanceId: adoptedOwnerFence
+    },
+    (current) =>
+      current.adapterData?.nativeRunId === "thread-write-fence-1" &&
+      current.adapterData?.coortexReclaimLease !== true,
+    (current) => ({
+      ...current,
+      heartbeatAt: "2026-04-11T10:00:05.000Z",
+      leaseExpiresAt: "2999-04-11T10:00:35.000Z",
+      adapterData: {
+        ...(current.adapterData ?? {}),
+        nativeRunId: "thread-write-fence-1",
+        coortexReclaimLease: true
+      }
+    })
+  );
+
+  await assert.rejects(
+    runStore.write({
+      assignmentId: runningRecord.assignmentId,
+      state: "running",
+      startedAt: runningRecord.startedAt,
+      heartbeatAt: "2026-04-11T10:00:10.000Z",
+      leaseExpiresAt: "2999-04-11T10:00:40.000Z",
+      adapterData: {
+        nativeRunId: "thread-write-fence-1"
+      }
+    }),
+    /lost host run ownership/
+  );
+
+  const inspected = await runStore.inspect(runningRecord.assignmentId);
+  const lease = await store.readJsonArtifact<HostRunRecord>(
+    artifacts.runLeasePath(runningRecord.assignmentId),
+    "lease"
+  );
+
+  assert.equal(adopted.runInstanceId, adoptedOwnerFence);
+  assert.equal(inspected?.runInstanceId, adoptedOwnerFence);
+  assert.equal(lease?.runInstanceId, adoptedOwnerFence);
+  assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+});
+
+test("host run store rejects an unfenced running write if a newer live lease appears after the precheck", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const assignmentId = "assignment-write-race";
+  const adoptedFence = "run-instance-owner-2";
+  const runningRecord: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+    adapterData: {
+      nativeRunId: "thread-write-race-1"
+    }
+  };
+  const newerLiveLease: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:01.000Z",
+    runInstanceId: adoptedFence,
+    heartbeatAt: "2026-04-11T10:00:01.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:31.000Z",
+    adapterData: {
+      nativeRunId: "thread-write-race-2",
+      coortexReclaimLease: true
+    }
+  };
+
+  const originalReadVersionedTextArtifact = store.readVersionedTextArtifact.bind(store);
+  let raced = false;
+  store.readVersionedTextArtifact = async (relativePath) => {
+    if (!raced && relativePath === artifacts.runLeasePath(assignmentId)) {
+      raced = true;
+      await store.writeJsonArtifact(artifacts.runLeasePath(assignmentId), newerLiveLease);
+    }
+    return originalReadVersionedTextArtifact(relativePath);
+  };
+
+  await assert.rejects(
+    runStore.write(runningRecord),
+    /lost host run ownership/
+  );
+
+  const inspected = await runStore.inspect(assignmentId);
+  const lease = await store.readJsonArtifact<HostRunRecord>(
+    artifacts.runLeasePath(assignmentId),
+    "lease"
+  );
+  const runRecord = await store.readJsonArtifact<HostRunRecord>(
+    artifacts.runRecordPath(assignmentId),
+    "record"
+  );
+
+  assert.equal(raced, true);
+  assert.equal(inspected?.runInstanceId, adoptedFence);
+  assert.equal(lease?.runInstanceId, adoptedFence);
+  assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+  assert.equal(runRecord, undefined);
+});
+
 test("host run store preserves a newer reclaim between terminal proof and lease removal", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -1947,7 +2141,7 @@ test("host run store surfaces lease cleanup failure during claim rollback", asyn
   };
   const runStore = new HostRunStore(store, "custom", artifacts);
   const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
-  const originalDeleteArtifact = store.deleteArtifact.bind(store);
+  const originalDeleteTextArtifactCas = store.deleteTextArtifactCas.bind(store);
   let writeCount = 0;
   store.writeJsonArtifact = async (relativePath, value) => {
     writeCount += 1;
@@ -1956,11 +2150,11 @@ test("host run store surfaces lease cleanup failure during claim rollback", asyn
     }
     return originalWriteJsonArtifact(relativePath, value);
   };
-  store.deleteArtifact = async (relativePath) => {
+  store.deleteTextArtifactCas = async (relativePath, expectedVersion) => {
     if (relativePath === artifacts.runLeasePath("assignment-rollback-cleanup")) {
       throw new Error("simulated lease cleanup failure");
     }
-    return originalDeleteArtifact(relativePath);
+    return originalDeleteTextArtifactCas(relativePath, expectedVersion);
   };
 
   await assert.rejects(
@@ -2103,7 +2297,7 @@ test("host run store escalates final persistence when lease cleanup fails", asyn
   await runStore.claim(runningRecord);
 
   const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
-  const originalDeleteArtifact = store.deleteArtifact.bind(store);
+  const originalDeleteTextArtifactCas = store.deleteTextArtifactCas.bind(store);
   let writes = 0;
   store.writeJsonArtifact = async (relativePath, value) => {
     writes += 1;
@@ -2112,11 +2306,11 @@ test("host run store escalates final persistence when lease cleanup fails", asyn
     }
     return originalWriteJsonArtifact(relativePath, value);
   };
-  store.deleteArtifact = async (relativePath) => {
+  store.deleteTextArtifactCas = async (relativePath, expectedVersion) => {
     if (relativePath === artifacts.runLeasePath("assignment-warning-cleanup")) {
       throw new Error("simulated lease cleanup failure");
     }
-    return originalDeleteArtifact(relativePath);
+    return originalDeleteTextArtifactCas(relativePath, expectedVersion);
   };
 
   await assert.rejects(
