@@ -166,6 +166,9 @@ For the current hardening slice:
 - wrapped reclaim uses the structured `exec resume` path so successful
   resume records result/decision outcomes and completion telemetry
   through the same runtime-owned outcome pipeline as wrapped launch
+- the CLI wraps live launch and live wrapped reclaim in the same
+  cancellation boundary so operator-visible cancellation warnings and
+  persistence waiting stay aligned across both entrypoints
 - a custom runner may advertise native wrapped resume support only when
   it exposes a live `startResume()` handle with cancellation and wait
   semantics; a fire-and-forget `runResume()` function is not sufficient

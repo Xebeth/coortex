@@ -82,6 +82,9 @@ export interface RunRuntimeResult {
 }
 
 type SessionExecution = Pick<HostExecutionOutcome, "outcome" | "run">;
+interface ResumeRuntimeOptions {
+  onWillStartLiveResume?: () => void;
+}
 
 type DiagnosticsBearingError = Error & {
   diagnostics?: CommandDiagnostic[];
@@ -440,7 +443,8 @@ export async function prepareResumeRuntime(
 
 export async function resumeRuntime(
   store: RuntimeStore,
-  adapter: HostAdapter
+  adapter: HostAdapter,
+  options: ResumeRuntimeOptions = {}
 ): Promise<ResumeRuntimeResult> {
   const config = await store.loadConfig();
   if (!config) {
@@ -533,6 +537,7 @@ export async function resumeRuntime(
       if (!target.attachment.nativeSessionId) {
         throw new Error(`Attachment ${target.attachment.id} is missing a stored native session id.`);
       }
+      options.onWillStartLiveResume?.();
       resumeResult = await adapter.resumeSession(
         store,
         resumeProjection,

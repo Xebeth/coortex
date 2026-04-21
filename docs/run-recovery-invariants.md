@@ -353,6 +353,9 @@ runtime truth on their own.
   sandbox, and bypass behavior. If the host imposes different baseline
   launch and resume CLI modes, that difference must be explicit and
   documented rather than copied accidentally from launch defaults.
+  They must also share one CLI cancellation boundary whenever they
+  launch a live host session, while prepared-only resume stays exempt
+  because it does not start a live wrapped reclaim.
 
 - `ctx run` and `ctx resume`
   When a new or recovered decision becomes the active state, the
@@ -439,6 +442,9 @@ snapshot truth instead of overwriting it with older event-derived state.
   message instead of being dropped.
 - diagnostics must not silently hide operator-relevant failures in the
   main execution or cancellation paths.
+- cancellation-stage warnings must still be emitted when CLI callers
+  customize exit or persistence hooks; partial hook bags must not drop
+  the default warning channel by accident.
 
 ---
 

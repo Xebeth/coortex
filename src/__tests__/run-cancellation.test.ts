@@ -143,6 +143,76 @@ test("run cancellation waits for in-flight run persistence before exiting", asyn
   }
 });
 
+test("run cancellation keeps default warning output when callers omit a custom warn hook", async () => {
+  const originalGrace = process.env.COORTEX_CANCEL_GRACE_MS;
+  const originalForce = process.env.COORTEX_CANCEL_FORCE_MS;
+  const originalError = console.error;
+  process.env.COORTEX_CANCEL_GRACE_MS = "10";
+  process.env.COORTEX_CANCEL_FORCE_MS = "10";
+
+  const warnings: string[] = [];
+  const exits: number[] = [];
+  const adapter = createCancellationAdapter(async (signal) => {
+    if ((signal ?? "graceful") === "graceful") {
+      await never();
+    }
+    throw new Error("force failed");
+  });
+  console.error = ((message?: unknown) => {
+    warnings.push(String(message ?? ""));
+  }) as typeof console.error;
+
+  try {
+    const controller = createRunCancellationController(adapter, {
+      exit: (code) => {
+        exits.push(code);
+      }
+    });
+
+    controller.handleSignal("SIGINT");
+    await waitFor(() => exits.length === 1, 500);
+    controller.dispose();
+
+    assert.deepEqual(exits, [130]);
+    assert.match(warnings.join("\n"), /Cancellation graceful handling failed: Timed out after 10ms\./);
+    assert.match(warnings.join("\n"), /Cancellation force handling failed: force failed/);
+  } finally {
+    console.error = originalError;
+    restoreEnv("COORTEX_CANCEL_GRACE_MS", originalGrace);
+    restoreEnv("COORTEX_CANCEL_FORCE_MS", originalForce);
+  }
+});
+
+test("run cancellation keeps default persistence warnings when callers omit a custom warn hook", async () => {
+  const originalError = console.error;
+  const warnings: string[] = [];
+  const exits: number[] = [];
+  const adapter = createCancellationAdapter(async () => undefined);
+  console.error = ((message?: unknown) => {
+    warnings.push(String(message ?? ""));
+  }) as typeof console.error;
+
+  try {
+    const controller = createRunCancellationController(adapter, {
+      exit: (code) => {
+        exits.push(code);
+      },
+      awaitRunPersistence: async () => {
+        throw new Error("persist failed");
+      }
+    });
+
+    controller.handleSignal("SIGTERM");
+    await waitFor(() => exits.length === 1, 500);
+    controller.dispose();
+
+    assert.deepEqual(exits, [143]);
+    assert.match(warnings.join("\n"), /Cancellation persistence handling failed: persist failed/);
+  } finally {
+    console.error = originalError;
+  }
+});
+
 function createCancellationAdapter(
   cancelActiveRun: NonNullable<HostAdapter["cancelActiveRun"]>
 ): HostAdapter {

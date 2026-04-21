@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -67,6 +67,81 @@ async function runCliCommand(
       });
     });
   });
+}
+
+function spawnCliCommand(
+  cliPath: string,
+  command: string,
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+  }
+): {
+  child: ReturnType<typeof spawn>;
+  completed: Promise<{ exitCode: number; stdout: string; stderr: string }>;
+} {
+  const child = spawn(process.execPath, [cliPath, command], {
+    cwd: options.cwd,
+    env: options.env
+  });
+  let stdout = "";
+  let stderr = "";
+
+  child.stdout.on("data", (chunk: Buffer | string) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk: Buffer | string) => {
+    stderr += chunk.toString();
+  });
+
+  return {
+    child,
+    completed: new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code) => {
+        resolve({
+          exitCode: code ?? 1,
+          stdout,
+          stderr
+        });
+      });
+    })
+  };
+}
+
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) {
+      return;
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, 25);
+    });
+  }
+  throw new Error("Timed out waiting for CLI state.");
+}
+
+function codexFixtureName(): string {
+  return process.platform === "win32" ? "codex.cmd" : "codex";
+}
+
+async function writeCodexFixture(binDir: string, lines: string[]): Promise<void> {
+  const codexScript = join(binDir, codexFixtureName());
+  if (process.platform === "win32") {
+    await writeFile(codexScript, ["@echo off", "node \"%~dp0\\fixture.js\" %*"].join("\r\n"), "utf8");
+    await writeFile(join(binDir, "fixture.js"), lines.join("\n"), "utf8");
+    return;
+  }
+  await writeFile(codexScript, ["#!/usr/bin/env node", ...lines].join("\n"), "utf8");
+  await chmod(codexScript, 0o755);
+}
+
+function prependFixturePath(dir: string, originalPath: string | undefined): string {
+  return [dir, originalPath].filter((value): value is string => typeof value === "string").join(delimiter);
 }
 
 async function createCompletedDecisionRecoverySetup(options?: { includeLeftoverLease?: boolean }) {
@@ -3553,6 +3628,131 @@ test("ctx resume surfaces reclaimed failed results with a non-zero exit", async 
   assert.match(resume.stdout, /Host session: thread-cli-reclaim-1/);
   assert.match(resume.stdout, /Result \(failed\): Codex run failed with exit code 7\./);
   assert.doesNotMatch(resume.stdout, /Recovery brief generated/);
+});
+
+test("ctx resume installs cancellation handling for reclaimed live resumes and waits for persistence before exit", async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-cli-resume-cancel-"));
+  const cliPath = resolve(process.cwd(), "dist/cli/ctx.js");
+  const execFixturePath = join(projectRoot, "codex-exec-partial-fixture.json");
+  const binDir = await mkdtemp(join(tmpdir(), "coortex-cli-resume-cancel-bin-"));
+  const resumedSummary = "Wrapped resume persisted before cancellation exit.";
+
+  await writeFile(
+    execFixturePath,
+    JSON.stringify(
+      {
+        exitCode: 0,
+        stdoutLines: [{ type: "thread.started", thread_id: "thread-cli-reclaim-cancel-1" }],
+        lastMessage: {
+          outcomeType: "result",
+          resultStatus: "partial",
+          resultSummary: "Initial CLI run created resumable state.",
+          changedFiles: ["src/cli/ctx.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: ""
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await execFileAsync(process.execPath, [cliPath, "init"], {
+    cwd: projectRoot
+  });
+
+  const runtimeDir = join(projectRoot, ".coortex");
+  const snapshotBeforeResume = JSON.parse(
+    await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+  ) as {
+    assignments: Array<{ id: string }>;
+  };
+  const assignmentId = snapshotBeforeResume.assignments[0]!.id;
+
+  const run = await runCliCommand(cliPath, "run", {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      COORTEX_CODEX_EXEC_FIXTURE: execFixturePath
+    }
+  });
+  assert.equal(run.exitCode, 0);
+
+  await writeCodexFixture(binDir, [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const args = process.argv.slice(2);",
+    "const outputIndex = args.indexOf('-o');",
+    "const outputPath = outputIndex >= 0 ? args[outputIndex + 1] : undefined;",
+    "process.stdout.write(JSON.stringify({ type: 'thread.resumed', thread_id: 'thread-cli-reclaim-cancel-1' }) + '\\n');",
+    "let finished = false;",
+    "const finish = () => {",
+    "  if (finished) return;",
+    "  finished = true;",
+    "  if (outputPath) {",
+    "    fs.mkdirSync(path.dirname(outputPath), { recursive: true });",
+    `    fs.writeFileSync(outputPath, JSON.stringify(${JSON.stringify({
+      outcomeType: "result",
+      resultStatus: "partial",
+      resultSummary: resumedSummary,
+      changedFiles: ["src/cli/ctx.ts"],
+      blockerSummary: "",
+      decisionOptions: [],
+      recommendedOption: ""
+    })}, null, 2), 'utf8');`,
+    "  }",
+    "  process.exit(0);",
+    "};",
+    "process.on('SIGTERM', finish);",
+    "process.on('SIGINT', finish);",
+    "setInterval(() => {}, 1000);"
+  ]);
+
+  const resume = spawnCliCommand(cliPath, "resume", {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      PATH: prependFixturePath(binDir, process.env.PATH)
+    }
+  });
+
+  await waitFor(async () => {
+    const snapshot = JSON.parse(
+      await readFile(join(runtimeDir, "runtime", "snapshot.json"), "utf8")
+    ) as {
+      provenance?: {
+        lastActivation?: {
+          kind?: string;
+          assignmentId?: string;
+        };
+      };
+    };
+    return (
+      snapshot.provenance?.lastActivation?.kind === "resume" &&
+      snapshot.provenance.lastActivation.assignmentId === assignmentId
+    );
+  }, 2_000);
+  resume.child.kill("SIGTERM");
+  const completedResume = await resume.completed;
+
+  const persistedLastRun = JSON.parse(
+    await readFile(join(runtimeDir, "adapters", "codex", "last-run.json"), "utf8")
+  ) as {
+    assignmentId: string;
+    summary?: string;
+    resultStatus?: string;
+  };
+
+  assert.equal(completedResume.exitCode, 143);
+  assert.equal(persistedLastRun.assignmentId, assignmentId);
+  assert.equal(persistedLastRun.summary, resumedSummary);
+  assert.equal(persistedLastRun.resultStatus, "partial");
 });
 
 test("ctx init reports codex config conflicts by path without echoing file contents", async () => {

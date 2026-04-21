@@ -4,7 +4,7 @@ const DEFAULT_GRACEFUL_TIMEOUT_MS = 2_000;
 const DEFAULT_FORCE_TIMEOUT_MS = 2_000;
 
 export interface RunCancellationHooks {
-  exit: (code: number) => void;
+  exit?: (code: number) => void;
   awaitRunPersistence?: () => Promise<void>;
   warn?: (message: string) => void;
 }
@@ -16,12 +16,11 @@ export interface RunCancellationController {
 
 export function createRunCancellationController(
   adapter: HostAdapter,
-  hooks: RunCancellationHooks = {
-    exit: (code) => process.exit(code),
-    warn: (message) => console.error(message)
-  }
+  hooks: RunCancellationHooks = {}
 ): RunCancellationController {
   let forwarded = false;
+  const exit = hooks.exit ?? ((code: number) => process.exit(code));
+  const warn = hooks.warn ?? ((message: string) => console.error(message));
   const gracefulTimeoutMs = readTimeout("COORTEX_CANCEL_GRACE_MS", DEFAULT_GRACEFUL_TIMEOUT_MS);
   const forceTimeoutMs = readTimeout("COORTEX_CANCEL_FORCE_MS", DEFAULT_FORCE_TIMEOUT_MS);
 
@@ -37,22 +36,22 @@ export function createRunCancellationController(
         await raceWithTimeout(adapter.cancelActiveRun?.("graceful"), gracefulTimeoutMs);
       })
       .catch(async (error) => {
-        hooks.warn?.(formatCancellationWarning("graceful", error));
+        warn(formatCancellationWarning("graceful", error));
         try {
           await raceWithTimeout(adapter.cancelActiveRun?.("force"), forceTimeoutMs);
         } catch (forceError) {
-          hooks.warn?.(formatCancellationWarning("force", forceError));
+          warn(formatCancellationWarning("force", forceError));
         }
       })
       .then(async () => {
         try {
           await hooks.awaitRunPersistence?.();
         } catch (error) {
-          hooks.warn?.(formatCancellationWarning("persistence", error));
+          warn(formatCancellationWarning("persistence", error));
         }
       })
       .finally(() => {
-        hooks.exit(exitCode);
+        exit(exitCode);
       });
   };
 

@@ -209,7 +209,13 @@ async function resumeCommand(store: RuntimeStore, adapter: HostAdapter): Promise
     return;
   }
 
-  const resumed = await resumeRuntime(store, adapter);
+  const resumed = await executeWithLiveCancellationBoundary(
+    adapter,
+    (installCancellation) =>
+      resumeRuntime(store, adapter, {
+        onWillStartLiveResume: installCancellation
+      })
+  );
   if (resumed.mode === "reclaimed") {
     console.log(
       `Reclaimed attachment ${resumed.attachment.id} for assignment ${resumed.claim.assignmentId}`
@@ -246,36 +252,29 @@ async function runCommand(store: RuntimeStore, adapter: HostAdapter): Promise<vo
     return;
   }
 
-  let runSettled = Promise.resolve();
-  const cancellation = createRunCancellationController(adapter, {
-    exit: (code) => process.exit(code),
-    awaitRunPersistence: () => runSettled
-  });
-  try {
-    const runPromise = runRuntime(store, adapter);
-    runSettled = runPromise.then(() => undefined, () => undefined);
-    const { assignment, execution, diagnostics, recoveredOutcome } = await runPromise;
-    const nativeRunId = getNativeRunId(execution.run);
+  const { assignment, execution, diagnostics, recoveredOutcome } =
+    await executeWithLiveCancellationBoundary(adapter, async (installCancellation) => {
+      installCancellation();
+      return runRuntime(store, adapter);
+    });
+  const nativeRunId = getNativeRunId(execution.run);
 
-    if (!recoveredOutcome) {
-      console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
-    }
-    if (nativeRunId && !recoveredOutcome) {
-      console.log(`Host run: ${nativeRunId}`);
-    }
-    if (execution.outcome.kind === "decision") {
-      console.log(`Decision: ${execution.outcome.capture.blockerSummary}`);
-      console.log(`Recommended option: ${execution.outcome.capture.recommendedOption}`);
-    } else {
-      console.log(`Result (${execution.outcome.capture.status}): ${execution.outcome.capture.summary}`);
-      if (execution.outcome.capture.status === "failed") {
-        process.exitCode = 1;
-      }
-    }
-    printDiagnostics(diagnostics);
-  } finally {
-    cancellation.dispose();
+  if (!recoveredOutcome) {
+    console.log(`Executed assignment ${assignment.id} through ${adapter.id}`);
   }
+  if (nativeRunId && !recoveredOutcome) {
+    console.log(`Host run: ${nativeRunId}`);
+  }
+  if (execution.outcome.kind === "decision") {
+    console.log(`Decision: ${execution.outcome.capture.blockerSummary}`);
+    console.log(`Recommended option: ${execution.outcome.capture.recommendedOption}`);
+  } else {
+    console.log(`Result (${execution.outcome.capture.status}): ${execution.outcome.capture.summary}`);
+    if (execution.outcome.capture.status === "failed") {
+      process.exitCode = 1;
+    }
+  }
+  printDiagnostics(diagnostics);
 }
 
 async function inspectCommand(
@@ -307,6 +306,27 @@ async function inspectCommand(
 
 function printUsage(): void {
   console.log("Usage: ctx <init|doctor|status|resume|run|inspect> [assignment-id]");
+}
+
+async function executeWithLiveCancellationBoundary<TResult>(
+  adapter: HostAdapter,
+  execute: (installCancellation: () => void) => Promise<TResult>
+): Promise<TResult> {
+  let settled = Promise.resolve();
+  let cancellation: ReturnType<typeof createRunCancellationController> | undefined;
+  const installCancellation = () => {
+    cancellation ??= createRunCancellationController(adapter, {
+      awaitRunPersistence: () => settled
+    });
+  };
+
+  const execution = execute(installCancellation);
+  settled = execution.then(() => undefined, () => undefined);
+  try {
+    return await execution;
+  } finally {
+    cancellation?.dispose();
+  }
 }
 
 function printDiagnostics(diagnostics: CommandDiagnostic[]): void {
