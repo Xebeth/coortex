@@ -343,6 +343,69 @@ test("host-run session terminates a spawned launch when session identity handlin
   }
 });
 
+test("host-run session preserves launch identity when startRun fails after onNativeRunId", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-launch-native-id-failure";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  let seenIdentity: string | undefined;
+  const execution = await executeHostRunSession({
+    assignmentId,
+    startedAt,
+    taskId: "session-launch-native-id-failure",
+    runStore,
+    runRecord: claimedRun,
+    leaseMs: 30_000,
+    heartbeatMs: 30_000,
+    startRun: async ({ onNativeRunId }) => {
+      await onNativeRunId("native-launch-native-id-failure-1");
+      throw new Error("simulated launch failure after onNativeRunId");
+    },
+    onSessionIdentity: async (identity) => {
+      seenIdentity = identity.nativeSessionId;
+    },
+    summarizeExecutionFailure: (error) =>
+      error instanceof Error ? error.message : String(error),
+    buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+      outcome: {
+        kind: "result",
+        capture: {
+          assignmentId: failedAssignmentId,
+          producerId: "matrix-host",
+          status: "failed",
+          summary,
+          changedFiles: [],
+          createdAt: completedAt
+        }
+      }
+    }),
+    deriveCompleted: async () => {
+      throw new Error("launch should not reach completion after startRun failure");
+    },
+    setActiveRun: () => undefined,
+    setActiveExecutionSettled: () => undefined
+  });
+
+  const inspected = await runStore.inspect(assignmentId);
+
+  assert.equal(seenIdentity, "native-launch-native-id-failure-1");
+  assert.equal(execution.outcome.kind, "result");
+  assert.equal(execution.outcome.capture.status, "failed");
+  assert.match(execution.outcome.capture.summary, /simulated launch failure after onNativeRunId/);
+  assert.equal(execution.run.adapterData?.nativeRunId, "native-launch-native-id-failure-1");
+  assert.equal(execution.telemetry?.metadata.nativeRunId, "native-launch-native-id-failure-1");
+  assert.equal(inspected?.state, "completed");
+  assert.equal(inspected?.adapterData?.nativeRunId, "native-launch-native-id-failure-1");
+});
+
 test("host-run resume terminates a spawned reclaim when session identity handling fails before the handle returns", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
@@ -434,6 +497,62 @@ test("host-run resume terminates a spawned reclaim when session identity handlin
     globalThis.setInterval = originalSetInterval;
     globalThis.clearInterval = originalClearInterval;
   }
+});
+
+test("host-run resume preserves session identity handling when startRun fails after onSessionIdentity", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-resume-native-id-failure";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const requestedSessionId = "native-resume-native-id-failure-1";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, requestedSessionId);
+  await runStore.claim(claimedRun);
+
+  let seenIdentity: string | undefined;
+  const resumeResult = await executeHostResumeSession({
+    assignmentId,
+    startedAt,
+    taskId: "session-resume-native-id-failure",
+    requestedSessionId,
+    runStore,
+    runRecord: claimedRun,
+    leaseMs: 30_000,
+    heartbeatMs: 30_000,
+    startRun: async ({ onSessionIdentity }) => {
+      await onSessionIdentity({
+        nativeSessionId: requestedSessionId,
+        metadata: {
+          resumeEventType: "thread.event"
+        }
+      });
+      throw new Error("simulated resume failure after onSessionIdentity");
+    },
+    deriveCompleted: async () => {
+      throw new Error("resume should not reach completion after startRun failure");
+    },
+    getObservedSessionId: () => requestedSessionId,
+    getVerifiedSessionId: () => requestedSessionId,
+    summarizeExecutionFailure: (error) =>
+      error instanceof Error ? error.message : String(error),
+    summarizeVerificationFailure: () => undefined,
+    onSessionIdentity: async (identity) => {
+      seenIdentity = identity.nativeSessionId;
+    },
+    setActiveRun: () => undefined,
+    setActiveExecutionSettled: () => undefined
+  });
+
+  assert.equal(seenIdentity, requestedSessionId);
+  assert.equal(resumeResult.reclaimed, false);
+  assert.equal(resumeResult.reclaimState, "verified_then_failed");
+  assert.equal(resumeResult.sessionVerified, true);
+  assert.equal(resumeResult.verifiedSessionId, requestedSessionId);
+  assert.match(resumeResult.warning ?? "", /simulated resume failure after onSessionIdentity/);
 });
 
 test("host-run session matrix keeps completed state authoritative after a queued heartbeat callback", async () => {

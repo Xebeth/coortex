@@ -125,6 +125,10 @@ the ownership boundary for host execution.
 
 - Reclaim or adopt flows must mint or preserve one durable
   `runInstanceId` fence for the live owner.
+- Launch and resume startup identity handling must still be drained if
+  the launch path fails after the host already reported a native
+  session/run identity, so the durable identity and callback-facing
+  session identity do not disappear behind queue starvation.
 - Later heartbeat, completion, rollback, and destructive cleanup writes
   must prove that same fence instead of deleting by path alone, and
   running lease writes must re-check that fence at the actual lease

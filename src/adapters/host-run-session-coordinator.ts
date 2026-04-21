@@ -157,6 +157,7 @@ export class HostRunSessionCoordinator<TExecution extends { exitCode: number }> 
         execution = await Promise.race([running.result, this.metadataFailure]);
         this.runningRecord.close();
       } catch (error) {
+        await this.waitForStartupTasks();
         this.runningRecord.close();
         if (running) {
           await stopHostRun(running);
