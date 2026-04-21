@@ -2510,7 +2510,7 @@ test("milestone-2 integration: profile and kernel artifacts are generated as sma
   assert.ok(kernelStats.size < 512);
   assert.equal(profile.modelInstructionsFile, kernelPath);
   assert.match(codexConfig, /# BEGIN COORTEX CODEX PROFILE/);
-  assert.match(codexConfig, /model_instructions_file = ".*kernel\.md"/);
+  assert.match(codexConfig, /model_instructions_file = "\.\.\/\.coortex\/adapters\/codex\/kernel\.md"/);
 });
 
 test("milestone-2 integration: telemetry write failures do not block init, resume, or run", async () => {

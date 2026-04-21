@@ -850,7 +850,7 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
   assert.match(doctor.stdout, /OK codex-danger-mode disabled/);
 
   const codexConfig = await readFile(join(projectRoot, ".codex", "config.toml"), "utf8");
-  assert.match(codexConfig, /model_instructions_file = "/);
+  assert.match(codexConfig, /model_instructions_file = "\.\.\/\.coortex\/adapters\/codex\/kernel\.md"/);
 
   const envelope = await readFile(
     join(projectRoot, ".coortex", "runtime", "last-resume-envelope.json"),
@@ -3611,7 +3611,7 @@ test("ctx init replaces an existing Coortex-managed block while preserving surro
   assert.match(codexConfig, /^status = "enabled"$/m);
   assert.match(
     codexConfig,
-    /model_instructions_file = ".*\.coortex\/adapters\/codex\/kernel\.md"/
+    /model_instructions_file = "\.\.\/\.coortex\/adapters\/codex\/kernel\.md"/
   );
   assert.doesNotMatch(codexConfig, /old-kernel\.md/);
   assert.equal((codexConfig.match(/# BEGIN COORTEX CODEX PROFILE/g) ?? []).length, 1);

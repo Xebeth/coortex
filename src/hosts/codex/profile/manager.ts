@@ -1,5 +1,5 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 
 import type { DoctorCheck, RuntimeArtifactStore } from "../../../adapters/contract.js";
 import type { CodexConfigInstallation, CodexProfileConfig } from "./types.js";
@@ -36,7 +36,8 @@ export class CodexProfileManager {
 
   async install(kernelPath: string): Promise<CodexConfigInstallation> {
     const configPath = this.configPath();
-    const block = renderManagedBlock(kernelPath);
+    const modelInstructionsFile = configModelInstructionsPath(configPath, kernelPath);
+    const block = renderManagedBlock(modelInstructionsFile);
     const existing = await readTextIfPresent(configPath);
     const next = mergeManagedBlock(configPath, existing, block);
 
@@ -46,7 +47,7 @@ export class CodexProfileManager {
 
     return {
       configPath,
-      modelInstructionsFile: kernelPath
+      modelInstructionsFile
     };
   }
 
@@ -61,11 +62,13 @@ export class CodexProfileManager {
   async doctor(): Promise<DoctorCheck> {
     const profile = await this.loadProfile();
     const config = await readTextIfPresent(this.configPath());
+    const expectedConfigModelInstructionsFile =
+      profile && configModelInstructionsPath(this.configPath(), profile.modelInstructionsFile);
     const configInstalled =
       typeof config === "string" &&
       config.includes(MANAGED_BLOCK_START) &&
       config.includes(
-        `model_instructions_file = "${escapeTomlBasicString(profile?.modelInstructionsFile ?? "")}"`
+        `model_instructions_file = "${escapeTomlBasicString(expectedConfigModelInstructionsFile ?? "")}"`
       );
     return {
       label: "codex-profile",
@@ -112,6 +115,10 @@ function renderManagedBlock(kernelPath: string): string {
     `model_instructions_file = "${escapeTomlBasicString(kernelPath)}"`,
     MANAGED_BLOCK_END
   ].join("\n");
+}
+
+function configModelInstructionsPath(configPath: string, kernelPath: string): string {
+  return relative(dirname(configPath), kernelPath).replace(/\\/g, "/");
 }
 
 function mergeManagedBlock(configPath: string, existing: string | undefined, block: string): string {

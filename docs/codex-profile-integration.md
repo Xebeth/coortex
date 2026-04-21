@@ -135,6 +135,10 @@ trust/config under `~/.codex` stays untouched, and the harness must
 teardown fixture repos plus isolated user-state trees without leaving
 new `coortex-live-*` paths under the OS temp root or new tracked
 live-harness/Codex descendant processes behind.
+The managed `model_instructions_file` entry written into
+project-local `.codex/config.toml` should stay repo-relative
+(`../.coortex/adapters/codex/kernel.md`) rather than embedding an
+absolute project path.
 
 ## Wrapped Session Boundary
 
