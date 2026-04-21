@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import type { RuntimeArtifactStore } from "./contract.js";
 import {
@@ -166,8 +167,10 @@ export class HostRunStore {
   async write(record: HostRunRecord): Promise<void> {
     const writePromise = this.writeQueue.catch(() => undefined).then(async () => {
       await this.persistLeaseState(record);
-      await this.repository.writeRunRecord(record);
-      await this.repository.writeLastRunPointer(record);
+      if (record.state === "running") {
+        await this.repository.writeRunRecord(record);
+        await this.repository.writeLastRunPointer(record);
+      }
     });
     this.writeQueue = writePromise.catch(() => undefined);
     await writePromise;
@@ -460,6 +463,7 @@ export class HostRunStore {
       if (leaseError) {
         throw leaseError;
       }
+      await this.persistCompletedMetadata(record);
       return;
     }
 
@@ -494,7 +498,7 @@ export class HostRunStore {
       throw leaseError;
     }
 
-    await this.ensureCompletedMetadataBoundaries(record);
+    await this.persistCompletedMetadata(record);
   }
 
   private async ensureLiveOwnerFenceForCleanup(
@@ -558,6 +562,111 @@ export class HostRunStore {
         lastRun.record
       );
     }
+  }
+
+  private async persistCompletedMetadata(record: HostRunRecord): Promise<void> {
+    const previousRunRecord = await this.repository.readRunRecord(record.assignmentId);
+    const previousLastRun = await this.repository.readLastRunPointer();
+    let wroteRunRecord = false;
+    let wroteLastRun = false;
+
+    try {
+      await this.ensureCompletedMetadataPublicationMayProceed(
+        record,
+        "completed run-record publication"
+      );
+      await this.repository.writeRunRecord(record);
+      wroteRunRecord = true;
+
+      await this.ensureCompletedMetadataPublicationMayProceed(
+        record,
+        "completed last-run publication"
+      );
+      await this.repository.writeLastRunPointer(record);
+      wroteLastRun = true;
+
+      await this.ensureCompletedMetadataPublicationMayProceed(
+        record,
+        "completed publication verification"
+      );
+    } catch (error) {
+      const rollbackErrors = await this.restoreCompletedMetadata(record, {
+        previousRunRecord,
+        previousLastRun,
+        wroteRunRecord,
+        wroteLastRun
+      });
+      if (rollbackErrors.length > 0) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Host run terminal metadata persistence failed and rollback also failed for assignment ${record.assignmentId}. ${message} ${rollbackErrors.join(" ")}`
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async ensureCompletedMetadataPublicationMayProceed(
+    record: HostRunRecord,
+    operation: string
+  ): Promise<void> {
+    const liveFence = await this.getCurrentLiveOwnerFence(record.assignmentId);
+    const proofFence = getRunOwnerFence(record);
+    if (liveFence && liveFence !== proofFence) {
+      throw new HostRunOwnershipFenceError(record.assignmentId, operation);
+    }
+    await this.ensureCompletedMetadataBoundaries(record);
+  }
+
+  private async restoreCompletedMetadata(
+    record: HostRunRecord,
+    options: {
+      previousRunRecord: HostRunRecord | undefined;
+      previousLastRun:
+        | { state: "missing" }
+      | { state: "valid"; record: HostRunRecord }
+      | { state: "malformed"; raw: string };
+      wroteRunRecord: boolean;
+      wroteLastRun: boolean;
+    }
+  ): Promise<string[]> {
+    const rollbackErrors: string[] = [];
+
+    if (options.wroteRunRecord) {
+      const currentRunRecord = await this.repository.readRunRecord(record.assignmentId);
+      if (isDeepStrictEqual(currentRunRecord, record)) {
+        try {
+          if (options.previousRunRecord) {
+            await this.repository.writeRunRecord(options.previousRunRecord);
+          } else {
+            await this.repository.deleteRunRecord(record.assignmentId);
+          }
+        } catch (rollbackError) {
+          rollbackErrors.push(
+            `run record rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
+        }
+      }
+    }
+
+    if (options.wroteLastRun) {
+      const currentLastRun = await this.repository.readLastRunPointer();
+      if (currentLastRun.state === "valid" && isDeepStrictEqual(currentLastRun.record, record)) {
+        try {
+          if (options.previousLastRun.state === "valid") {
+            await this.repository.writeLastRunPointer(options.previousLastRun.record);
+          } else {
+            await this.repository.deleteLastRunPointer();
+          }
+        } catch (rollbackError) {
+          rollbackErrors.push(
+            `last-run rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
+        }
+      }
+    }
+
+    return rollbackErrors;
   }
 }
 

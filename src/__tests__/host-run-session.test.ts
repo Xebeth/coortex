@@ -1396,3 +1396,209 @@ test("host-run resume keeps a foreign verified session id unverified on post-exi
     globalThis.clearInterval = originalClearInterval;
   }
 });
+
+test("host-run session rejects stale terminal publication after a newer live claim appears during normal completion", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-terminal-race-run";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const staleFence = "run-instance-terminal-race-run-stale";
+  const newerFence = "run-instance-terminal-race-run-newer";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  claimedRun.runInstanceId = staleFence;
+  await runStore.claim(claimedRun);
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  let injected = false;
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (
+      !injected &&
+      relativePath === artifacts.runRecordPath(assignmentId) &&
+      typeof value === "object" &&
+      value !== null &&
+      "state" in value &&
+      value.state === "completed"
+    ) {
+      injected = true;
+      await originalWriteJsonArtifact(artifacts.runLeasePath(assignmentId), {
+        assignmentId,
+        state: "running",
+        startedAt: "2026-04-11T10:00:01.000Z",
+        runInstanceId: newerFence,
+        heartbeatAt: "2026-04-11T10:00:01.000Z",
+        leaseExpiresAt: "2999-04-11T10:00:31.000Z",
+        adapterData: {
+          nativeRunId: "thread-terminal-race-run-newer",
+          coortexReclaimLease: true
+        }
+      });
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  try {
+    const execution = await executeHostRunSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-terminal-race-run",
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async () => ({
+        result: Promise.resolve({ exitCode: 0 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      }),
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+        outcome: {
+          kind: "result",
+          capture: {
+            assignmentId: failedAssignmentId,
+            producerId: "matrix-host",
+            status: "failed",
+            summary,
+            changedFiles: [],
+            createdAt: completedAt
+          }
+        }
+      }),
+      deriveCompleted: async (_execution, nativeRunId) => ({
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Normal completion was fenced by a newer live claim.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        },
+        ...(nativeRunId ? { nativeRunId } : {})
+      }),
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    const inspected = await runStore.inspect(assignmentId);
+    const lease = await store.readJsonArtifact<HostRunRecord>(artifacts.runLeasePath(assignmentId));
+
+    assert.match(execution.warning ?? "", /lost host run ownership/i);
+    assert.equal(execution.run.state, "completed");
+    assert.equal(inspected?.state, "running");
+    assert.equal(inspected?.runInstanceId, newerFence);
+    assert.equal(lease?.runInstanceId, newerFence);
+    assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+  } finally {
+    store.writeJsonArtifact = originalWriteJsonArtifact;
+  }
+});
+
+test("host-run session rejects stale terminal publication after a newer live claim appears during resumed completion", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const assignmentId = "assignment-terminal-race-resume";
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const requestedSessionId = "native-terminal-race-resume";
+  const staleFence = "run-instance-terminal-race-resume-stale";
+  const newerFence = "run-instance-terminal-race-resume-newer";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, requestedSessionId);
+  claimedRun.runInstanceId = staleFence;
+  await runStore.claim(claimedRun);
+
+  const originalWriteJsonArtifact = store.writeJsonArtifact.bind(store);
+  let injected = false;
+  store.writeJsonArtifact = async (relativePath, value) => {
+    if (
+      !injected &&
+      relativePath === artifacts.runRecordPath(assignmentId) &&
+      typeof value === "object" &&
+      value !== null &&
+      "state" in value &&
+      value.state === "completed"
+    ) {
+      injected = true;
+      await originalWriteJsonArtifact(artifacts.runLeasePath(assignmentId), {
+        assignmentId,
+        state: "running",
+        startedAt: "2026-04-11T10:00:01.000Z",
+        runInstanceId: newerFence,
+        heartbeatAt: "2026-04-11T10:00:01.000Z",
+        leaseExpiresAt: "2999-04-11T10:00:31.000Z",
+        adapterData: {
+          nativeRunId: "thread-terminal-race-resume-newer",
+          coortexReclaimLease: true
+        }
+      });
+    }
+    return originalWriteJsonArtifact(relativePath, value);
+  };
+
+  try {
+    const result = await executeHostResumeSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-terminal-race-resume",
+      requestedSessionId,
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async () => ({
+        result: Promise.resolve({ exitCode: 0 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      }),
+      deriveCompleted: async () => ({
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Resumed completion was fenced by a newer live claim.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        }
+      }),
+      getObservedSessionId: () => requestedSessionId,
+      getVerifiedSessionId: () => requestedSessionId,
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      summarizeVerificationFailure: () => undefined,
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    const inspected = await runStore.inspect(assignmentId);
+    const lease = await store.readJsonArtifact<HostRunRecord>(artifacts.runLeasePath(assignmentId));
+
+    assert.equal(result.reclaimed, true);
+    assert.equal(result.reclaimState, "reclaimed");
+    assert.match(result.warning ?? "", /lost host run ownership/i);
+    assert.equal(inspected?.state, "running");
+    assert.equal(inspected?.runInstanceId, newerFence);
+    assert.equal(lease?.runInstanceId, newerFence);
+    assert.equal(lease?.adapterData?.coortexReclaimLease, true);
+  } finally {
+    store.writeJsonArtifact = originalWriteJsonArtifact;
+  }
+});

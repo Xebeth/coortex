@@ -170,6 +170,10 @@ rules:
 - Warning-only degradation is allowed only after lease cleanup is
   confirmed. If lease cleanup fails, the command must surface a stronger
   persistence failure than a normal warning.
+- Completed run-record and last-run publication must stay inside the
+  same ownership fence as lease finalization. If a newer live owner
+  appears after lease cleanup, terminal metadata publication must fail
+  closed rather than overwrite the newer live boundary.
 - Wrapped reclaim failure must not clear authoritative attachment truth
   before host cleanup has been proved.
 - Reclaimed terminal resume finalization must rebuild the full

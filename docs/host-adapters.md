@@ -133,6 +133,10 @@ the ownership boundary for host execution.
   must prove that same fence instead of deleting by path alone, and
   running lease writes must re-check that fence at the actual lease
   mutation boundary instead of relying only on a prewrite read.
+- Completed run-record and last-run publication must use the same
+  mutation-time ownership fence as lease finalization. If a newer live
+  claim appears after lease cleanup, the stale terminal publish must
+  fail closed so inspection does not prefer obsolete terminal metadata.
 - Adapter cleanup wrappers should carry the inspected or claimed fence
   through to shared store cleanup so a newer reclaimed lease cannot be
   cleared by stale assignment-scoped cleanup.
