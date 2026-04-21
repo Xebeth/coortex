@@ -78,6 +78,32 @@ test("materializeInspectableRunRecords keeps malformed lease blockers by default
   assert.deepEqual(materializeInspectableRunRecords([inspection]), [record]);
 });
 
+test("materializeInspectableRunRecord preserves malformed lease blockers on running records", () => {
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-running-malformed",
+    state: "running",
+    startedAt: "2026-04-19T05:00:00.000Z",
+    heartbeatAt: "2026-04-19T05:01:00.000Z",
+    leaseExpiresAt: "2026-04-19T05:10:00.000Z"
+  };
+  const inspection: HostRunArtifactInspection = {
+    assignmentId: "assignment-running-malformed",
+    runRecord: runningRecord,
+    lease: {
+      state: "malformed",
+      raw: "{"
+    }
+  };
+
+  const record = materializeInspectableRunRecord(inspection);
+  assert.deepEqual(record, {
+    ...runningRecord,
+    staleReasonCode: "malformed_lease_artifact",
+    staleReason: "malformed lease file"
+  });
+  assert.deepEqual(materializeInspectableRunRecords([inspection]), [record]);
+});
+
 test("materializeInspectableRunRecord ignores mismatched run records and keeps the matching lease", () => {
   const leaseRecord: HostRunRecord = {
     assignmentId: "assignment-1",

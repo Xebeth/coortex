@@ -2039,6 +2039,55 @@ test("codex adapter treats malformed lease JSON as stale inspection state", asyn
   );
 });
 
+test("codex adapter preserves malformed lease blockers on running records through inspection wrappers", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-malformed-running-lease-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const assignmentId = bootstrap.initialAssignmentId;
+  const adapter = new CodexAdapter();
+  await adapter.initialize(store, projection);
+  await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  });
+  await store.writeTextArtifact(`adapters/codex/runs/${assignmentId}.lease.json`, "{");
+
+  const inspectedRun = await adapter.inspectRun(store, assignmentId);
+  const inspectedRuns = await adapter.inspectRuns(store);
+
+  assert.equal(inspectedRun?.assignmentId, assignmentId);
+  assert.equal(inspectedRun?.state, "running");
+  assert.equal(inspectedRun?.staleReasonCode, "malformed_lease_artifact");
+  assert.equal(inspectedRuns.length, 1);
+  assert.equal(inspectedRuns[0]?.assignmentId, assignmentId);
+  assert.equal(inspectedRuns[0]?.staleReasonCode, "malformed_lease_artifact");
+});
+
 test("codex adapter fails the run when heartbeat lease refreshes stop persisting", async () => {
   const originalHeartbeat = process.env.COORTEX_RUN_HEARTBEAT_MS;
   process.env.COORTEX_RUN_HEARTBEAT_MS = "10";

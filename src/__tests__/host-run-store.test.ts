@@ -2031,6 +2031,34 @@ test("host run store inspection materializes malformed lease blockers by default
   assert.equal(inspectedAll[0]?.staleReasonCode, "malformed_lease_artifact");
 });
 
+test("host run store inspection preserves malformed lease blockers on running records", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const runningRecord: HostRunRecord = {
+    assignmentId: "assignment-running-malformed",
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+
+  await store.writeJsonArtifact(artifacts.runRecordPath(runningRecord.assignmentId), runningRecord);
+  await store.writeTextArtifact(artifacts.runLeasePath(runningRecord.assignmentId), "{");
+
+  const inspected = await runStore.inspect(runningRecord.assignmentId);
+  const inspectedAll = await runStore.inspectAll();
+
+  assert.equal(inspected?.assignmentId, runningRecord.assignmentId);
+  assert.equal(inspected?.state, "running");
+  assert.equal(inspected?.staleReasonCode, "malformed_lease_artifact");
+  assert.deepEqual(inspectedAll, [inspected]);
+});
+
 test("host run store ignores a malformed last-run pointer during release cleanup", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {

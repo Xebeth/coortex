@@ -118,7 +118,9 @@ rules:
    treated as stale running state so reconciliation can clear it.
 7. Shared inspection materialization must preserve that malformed-lease
    blocker by default; callers must not need an opt-in flag to see the
-   same precedence that `status`, `resume`, and `run` rely on.
+   same precedence that `status`, `resume`, and `run` rely on. Running
+   records must keep that malformed blocker truth instead of collapsing
+   to a generic missing-lease state.
 
 ---
 

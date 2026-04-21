@@ -24,6 +24,13 @@ export function materializeInspectableRunRecord(
     inspection.runRecord?.assignmentId === inspection.assignmentId
       ? inspection.runRecord
       : undefined;
+  if (
+    options?.includeMalformedLeaseRecord !== false &&
+    inspection.lease.state === "malformed" &&
+    runRecord?.state === "running"
+  ) {
+    return withMalformedLeaseBlocker(runRecord);
+  }
   const leaseRecord =
     inspection.lease.state === "valid" &&
       inspection.lease.record.assignmentId === inspection.assignmentId
@@ -57,10 +64,16 @@ export function materializeInspectableRunRecords(
 }
 
 function createMalformedLeaseRecord(assignmentId: string, leaseIdentity: string): HostRunRecord {
-  return {
+  return withMalformedLeaseBlocker({
     assignmentId,
     state: "running",
-    startedAt: malformedLeaseStartedAt(leaseIdentity),
+    startedAt: malformedLeaseStartedAt(leaseIdentity)
+  });
+}
+
+function withMalformedLeaseBlocker(record: HostRunRecord): HostRunRecord {
+  return {
+    ...record,
     staleReasonCode: "malformed_lease_artifact",
     staleReason: "malformed lease file"
   };
