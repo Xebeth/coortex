@@ -116,11 +116,13 @@ rules:
 5. A running record with an expired lease is treated as stale.
 6. Malformed active-lease metadata with no valid completed run record is
    treated as stale running state so reconciliation can clear it.
-7. Shared inspection materialization must preserve that malformed-lease
-   blocker by default; callers must not need an opt-in flag to see the
-   same precedence that `status`, `resume`, and `run` rely on. Running
-   records must keep that malformed blocker truth instead of collapsing
-   to a generic missing-lease state.
+7. Shared inspection materialization must preserve malformed-lease
+   blocker precedence by default; callers must not need an opt-in flag
+   to see the same precedence that `status`, `resume`, and `run` rely
+   on. Only terminal completed records may outrank a malformed leftover
+   lease. Running and non-terminal completed records must keep that
+   malformed blocker truth instead of collapsing to a generic
+   missing-lease state.
 
 ---
 

@@ -1982,6 +1982,62 @@ test("host-run command matrix keeps stale-run reconciliation idempotent", async 
   assert.equal(run.execution.outcome.capture.status, "completed");
 });
 
+test("host-run command matrix keeps malformed running blockers out of live-lease classification", async (t) => {
+  const seedMalformedRunningRecord = async (ctx: MatrixContext) => {
+    const startedAt = "2026-04-11T10:00:00.000Z";
+    const runningRecord = {
+      assignmentId: ctx.assignmentId,
+      state: "running" as const,
+      startedAt,
+      heartbeatAt: startedAt,
+      leaseExpiresAt: "2999-04-11T10:00:30.000Z",
+      adapterData: {
+        nativeRunId: `malformed-${ctx.assignmentId}`
+      }
+    };
+    await ctx.adapter.runStore.write(runningRecord);
+    await ctx.store.writeTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "{");
+  };
+
+  await t.test("status reconciliation keeps malformed blockers out of live leases", async () => {
+    const adapter = new BriefingMatrixAdapter();
+    const ctx = await createMatrixContext(adapter);
+    await seedMalformedRunningRecord(ctx);
+
+    const reconciled = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+    const inspected = await ctx.adapter.inspectRun(ctx.store, ctx.assignmentId);
+
+    assert.deepEqual(reconciled.activeLeases, []);
+    assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+    assert.equal(reconciled.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+    assert.equal(inspected?.state, "completed");
+    assert.equal(inspected?.staleReasonCode, "malformed_lease_artifact");
+  });
+
+  await t.test("resume reconciliation keeps malformed blockers out of live leases", async () => {
+    const adapter = new BriefingMatrixAdapter();
+    const ctx = await createMatrixContext(adapter);
+    await seedMalformedRunningRecord(ctx);
+
+    const resumed = await resumeRuntime(ctx.store, ctx.adapter);
+
+    assert.equal(resumed.mode, "prepared");
+    assert.ok(resumed.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  });
+
+  await t.test("run reconciliation keeps malformed blockers out of live leases", async () => {
+    const adapter = new BriefingMatrixAdapter();
+    const ctx = await createMatrixContext(adapter);
+    await seedMalformedRunningRecord(ctx);
+
+    const run = await runRuntime(ctx.store, ctx.adapter);
+
+    assert.equal(run.execution.outcome.kind, "result");
+    assert.equal(run.execution.outcome.capture.status, "completed");
+    assert.ok(run.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
+  });
+});
+
 test("host-run command matrix treats a later stale retry as a new stale run", async () => {
   const adapter = new BriefingMatrixAdapter();
   const ctx = await createMatrixContext(adapter);

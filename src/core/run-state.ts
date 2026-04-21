@@ -18,12 +18,30 @@ export function isCoortexReclaimLease(record: HostRunRecord | undefined): boolea
   return record?.adapterData?.[COORTEX_RECLAIM_LEASE_KEY] === true;
 }
 
+export function hasMalformedLeaseBlocker(record: HostRunRecord | undefined): boolean {
+  return record?.staleReasonCode === "malformed_lease_artifact";
+}
+
+export function applyMalformedLeaseBlocker(record: HostRunRecord): HostRunRecord {
+  return {
+    ...record,
+    staleReasonCode: "malformed_lease_artifact",
+    staleReason: "malformed lease file"
+  };
+}
+
 export function selectAuthoritativeRunRecord(
   runRecord: HostRunRecord | undefined,
-  leaseRecord: HostRunRecord | undefined
+  leaseRecord: HostRunRecord | undefined,
+  options?: {
+    malformedLeaseArtifact?: boolean;
+  }
 ): HostRunRecord | undefined {
   if (isTerminalCompletedRunRecord(runRecord)) {
     return runRecord;
+  }
+  if (options?.malformedLeaseArtifact) {
+    return runRecord ? applyMalformedLeaseBlocker(runRecord) : undefined;
   }
   if (leaseRecord?.state === "running") {
     return leaseRecord;

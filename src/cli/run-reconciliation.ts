@@ -4,7 +4,12 @@ import {
   buildCompletedHostExecutionOutcomeFromDecisionCapture,
   buildCompletedHostExecutionOutcomeFromResultCapture
 } from "../adapters/host-run-records.js";
-import { getNativeRunId, getRunInstanceId, isRunLeaseExpired } from "../core/run-state.js";
+import {
+  getNativeRunId,
+  getRunInstanceId,
+  hasMalformedLeaseBlocker,
+  isRunLeaseExpired
+} from "../core/run-state.js";
 import type { RuntimeEvent } from "../core/events.js";
 import type { HostRunRecord, RuntimeProjection } from "../core/types.js";
 import {
@@ -242,6 +247,34 @@ async function reconcileActiveRunsInContext(
       continue;
     }
 
+    if (record.staleReasonCode && !record.terminalOutcome) {
+      if (!effectiveProjection.assignments.has(assignmentId)) {
+        await reconcileOutOfProjectionStaleRun(
+          context,
+          effectiveProjection,
+          assignmentId,
+          record,
+          diagnostics
+        );
+        continue;
+      }
+
+      changed = true;
+      effectiveProjection = await reconcileInProjectionStaleRun(
+        context,
+        effectiveProjection,
+        assignmentId,
+        record,
+        diagnostics,
+        {
+          snapshotFallback,
+          replayableEvents,
+          snapshotBoundaryEventId
+        }
+      );
+      continue;
+    }
+
     if (record.state === "completed") {
       const completedRecovery = await reconcileCompletedRunRecord(
         context,
@@ -260,37 +293,6 @@ async function reconcileActiveRunsInContext(
         effectiveProjection = completedRecovery.projection;
         changed ||= completedRecovery.changed;
         snapshotFallbackReplayHydrated ||= completedRecovery.replayableHydrated;
-        continue;
-      }
-
-      if (record.staleReasonCode && !record.terminalOutcome) {
-        if (!effectiveProjection.assignments.has(assignmentId)) {
-          await reconcileOutOfProjectionStaleRun(
-            context,
-            effectiveProjection,
-            assignmentId,
-            record,
-            diagnostics
-          );
-          continue;
-        }
-
-        changed = true;
-        effectiveProjection = await reconcileInProjectionStaleRun(
-          context,
-          effectiveProjection,
-          assignmentId,
-          record,
-          diagnostics,
-          {
-            snapshotFallback,
-            replayableEvents,
-            snapshotBoundaryEventId
-          },
-          {
-            alreadyReconciledCleanupRecord: record
-          }
-        );
         continue;
       }
 
@@ -925,7 +927,7 @@ function listLiveLeaseAssignments(records: HostRunRecord[]): string[] {
 function isLiveLeaseRecord(
   record: HostRunRecord | undefined
 ): record is HostRunRecord & { state: "running" } {
-  return record?.state === "running" && !isRunLeaseExpired(record);
+  return record?.state === "running" && !hasMalformedLeaseBlocker(record) && !isRunLeaseExpired(record);
 }
 
 async function applyRecoveryProjectionEvents(

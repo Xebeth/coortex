@@ -121,6 +121,58 @@ test("codex adapter mints stable ids for host captures when absent", () => {
   assert.equal(decision.state, "open");
 });
 
+test("codex adapter inspection preserves malformed blockers on stale completed records", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-stale-completed-malformed-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const assignmentId = bootstrap.initialAssignmentId;
+  const adapter = new CodexAdapter();
+  await adapter.initialize(store, projection);
+  await store.writeJsonArtifact(`adapters/codex/runs/${assignmentId}.json`, {
+    assignmentId,
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    completedAt: "2026-04-11T10:01:00.000Z",
+    staleAt: "2026-04-11T10:01:00.000Z",
+    staleReasonCode: "expired_lease",
+    staleReason: "Run lease expired at 2000-01-01T00:00:00.000Z."
+  });
+  await store.writeTextArtifact(`adapters/codex/runs/${assignmentId}.lease.json`, "{");
+
+  const inspectedRun = await adapter.inspectRun(store, assignmentId);
+  const inspectedRuns = await adapter.inspectRuns(store);
+
+  assert.equal(inspectedRun?.assignmentId, assignmentId);
+  assert.equal(inspectedRun?.state, "completed");
+  assert.equal(inspectedRun?.staleReasonCode, "malformed_lease_artifact");
+  assert.equal(inspectedRuns.length, 1);
+  assert.equal(inspectedRuns[0]?.assignmentId, assignmentId);
+  assert.equal(inspectedRuns[0]?.state, "completed");
+  assert.equal(inspectedRuns[0]?.staleReasonCode, "malformed_lease_artifact");
+});
+
 test("codex adapter executes a bounded run and persists minimal reconnect metadata", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-run-"));
   const store = RuntimeStore.forProject(projectRoot);

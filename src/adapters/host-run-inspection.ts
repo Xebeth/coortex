@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { HostRunArtifactInspection } from "./host-run-lease-repository.js";
 import type { HostRunRecord } from "../core/types.js";
 import {
+  applyMalformedLeaseBlocker,
   describeStaleRunReason,
   describeStaleRunReasonCode,
   isRunLeaseExpired,
@@ -24,27 +25,26 @@ export function materializeInspectableRunRecord(
     inspection.runRecord?.assignmentId === inspection.assignmentId
       ? inspection.runRecord
       : undefined;
-  if (
-    options?.includeMalformedLeaseRecord !== false &&
-    inspection.lease.state === "malformed" &&
-    runRecord?.state === "running"
-  ) {
-    return withMalformedLeaseBlocker(runRecord);
-  }
   const leaseRecord =
     inspection.lease.state === "valid" &&
       inspection.lease.record.assignmentId === inspection.assignmentId
       ? inspection.lease.record
       : undefined;
+  const malformedLeaseArtifact =
+    options?.includeMalformedLeaseRecord !== false && inspection.lease.state === "malformed";
+  const malformedLeaseRaw = inspection.lease.state === "malformed" ? inspection.lease.raw : "";
   const authoritative = selectAuthoritativeRunRecord(
     runRecord,
-    leaseRecord
+    leaseRecord,
+    {
+      malformedLeaseArtifact
+    }
   );
   if (authoritative) {
     return normalizeInspectableRunRecord(authoritative);
   }
-  if (options?.includeMalformedLeaseRecord !== false && inspection.lease.state === "malformed") {
-    return createMalformedLeaseRecord(inspection.assignmentId, inspection.lease.raw);
+  if (malformedLeaseArtifact) {
+    return createMalformedLeaseRecord(inspection.assignmentId, malformedLeaseRaw);
   }
   return undefined;
 }
@@ -64,19 +64,11 @@ export function materializeInspectableRunRecords(
 }
 
 function createMalformedLeaseRecord(assignmentId: string, leaseIdentity: string): HostRunRecord {
-  return withMalformedLeaseBlocker({
+  return applyMalformedLeaseBlocker({
     assignmentId,
     state: "running",
     startedAt: malformedLeaseStartedAt(leaseIdentity)
   });
-}
-
-function withMalformedLeaseBlocker(record: HostRunRecord): HostRunRecord {
-  return {
-    ...record,
-    staleReasonCode: "malformed_lease_artifact",
-    staleReason: "malformed lease file"
-  };
 }
 
 function malformedLeaseStartedAt(leaseIdentity: string): string {

@@ -1761,6 +1761,29 @@ test("host run store inspection matrix matches recovery invariants", async (t) =
       expected: completedRecord("assignment-completed-over-malformed", "Completed record wins")
     },
     {
+      name: "stale completed run record preserves malformed lease blockers",
+      assignmentId: "assignment-stale-completed-over-malformed",
+      runRecord: {
+        assignmentId: "assignment-stale-completed-over-malformed",
+        state: "completed",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        completedAt: "2026-04-11T10:01:00.000Z",
+        staleAt: "2026-04-11T10:01:00.000Z",
+        staleReasonCode: "expired_lease",
+        staleReason: "Run lease expired at 2000-01-01T00:00:00.000Z."
+      },
+      leaseContent: "{",
+      expected: {
+        assignmentId: "assignment-stale-completed-over-malformed",
+        state: "completed",
+        startedAt: "2026-04-11T10:00:00.000Z",
+        completedAt: "2026-04-11T10:01:00.000Z",
+        staleAt: "2026-04-11T10:01:00.000Z",
+        staleReasonCode: "malformed_lease_artifact",
+        staleReason: "malformed lease file"
+      }
+    },
+    {
       name: "lease-less running record becomes stale completed state",
       assignmentId: "assignment-missing-lease",
       runRecord: runningRecord("assignment-missing-lease", "2026-04-11T10:00:30.000Z"),

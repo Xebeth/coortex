@@ -141,9 +141,10 @@ the ownership boundary for host execution.
   through to shared store cleanup so a newer reclaimed lease cannot be
   cleared by stale assignment-scoped cleanup.
 - Shared inspection materialization must preserve malformed lease
-  blockers for running records instead of collapsing them to a generic
-  missing-lease state, and adapter inspection wrappers should surface
-  that same truth consistently.
+  blockers for running and non-terminal completed records instead of
+  collapsing them to a generic missing-lease state. Only terminal
+  completed records may outrank a malformed leftover lease, and adapter
+  inspection wrappers should surface that same truth consistently.
 - Degraded stale reconciliation may mint a fresh `runInstanceId` so the
   runtime can key stale-run idempotence durably.
 - That minted stale identity is not a substitute for a live adopted
