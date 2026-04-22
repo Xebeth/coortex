@@ -49,10 +49,10 @@ python ../fixer-orchestrator/scripts/fix_result_state.py validate-lane-continuat
 3. Resume the same worker's family-local context. Do not restart first-pass
    analysis from scratch after a valid continuation packet.
 4. Implement the bounded fix at the owning seam.
-5. Run targeted verification.
+5. Run targeted verification only.
 6. Run lane-local `$coortex-review`.
 7. Run lane-local `$coortex-deslop`.
-8. Rerun targeted verification.
+8. Rerun targeted verification only.
 9. Emit `review_return_handoff` for the coordinator.
 10. Stop. Do not commit.
 
@@ -62,6 +62,10 @@ python ../fixer-orchestrator/scripts/fix_result_state.py validate-lane-continuat
 - Do not spawn subagents from this lane skill.
 - Do not broaden into multi-family coordination.
 - Do not commit.
+- Do not run repo-wide, full-suite, or broader seam-level verification from
+  the lane by default. Lanes own targeted verification only; broader
+  verification required for `family-closed` belongs to the coordinator's
+  closure gate.
 - Do not self-certify family closure as final truth; targeted return review has
   final say.
 - Do not respawn yourself as a new lane when a valid continuation packet says

@@ -87,9 +87,13 @@ Every repair lane must:
 - remove stale or conflicting paths when the root cause shows split-brain logic
 - update tests and docs when the closure gate requires it
 - verify the fix against the closure gate before reporting closure
-- run the repo's normal verification for the touched area before claiming `family-closed` when feasible, not just the narrowest repro test
-- treat red or hanging broader verification as a blocker to `family-closed`; do not explain it away as unrelated
-- use `verification-blocked` when broader verification for the touched area is the remaining blocker but the family-local fix and targeted checks are otherwise in place
+- lock the family locally with targeted verification before reporting lane output
+- do not run the repo's normal verification for the touched area from every
+  lane by default; broader verification required for `family-closed` belongs to
+  the coordinator closure gate
+- if broader verification is already known red or hanging from existing
+  evidence, surface that as blocker context instead of rounding up the family
+  locally
 - emit a short family closeout checkpoint before moving to a different family or slice
 - if using `verification-blocked`, record the blocker suite, blocking failure summary, probable seam, and why it is believed separate from the repaired family
 - record the actual touched write set, tests, docs, verification runs, broader-suite status, satisfied closure-gate items, unsatisfied closure-gate items, residual risks, and any exposed threads followed or deferred for the downstream `review_return_handoff`
@@ -101,6 +105,9 @@ Each repair lane is owned by one worker and stays attached to that worker until
 the family is terminal.
 
 Rules:
+- the worker lane owns targeted verification only
+- do not run repo-wide/full-suite broader verification in every lane by default
+- the fixer coordinator owns broader verification required for `family-closed`
 - after the worker implements the slice, it must run lane-local
   `$coortex-review`
 - after that, it must run lane-local `$coortex-deslop`
@@ -113,6 +120,12 @@ The fixer coordinator then:
 - supplies the original `review_handoff`, the worker's
   `review_return_handoff`, and the actual diff
 - waits for the reviewer result before deciding the next step
+- runs the broader/normal verification gate for the touched area when closure
+  requires it, instead of pushing that full-suite responsibility into every
+  worker lane
+- treats red or hanging broader verification as a blocker to `family-closed`
+  and uses `verification-blocked` when the family-local fix and targeted checks
+  are otherwise in place
 - does not interrupt, steer, close, or kill a live worker/reviewer lane merely
   because it has been quiet for several minutes
 

@@ -70,10 +70,10 @@ workflow runs so the user can tell which family or phase is active.
    - keep one worker attached to that lane until the family reaches a terminal
      state
    - implement the fix by editing code, tests, and docs at the owning seam
-   - run targeted verification
+   - run targeted verification only
    - run lane-local `$coortex-review`
    - run lane-local `$coortex-deslop`
-   - rerun targeted verification
+   - rerun targeted verification only
    - emit a mandatory `review_return_handoff`
 10. The fixer coordinator must send every lane result through
     `$review-orchestrator` targeted return review using the original
@@ -143,6 +143,9 @@ workflow runs so the user can tell which family or phase is active.
 - Do not rely on inherited thread context for repair lanes. Pass only the scoped family/slice prompt plus the relevant `review_handoff` and closure-gate data.
 - Do not let a worker lane commit. Commits are coordinator-only after
   independent targeted return review approves closure.
+- Worker lanes own targeted verification only. Do not have every lane run the
+  repo-wide or broader seam-level suite in parallel; broader verification
+  required for `family-closed` is coordinator-owned.
 - Do not let the fixer coordinator self-certify closure. Independent review is
   provided by `$review-orchestrator` targeted return review.
 - The coordinator-side pre-commit gate must call bounded `$coortex-review` and
@@ -251,6 +254,10 @@ Use `references/execution-model.md`.
 - Do not call a family closed because one manifestation is fixed.
 - Verify against the closure gate, not just the direct symptom.
 - `family-closed` requires green executed verification with no hanging tests. If only targeted checks ran, or the broader suite for the touched seam was skipped/failing/hanging, do not round up to `family-closed` unless that broader suite is truly not applicable.
+- Treat the broader-suite requirement as coordinator-owned closure evidence, not
+  as a per-lane default gate. Lane workers should supply targeted verification
+  evidence; the coordinator decides when the normal suite for the touched area
+  must run before commit/closure.
 - Use `verification-blocked` instead of `family-partially-closed` when the remaining blocker is verification state rather than an unresolved defect-family gap.
 - Do not use `verification-blocked` without surfacing concrete blocker evidence and an explicit separation claim that downstream return review can check.
 - When a family includes a structured reviewer `next_step`, reevaluate the prior status before keeping or repeating `verification-blocked`.
