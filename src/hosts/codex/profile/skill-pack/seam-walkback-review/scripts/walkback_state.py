@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -218,6 +219,20 @@ def clear_active_campaign(trace_root: Path, campaign_id: str) -> bool:
         path.unlink()
     return True
 
+
+def campaign_owner_metadata(args: argparse.Namespace) -> dict[str, str]:
+    metadata = {
+        "owner_started_from_cwd": str(Path(args.owner_started_from_cwd or os.getcwd()).resolve()),
+    }
+    owner_host_session_id = args.owner_host_session_id or os.environ.get("CODEX_SESSION_ID")
+    if owner_host_session_id:
+        metadata["owner_host_session_id"] = owner_host_session_id
+    else:
+        owner_host_thread_id = os.environ.get("CODEX_THREAD_ID")
+        if owner_host_thread_id:
+            metadata["owner_host_thread_id"] = owner_host_thread_id
+    return metadata
+
 def inventory(args: argparse.Namespace) -> int:
     cwd = Path(args.project_root).resolve()
     branch = run_git(["branch", "--show-current"], cwd)
@@ -319,12 +334,14 @@ def init_trace(args: argparse.Namespace) -> int:
         previous_run_id = active_run_id
     else:
         run_id = requested_run_id or default_run_id()
+        owner_metadata = campaign_owner_metadata(args)
         active = {
             "campaign_id": run_id,
             "campaign_type": SEAM_WALK_CAMPAIGN_TYPE,
             "state": "active",
             "worktree_root": str(project_root),
             "started_at_utc": utc_now_iso(),
+            **owner_metadata,
         }
         write_active_campaign(trace_root, active)
 
@@ -449,6 +466,8 @@ def build_parser() -> argparse.ArgumentParser:
     init_trace_parser.add_argument("--trace-root", default=".coortex/review-trace")
     init_trace_parser.add_argument("--project-root", default=".")
     init_trace_parser.add_argument("--run-id")
+    init_trace_parser.add_argument("--owner-host-session-id")
+    init_trace_parser.add_argument("--owner-started-from-cwd")
     init_trace_parser.set_defaults(func=init_trace)
 
     packet_path_parser = subparsers.add_parser(

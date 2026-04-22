@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 import pathlib
 import re
 from typing import Any
@@ -510,6 +511,20 @@ def clear_active_campaign(trace_root: pathlib.Path, campaign_id: str) -> bool:
     if path.exists():
         path.unlink()
     return True
+
+
+def campaign_owner_metadata(args: argparse.Namespace) -> dict[str, str]:
+    metadata = {
+        "owner_started_from_cwd": str(pathlib.Path(args.owner_started_from_cwd or os.getcwd()).resolve()),
+    }
+    owner_host_session_id = args.owner_host_session_id or os.environ.get("CODEX_SESSION_ID")
+    if owner_host_session_id:
+        metadata["owner_host_session_id"] = owner_host_session_id
+    else:
+        owner_host_thread_id = os.environ.get("CODEX_THREAD_ID")
+        if owner_host_thread_id:
+            metadata["owner_host_thread_id"] = owner_host_thread_id
+    return metadata
 
 
 def parse_json_record(record_json: str) -> dict[str, Any]:
@@ -1159,6 +1174,7 @@ def init_trace(args: argparse.Namespace) -> int:
         campaign_id = active_campaign_id
         resumed = True
     else:
+        owner_metadata = campaign_owner_metadata(args)
         write_active_campaign(
             trace_root,
             {
@@ -1168,6 +1184,7 @@ def init_trace(args: argparse.Namespace) -> int:
                 "state": "active",
                 "worktree_root": str(project_root),
                 "started_at_utc": utc_now_iso(),
+                **owner_metadata,
             },
         )
 
@@ -1285,6 +1302,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--trace-root", default=".coortex/review-trace")
     init.add_argument("--project-root", default=".")
     init.add_argument("--run-id")
+    init.add_argument("--owner-host-session-id")
+    init.add_argument("--owner-started-from-cwd")
     init.set_defaults(func=init_trace)
 
     lane_file = subparsers.add_parser(

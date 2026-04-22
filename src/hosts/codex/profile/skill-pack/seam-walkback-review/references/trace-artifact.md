@@ -39,6 +39,12 @@ Repository-level active-campaign lock while a top-level review campaign is
 running:
 - `.coortex/review-trace/active-review-campaign.json`
 
+That lock should preserve operator-facing provenance for the top-level run when
+available:
+- `owner_host_session_id`
+- otherwise `owner_host_thread_id`
+- `owner_started_from_cwd`
+
 ## Rules
 
 - Allow only one concurrent top-level review campaign per worktree / `.coortex`

@@ -6,6 +6,7 @@ import copy
 from datetime import datetime, timezone
 import fnmatch
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -524,6 +525,20 @@ def clear_active_campaign(trace_root: pathlib.Path, campaign_id: str) -> bool:
     return True
 
 
+def campaign_owner_metadata(args: argparse.Namespace) -> dict[str, str]:
+    metadata = {
+        "owner_started_from_cwd": str(pathlib.Path(args.owner_started_from_cwd or os.getcwd()).resolve()),
+    }
+    owner_host_session_id = args.owner_host_session_id or os.environ.get("CODEX_SESSION_ID")
+    if owner_host_session_id:
+        metadata["owner_host_session_id"] = owner_host_session_id
+    else:
+        owner_host_thread_id = os.environ.get("CODEX_THREAD_ID")
+        if owner_host_thread_id:
+            metadata["owner_host_thread_id"] = owner_host_thread_id
+    return metadata
+
+
 def require_packet_string(value: Any, field: str, errors: list[str], prefix: str) -> str | None:
     if not isinstance(value, str) or not value.strip():
         errors.append(f"{prefix} field {field} must be a non-empty string")
@@ -882,6 +897,7 @@ def init_trace(args: argparse.Namespace) -> int:
             )
             return 2
         linked_campaign_id = run_id
+        owner_metadata = campaign_owner_metadata(args)
         write_active_campaign(
             trace_root,
             {
@@ -891,6 +907,7 @@ def init_trace(args: argparse.Namespace) -> int:
                 "state": "active",
                 "worktree_root": str(project_root),
                 "started_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                **owner_metadata,
             },
         )
 
@@ -1786,6 +1803,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--mode", default="full-review")
     init.add_argument("--run-id")
     init.add_argument("--campaign-id")
+    init.add_argument("--owner-host-session-id")
+    init.add_argument("--owner-started-from-cwd")
     init.set_defaults(func=init_trace)
 
     lane_file = subparsers.add_parser(

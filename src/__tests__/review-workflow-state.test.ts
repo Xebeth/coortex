@@ -19,6 +19,10 @@ const seamWalkbackStateScript = resolve(
   process.cwd(),
   "src/hosts/codex/profile/skill-pack/seam-walkback-review/scripts/walkback_state.py"
 );
+const coortexReviewStateScript = resolve(
+  process.cwd(),
+  "src/hosts/codex/profile/skill-pack/coortex-review/scripts/review_state.py"
+);
 const aiSlopCleanerStateScript = resolve(
   process.cwd(),
   "src/hosts/codex/profile/skill-pack/coortex-deslop/scripts/deslop_state.py"
@@ -231,7 +235,11 @@ test("seam walkback helper blocks concurrent campaigns and clears after terminal
     "--trace-root",
     traceRoot,
     "--run-id",
-    "seam-walkback-review-campaign"
+    "seam-walkback-review-campaign",
+    "--owner-host-session-id",
+    "codex-thread-seam",
+    "--owner-started-from-cwd",
+    tempDir
   ]);
 
   assert.equal(init.exitCode, 0);
@@ -245,12 +253,16 @@ test("seam walkback helper blocks concurrent campaigns and clears after terminal
   const activeCampaign = JSON.parse(await readFile(initJson.active_campaign_file, "utf8")) as {
     campaign_id: string;
     campaign_type: string;
+    owner_host_session_id: string;
+    owner_started_from_cwd: string;
     state: string;
     started_at_utc: string;
     worktree_root: string;
   };
   assert.equal(activeCampaign.campaign_id, "seam-walkback-review-campaign");
   assert.equal(activeCampaign.campaign_type, "seam-walkback-review");
+  assert.equal(activeCampaign.owner_host_session_id, "codex-thread-seam");
+  assert.equal(activeCampaign.owner_started_from_cwd, tempDir);
   assert.equal(activeCampaign.state, "active");
   assert.equal(activeCampaign.worktree_root, tempDir);
   assert.equal(typeof activeCampaign.started_at_utc, "string");
@@ -1691,6 +1703,92 @@ test("orchestrator targeted return review can run inside an active fixer campaig
   assert.equal(standaloneAfterTerminal.exitCode, 0);
 });
 
+test("orchestrator standalone init-trace records lock owner provenance", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-orchestrator-owner-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  const init = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "full-review",
+    "--run-id",
+    "review-orchestrator-full-review-20260422T090000Z",
+    "--owner-host-session-id",
+    "codex-thread-review",
+    "--owner-started-from-cwd",
+    tempDir
+  ]);
+
+  assert.equal(init.exitCode, 0);
+  const initJson = init.json as {
+    active_campaign_file: string;
+    campaign_id: string;
+  };
+  assert.equal(initJson.campaign_id, "review-orchestrator-full-review-20260422T090000Z");
+  const activeCampaign = JSON.parse(await readFile(initJson.active_campaign_file, "utf8")) as {
+    campaign_id: string;
+    campaign_type: string;
+    owner_host_session_id: string;
+    owner_started_from_cwd: string;
+    state: string;
+    worktree_root: string;
+  };
+  assert.equal(activeCampaign.campaign_id, "review-orchestrator-full-review-20260422T090000Z");
+  assert.equal(activeCampaign.campaign_type, "review-orchestrator");
+  assert.equal(activeCampaign.owner_host_session_id, "codex-thread-review");
+  assert.equal(activeCampaign.owner_started_from_cwd, tempDir);
+  assert.equal(activeCampaign.state, "active");
+  assert.equal(activeCampaign.worktree_root, tempDir);
+});
+
+test("coortex review helper blocks standalone review while a fixer campaign is active and surfaces owner provenance", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-lock-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  const fixerInit = await runPythonJson(fixResultStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "fixer-orchestrator-lock",
+    "--owner-host-session-id",
+    "codex-thread-fixer-lock",
+    "--owner-started-from-cwd",
+    tempDir
+  ]);
+  assert.equal(fixerInit.exitCode, 0);
+
+  const blocked = await runPythonJson(coortexReviewStateScript, [
+    "check-active-campaign",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot
+  ]);
+
+  assert.equal(blocked.exitCode, 2);
+  const blockedJson = blocked.json as {
+    standalone_review_allowed: boolean;
+    reason: string;
+    active_campaign: {
+      campaign_type: string;
+      owner_host_session_id: string;
+      owner_started_from_cwd: string;
+    };
+  };
+  assert.equal(blockedJson.standalone_review_allowed, false);
+  assert.equal(blockedJson.reason, "active-top-level-review-campaign");
+  assert.equal(blockedJson.active_campaign.campaign_type, "fixer-orchestrator");
+  assert.equal(blockedJson.active_campaign.owner_host_session_id, "codex-thread-fixer-lock");
+  assert.equal(blockedJson.active_campaign.owner_started_from_cwd, tempDir);
+});
+
 test("orchestrator trace helper validates lane result records before appending", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");
@@ -2193,7 +2291,11 @@ test("fixer trace helper blocks concurrent campaigns and clears after final fix"
     "--trace-root",
     traceRoot,
     "--run-id",
-    "fixer-orchestrator-campaign"
+    "fixer-orchestrator-campaign",
+    "--owner-host-session-id",
+    "codex-thread-fixer",
+    "--owner-started-from-cwd",
+    tempDir
   ]);
 
   assert.equal(init.exitCode, 0);
@@ -2210,11 +2312,15 @@ test("fixer trace helper blocks concurrent campaigns and clears after final fix"
   const activeCampaign = JSON.parse(await readFile(initJson.active_campaign_file, "utf8")) as {
     campaign_id: string;
     campaign_type: string;
+    owner_host_session_id: string;
+    owner_started_from_cwd: string;
     state: string;
     worktree_root: string;
   };
   assert.equal(activeCampaign.campaign_id, "fixer-orchestrator-campaign");
   assert.equal(activeCampaign.campaign_type, "fixer-orchestrator");
+  assert.equal(activeCampaign.owner_host_session_id, "codex-thread-fixer");
+  assert.equal(activeCampaign.owner_started_from_cwd, tempDir);
   assert.equal(activeCampaign.state, "active");
   assert.equal(activeCampaign.worktree_root, tempDir);
 

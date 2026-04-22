@@ -26,6 +26,12 @@ The helper owns:
 
 The model still owns the contents of each trace record.
 
+Repository-level active-campaign locks should preserve operator-facing
+provenance when available:
+- `owner_host_session_id`
+- otherwise `owner_host_thread_id`
+- `owner_started_from_cwd`
+
 ## Path layout
 
 - Create one directory per run under:

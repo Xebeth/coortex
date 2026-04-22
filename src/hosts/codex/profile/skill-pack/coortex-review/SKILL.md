@@ -62,20 +62,41 @@ These match the built-in lens ids configured by `review-baseline` and used by
   - inspect sibling paths, adjacent callers, docs, and relevant history needed
     to judge whether the root cause is wider than the immediate diff
 
+## Deterministic helper
+
+Use the bundled helper to avoid standalone review against an already active
+top-level review/fix campaign in the same worktree:
+
+```bash
+python scripts/review_state.py check-active-campaign --project-root .
+```
+
+If it reports an active `fixer-orchestrator`, `review-orchestrator`, or
+`seam-walkback-review` campaign, refuse standalone `$coortex-review` instead of
+reading a live overlapping worktree. Surface the lock metadata, including any
+recorded `owner_host_session_id`, fallback `owner_host_thread_id`, and
+`owner_started_from_cwd`, so the operator can tell where that run was started.
+
 ## Workflow
 
-1. Confirm that the requested review scope is bounded enough for one agent.
-2. Read the scoped files, diff, and any supplied contract docs, closure gate,
+1. Use the helper to check for an active top-level review/fix campaign lock in
+   the same worktree before starting standalone review.
+2. Confirm that the requested review scope is bounded enough for one agent.
+3. Read the scoped files, diff, and any supplied contract docs, closure gate,
    or review handoff.
-3. If the scope is too broad or would require multiple independent review
+4. If the scope is too broad or would require multiple independent review
    passes, stop and direct the user to `$review-orchestrator`.
-4. Apply the configured lenses inside the bounded scope. If none are provided,
+5. If a top-level fixer/review campaign is already active in this worktree,
+   stop and refuse standalone `$coortex-review`. Wait for the active fixer to
+   reach a review handoff, or use the linked orchestrated review path instead
+   of reviewing a mutating worktree.
+6. Apply the configured lenses inside the bounded scope. If none are provided,
    default to `goal-fidelity`, `quality`, and `context-history`.
-5. Inspect the sibling paths needed to judge whether the same root cause still
+7. Inspect the sibling paths needed to judge whether the same root cause still
    exists inside the bounded review scope.
-6. Run lightweight diagnostics or execution evidence only when the environment
+8. Run lightweight diagnostics or execution evidence only when the environment
    supports them and they materially affect correctness for this review.
-7. Return severity-rated findings with concrete file evidence.
+9. Return severity-rated findings with concrete file evidence.
 
 ## Conversation-visible progress
 
@@ -112,6 +133,8 @@ normal findings instead of fabricating machine output.
 ## Guardrails
 
 - Read-only review: do not implement fixes.
+- Do not review against a worktree that already has an active top-level
+  fixer/review campaign lock.
 - Do not broaden into repo-wide discovery.
 - Do not silently ignore the prompt's exact output schema.
 - Do not treat a whole feature area as “bounded” when the real work needs

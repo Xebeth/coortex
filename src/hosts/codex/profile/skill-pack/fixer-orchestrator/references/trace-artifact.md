@@ -35,6 +35,12 @@ Repository-level active-campaign lock while a top-level review campaign is
 running:
 - `.coortex/review-trace/active-review-campaign.json`
 
+The active-campaign lock should also record operator-facing provenance for the
+top-level run:
+- `owner_host_session_id` when available from the host environment
+- otherwise `owner_host_thread_id` when only thread-local host identity is available
+- `owner_started_from_cwd`
+
 Inside that run directory:
 - coordinator file:
   - `coordinator.jsonl`

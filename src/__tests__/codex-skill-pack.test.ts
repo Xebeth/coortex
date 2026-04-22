@@ -243,6 +243,28 @@ test("fixer coordinator stays read-only and hands findings back to the same lane
   }
 });
 
+test("coortex review explicitly checks the shared campaign lock before standalone review", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-review/scripts/review_state.py"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /check-active-campaign|active-review-campaign|owner_host_session_id|owner_host_thread_id|owner_started_from_cwd/i,
+      path
+    );
+    assert.match(
+      content,
+      /fixer-orchestrator|review-orchestrator|seam-walkback-review/i,
+      path
+    );
+  }
+});
+
 async function walk(
   dir: string,
   visitFile: (path: string) => Promise<void>
