@@ -95,7 +95,11 @@ workflow runs so the user can tell which family or phase is active.
     explicit operator override.
 14. Before moving to a different family, emit a short family closeout
     checkpoint.
-15. Append the final trace records on disk.
+15. After the last atomic commit for the run, append a `final_fix` record via
+    `scripts/fix_result_state.py append-trace`.
+16. Require that helper call to report `active_campaign_cleared: true` and
+    verify `.coortex/review-trace/active-review-campaign.json` is gone before
+    reporting completion.
 
 ## Hard Rules
 
@@ -175,6 +179,10 @@ workflow runs so the user can tell which family or phase is active.
 - Always emit a `review_return_handoff`. Do not rely on fixer self-audit as the terminal acceptance step.
 - Use the bundled `scripts/fix_result_state.py` helper to validate the final `review_return_handoff` and deferred-family structure before finalizing. Serialize the relevant handoff blocks to JSON before invoking it.
 - Use the bundled `scripts/fix_result_state.py` helper for deterministic trace path/file handling as well as final handoff validation. Keep the model focused on repair judgments and evidence.
+- Do not hand-terminate a fixer run by prose alone. A top-level fixer run is
+  complete only after `append-trace` writes `final_fix`, reports
+  `active_campaign_cleared: true`, and the shared active-campaign lock file is
+  no longer present.
 - Do not write a full transcript or chain-of-thought trace. Persist only phase-boundary operational trace records and observable repair/verification actions.
 - Keep detailed trace data on disk. Do not serialize trace internals into `review_return_handoff` or normal final output unless the user explicitly asks for trace details.
 - Keep human-facing progress and final output compact. Do not dump the same root cause, manifestation, and test/doc details repeatedly across closeout prose and `review_return_handoff`.
@@ -228,6 +236,13 @@ Use `references/intake-and-normalization.md`.
   - if the gate stays clear, commit immediately for that approved lane/slice
   - do not batch multiple already-approved lanes into one later umbrella
     commit
+- After the final approved lane commit lands for the whole run, terminate the
+  fixer campaign explicitly:
+  - append `final_fix` through `scripts/fix_result_state.py append-trace`
+  - require `active_campaign_cleared: true`
+  - confirm `.coortex/review-trace/active-review-campaign.json` no longer
+    exists
+  - do not report success until all three are true
 
 Use `references/execution-model.md`.
 

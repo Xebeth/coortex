@@ -1274,6 +1274,21 @@ def append_trace(args: argparse.Namespace) -> int:
     active_cleared = False
     if str(record.get("phase") or "") == "final_fix":
         active_cleared = clear_active_campaign(trace_root, str(record.get("run_id") or ""))
+        if not active_cleared:
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": True,
+                        "status": "error",
+                        "reason": "active-campaign-not-cleared",
+                        "active_campaign_cleared": False,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
     print(
         json.dumps(
             {

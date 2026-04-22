@@ -2381,6 +2381,50 @@ test("fixer trace helper blocks concurrent campaigns and clears after final fix"
   assert.equal(fresh.exitCode, 0);
 });
 
+test("fixer final_fix errors when the active campaign lock is not cleared", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-fixer-terminal-lock-"));
+  const traceDir = join(tempDir, ".coortex", "review-trace", "fixer-orchestrator-terminal");
+  await mkdir(traceDir, { recursive: true });
+  const coordinatorFile = join(traceDir, "coordinator.jsonl");
+  await writeFile(coordinatorFile, "", "utf8");
+
+  const finalFixPath = join(tempDir, "orphan-final-fix.json");
+  await writeFile(
+    finalFixPath,
+    JSON.stringify(
+      {
+        run_id: "fixer-orchestrator-terminal",
+        timestamp_utc: "2026-04-22T12:00:00Z",
+        skill: "fixer-orchestrator",
+        mode: "native-intake",
+        phase: "final_fix",
+        review_target: { mode: "branch", scope_summary: "test" },
+        family_ids_handled: ["F-001"],
+        final_statuses: ["family-closed"]
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const finalFix = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    coordinatorFile,
+    "--record-file",
+    finalFixPath
+  ]);
+  assert.equal(finalFix.exitCode, 2);
+  assert.deepEqual(finalFix.json, {
+    active_campaign_cleared: false,
+    appended: true,
+    reason: "active-campaign-not-cleared",
+    status: "error",
+    trace_file: coordinatorFile
+  });
+});
+
 test("fixer helper plans repair slices by seam, overlap, and blocker waves", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-fix-plan-"));
   const reviewHandoffPath = join(tempDir, "review-handoff.json");

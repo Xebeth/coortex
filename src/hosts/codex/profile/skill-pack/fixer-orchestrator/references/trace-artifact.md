@@ -63,6 +63,9 @@ Inside that run directory:
 - Record observable repair activity only.
 - Keep trace data on disk by default. Do not surface trace paths or trace internals in normal output unless the user explicitly asks.
 - Do not have multiple subagents append to one shared lane file. Each lane/subagent gets its own JSONL file inside the run directory.
+- Do not treat a fixer run as finished until `append-trace` writes the terminal
+  `final_fix` record, reports `active_campaign_cleared: true`, and the shared
+  `active-review-campaign.json` file is gone.
 
 ## Record types
 
@@ -186,3 +189,11 @@ Include:
 Include:
 - `family_ids_handled`
 - `final_statuses`
+
+Terminal rules:
+- Append `final_fix` only after the last atomic commit for the run has landed.
+- A successful `final_fix` append must report `active_campaign_cleared: true`.
+- If `append-trace` returns `active_campaign_cleared: false`, treat the run as
+  unfinished and do not report completion.
+- After a successful `final_fix`, verify that
+  `.coortex/review-trace/active-review-campaign.json` no longer exists.

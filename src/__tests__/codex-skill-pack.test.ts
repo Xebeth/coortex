@@ -243,6 +243,21 @@ test("fixer coordinator stays read-only and hands findings back to the same lane
   }
 });
 
+test("fixer orchestrator makes terminal lock clearing explicit", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/trace-artifact.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /final_fix/i, path);
+    assert.match(content, /active_campaign_cleared/i, path);
+    assert.match(content, /active-review-campaign\.json/i, path);
+  }
+});
+
 test("coortex review explicitly checks the shared campaign lock before standalone review", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
