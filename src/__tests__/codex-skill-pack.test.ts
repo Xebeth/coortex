@@ -155,6 +155,7 @@ test("seam walkback explicitly forbids offer-to-continue stops after successful 
   for (const path of expectedFiles) {
     const content = await readFile(path, "utf8");
     assert.match(content, /if you want, I can continue|offer-to-continue|successful slice commit|Terminal conditions/i, path);
+    assert.match(content, /packet is ready|campaign completed cleanly|packet emission alone is not terminal|packet-ready is an intermediate state|final_review/i, path);
   }
 });
 

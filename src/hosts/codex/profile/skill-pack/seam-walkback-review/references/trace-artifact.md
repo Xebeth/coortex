@@ -133,6 +133,13 @@ Include:
 - `next_skill`
 - `handoff_mode`
 
+Rules:
+- `handoff_emitted` records that the discovery packet was emitted and the
+  downstream launch was attempted.
+- `handoff_emitted` is not terminal by itself. Do not treat a “packet ready”
+  status message as campaign completion while the downstream
+  `$review-orchestrator` phase has not yet completed its own `final_review`.
+
 ### final_walkback
 Include:
 - `outcome_summary`
@@ -143,3 +150,9 @@ Use `terminal_state` values such as:
 - `blocked`
 - `aborted`
 - `superseded`
+
+`handoff-completed` means the seam-walk campaign emitted the packet, ran the
+downstream packet-driven `$review-orchestrator` phase through its own terminal
+`final_review`, and then recorded its own terminal walkback state. Packet
+emission alone does not justify
+`handoff-completed`.

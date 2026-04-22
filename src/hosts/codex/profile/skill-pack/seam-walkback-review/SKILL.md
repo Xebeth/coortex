@@ -41,9 +41,16 @@ runs so the user can tell what is happening.
   update without waiting for acknowledgment.
 - Do not end with “if you want, I can continue” or similar offer-to-continue
   wording unless a real terminal condition is met.
+- Do not stop with “the packet is ready” or “the campaign completed cleanly”
+  while the downstream `$review-orchestrator` exploration phase has not yet
+  completed its own packet-driven review run. Packet-ready is an intermediate
+  state, not a terminal result.
 - Terminal conditions for this workflow are: explicit user stop, no actionable
   commit groups remain, a deterministic helper reports a blocking campaign/lock
-  error, or the downstream orchestrator handoff cannot be emitted cleanly.
+  error, the downstream orchestrator handoff cannot be emitted cleanly, or the
+  downstream packet-driven `$review-orchestrator` run has reached its own
+  terminal review state and the campaign has recorded its terminal walkback
+  handoff state.
 
 ## When to use it
 
@@ -249,11 +256,16 @@ Emit a discovery packet that follows the orchestrator packet contract in:
 Validate the packet with the orchestrator helper before handoff.
 
 Then hand the campaign directly to `$review-orchestrator` in packet-driven
-exploration mode. The user should not need to manually chain the next skill.
+exploration mode in the same workflow turn. The user should not need to
+manually chain the next skill, and packet emission alone is not a successful
+stop point.
 
 ### 8. End with a real terminal record
 
 Every non-aborted run must end with an explicit terminal record after handoff.
+`handoff_emitted` is not terminal by itself; the downstream
+`$review-orchestrator` packet-driven run must have completed its own
+`final_review` before the seam-walk campaign may report completion.
 
 Do not leave a campaign with only intermediate records such as review,
 verification, or commit-like boundaries.
@@ -266,6 +278,9 @@ verification, or commit-like boundaries.
 - Do not allow standalone `$review-orchestrator` to run concurrently in the
   same worktree; only the orchestrator phase launched from this campaign may
   proceed while the campaign is active.
+- Do not end after discovery-packet emission alone. Start the packet-driven
+  `$review-orchestrator` exploration phase, wait for its terminal review
+  record, or report a real blocking failure.
 - Do not let candidate families become final family truth locally; the
   orchestrator validates them against the family ledger and assigns final family
   grouping.

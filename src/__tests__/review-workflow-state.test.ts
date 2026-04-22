@@ -301,8 +301,8 @@ test("seam walkback helper blocks concurrent campaigns and clears after terminal
         skill: "seam-walkback-review",
         phase: "final_walkback",
         worktree_root: tempDir,
-        outcome_summary: "Discovery packet handed off to the coordinator and the campaign ended cleanly.",
-        terminal_state: "handoff-completed"
+        outcome_summary: "No actionable commit groups remained after archaeology.",
+        terminal_state: "blocked"
       },
       null,
       2
@@ -318,7 +318,8 @@ test("seam walkback helper blocks concurrent campaigns and clears after terminal
     terminalRecord
   ]);
   assert.equal(terminalAppend.exitCode, 0);
-  const terminalJson = terminalAppend.json as { active_campaign_cleared: boolean };
+  const terminalJson = terminalAppend.json as { active_campaign_cleared: boolean; status: string };
+  assert.equal(terminalJson.status, "ok");
   assert.equal(terminalJson.active_campaign_cleared, true);
 
   const fresh = await runPythonJson(seamWalkbackStateScript, [
@@ -1552,6 +1553,71 @@ test("orchestrator packet mode validates discovery packets and respects the acti
   assert.equal(packetModeJson.campaign_id, seamInitJson.run_id);
   assert.equal(packetModeJson.run_id, "review-orchestrator-packet-20260420T120000Z");
 
+  const prematureFinalWalkbackPath = join(tempDir, "premature-final-walkback.json");
+  await writeFile(
+    prematureFinalWalkbackPath,
+    JSON.stringify(
+      {
+        run_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-20T12:25:00Z",
+        skill: "seam-walkback-review",
+        phase: "final_walkback",
+        worktree_root: tempDir,
+        outcome_summary: "The packet is ready and the campaign completed cleanly.",
+        terminal_state: "handoff-completed"
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const prematureFinalWalkback = await runPythonJson(seamWalkbackStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, seamInitJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    prematureFinalWalkbackPath
+  ]);
+  assert.equal(prematureFinalWalkback.exitCode, 2);
+  assert.deepEqual(prematureFinalWalkback.json, {
+    active_campaign_cleared: false,
+    appended: false,
+    reason: "downstream-review-not-complete",
+    status: "error",
+    trace_file: join(tempDir, traceRoot, seamInitJson.run_id, "coordinator.jsonl")
+  });
+
+  const finalReviewPath = join(tempDir, "packet-final-review.json");
+  await writeFile(
+    finalReviewPath,
+    JSON.stringify(
+      {
+        run_id: packetModeJson.run_id,
+        campaign_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-20T12:28:00Z",
+        skill: "review-orchestrator",
+        mode: "packet-exploration",
+        phase: "final_review",
+        review_target: { mode: "branch", scope_summary: "test" },
+        final_verdict: "REQUEST_CHANGES",
+        review_shape_trace_summary: { mode: "packet-exploration" },
+        unexplored_area_ledger_summary: { areas: [] },
+        boundedness_exceptions_summary: { exceptions: [] }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const finalReview = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    finalReviewPath
+  ]);
+  assert.equal(finalReview.exitCode, 0);
+
   const finalWalkbackPath = join(tempDir, "final-walkback.json");
   await writeFile(
     finalWalkbackPath,
@@ -1570,13 +1636,21 @@ test("orchestrator packet mode validates discovery packets and respects the acti
     ),
     "utf8"
   );
-  await runPythonJson(seamWalkbackStateScript, [
+  const completedWalkback = await runPythonJson(seamWalkbackStateScript, [
     "append-trace",
     "--trace-file",
     join(tempDir, traceRoot, seamInitJson.run_id, "coordinator.jsonl"),
     "--record-file",
     finalWalkbackPath
   ]);
+  assert.equal(completedWalkback.exitCode, 0);
+  assert.deepEqual(completedWalkback.json, {
+    active_campaign_cleared: true,
+    active_campaign_update: null,
+    appended: true,
+    status: "ok",
+    trace_file: join(tempDir, traceRoot, seamInitJson.run_id, "coordinator.jsonl")
+  });
 
   const standaloneAfterTerminal = await runPythonJson(returnReviewStateScript, [
     "init-trace",

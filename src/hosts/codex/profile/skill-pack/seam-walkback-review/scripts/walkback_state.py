@@ -399,14 +399,38 @@ def append_trace(args: argparse.Namespace) -> int:
     if errors:
         print(json.dumps({"trace_file": str(trace_file), "appended": False, "errors": errors}, indent=2, sort_keys=True))
         return 1
-    with trace_file.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
 
     phase = str(record.get("phase") or "")
     run_id = str(record.get("run_id") or "")
     trace_root = trace_file.parent.parent
     active_update = None
     active_cleared = False
+    if phase == "final_walkback":
+        active = load_active_campaign(trace_root)
+        terminal_state = str(record.get("terminal_state") or "")
+        if terminal_state == "handoff-completed":
+            child_final_review_run_id = ""
+            if active and str(active.get("campaign_id") or "") == run_id:
+                child_final_review_run_id = str(active.get("child_final_review_run_id") or "")
+            if not child_final_review_run_id:
+                print(
+                    json.dumps(
+                        {
+                            "trace_file": str(trace_file),
+                            "appended": False,
+                            "status": "error",
+                            "reason": "downstream-review-not-complete",
+                            "active_campaign_cleared": False,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+
+    with trace_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
     if phase == "handoff_emitted":
         active = load_active_campaign(trace_root)
         if active and str(active.get("campaign_id") or "") == run_id:
@@ -418,12 +442,28 @@ def append_trace(args: argparse.Namespace) -> int:
             active_update = "handoff-emitted"
     elif phase == "final_walkback":
         active_cleared = clear_active_campaign(trace_root, run_id)
+        if not active_cleared:
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": True,
+                        "status": "error",
+                        "reason": "active-campaign-not-cleared",
+                        "active_campaign_cleared": False,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
 
     print(
         json.dumps(
             {
                 "trace_file": str(trace_file),
                 "appended": True,
+                "status": "ok",
                 "active_campaign_update": active_update,
                 "active_campaign_cleared": active_cleared,
             },
