@@ -64,6 +64,8 @@ Responsibilities:
 - event log
 - snapshots
 - atomic writes
+- persistence-owned mutation handles that decide append vs
+  snapshot-fallback writes
 - schema stability and ownership in later phases
 
 Must not define workflow or adapter policy.
@@ -183,8 +185,8 @@ Responsibilities:
   attachment/claim mutation rules
 - own one dedicated runtime mutation facility for attachment/claim
   lifecycle transitions used by launch, reclaim, and recovery
-- persist recovery-side mutations when operator commands reconcile
-  durable state through that shared lifecycle facility
+- persist recovery-side mutations only through persistence-owned write
+  handles or APIs rather than raw fallback-policy flags
 
 Must remain thin.
 

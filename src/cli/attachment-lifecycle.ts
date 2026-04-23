@@ -14,13 +14,13 @@ import type {
   RuntimeAuthorityProvenance,
   RuntimeProjection
 } from "../core/types.js";
-import { RuntimeStore } from "../persistence/store.js";
+import type { ProjectionPersistenceHandle } from "../persistence/projection-recovery.js";
+import type { RuntimeStore } from "../persistence/store.js";
 import { nowIso } from "../utils/time.js";
 
 import { getActiveClaimForAssignment } from "../projections/attachment-claim-queries.js";
 import { buildRetryRuntimeStatus } from "../recovery/runtime-status.js";
 import { cleanupHostRunArtifactsWithLeaseVerification } from "./host-run-cleanup.js";
-import { persistProjectionEvents, type ProjectionWriteOptions } from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
 import { diagnosticsFromWarning } from "./runtime-state.js";
 
@@ -152,11 +152,10 @@ function buildTerminalAttachmentClaimPatch(
 }
 
 async function updateAttachmentState(
-  store: RuntimeStore,
   projection: RuntimeProjection,
   attachmentId: string,
   patch: Partial<RuntimeAttachment>,
-  options: ProjectionWriteOptions | undefined,
+  persistence: ProjectionPersistenceHandle,
   activation?: {
     kind: "launch" | "resume";
     attachmentId: string;
@@ -198,7 +197,7 @@ async function updateAttachmentState(
       payload: activation
     });
   }
-  return (await persistProjectionEvents(store, projection, events, options)).projection;
+  return (await persistence.persistEvents(events)).projection;
 }
 
 function buildRecoveredAuthorityRepairEvents(
@@ -337,17 +336,14 @@ export const AttachmentLifecycleService = {
   },
 
   async persistAttachmentAuthority(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachment: RuntimeAttachment,
     claim: AssignmentClaim,
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     return (
-      await persistProjectionEvents(
-        store,
-        projection,
+      await persistence.persistEvents(
         [
           {
             eventId: randomUUID(),
@@ -363,14 +359,12 @@ export const AttachmentLifecycleService = {
             type: "claim.created",
             payload: { claim }
           }
-        ],
-        options
+        ]
       )
     ).projection;
   },
 
   async transitionAttachmentClaim(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachmentId: string,
     claimId: string,
@@ -378,13 +372,11 @@ export const AttachmentLifecycleService = {
       attachment: Partial<RuntimeAttachment>;
       claim: Partial<AssignmentClaim>;
     },
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     return (
-      await persistProjectionEvents(
-        store,
-        projection,
+      await persistence.persistEvents(
         [
           {
             eventId: randomUUID(),
@@ -406,17 +398,15 @@ export const AttachmentLifecycleService = {
               patch: patch.claim
             }
           }
-        ],
-        options
+        ]
       )
     ).projection;
   },
 
   async updateAttachmentToDetachedResumable(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachmentId: string,
-    options?: ProjectionWriteOptions,
+    persistence: ProjectionPersistenceHandle,
     detachedAt = nowIso(),
     repair?: {
       claimId?: string;
@@ -448,11 +438,10 @@ export const AttachmentLifecycleService = {
         }
       });
     }
-    return (await persistProjectionEvents(store, projection, events, options)).projection;
+    return (await persistence.persistEvents(events)).projection;
   },
 
   async releaseAttachmentClaim(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachmentId: string,
     claimId: string,
@@ -460,24 +449,22 @@ export const AttachmentLifecycleService = {
       attachment: string;
       claim: string;
     },
-    options?: ProjectionWriteOptions,
+    persistence: ProjectionPersistenceHandle,
     repair?: {
       provenanceKind?: RuntimeAuthorityProvenance["kind"];
     }
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     return AttachmentLifecycleService.transitionAttachmentClaim(
-      store,
       projection,
       attachmentId,
       claimId,
       buildTerminalAttachmentClaimPatch("released", reason, timestamp, repair?.provenanceKind),
-      options
+      persistence
     );
   },
 
   async orphanAttachmentClaim(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachmentId: string,
     claimId: string,
@@ -485,30 +472,28 @@ export const AttachmentLifecycleService = {
       attachment: string;
       claim: string;
     },
-    options?: ProjectionWriteOptions,
+    persistence: ProjectionPersistenceHandle,
     repair?: {
       provenanceKind?: RuntimeAuthorityProvenance["kind"];
     }
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     return AttachmentLifecycleService.transitionAttachmentClaim(
-      store,
       projection,
       attachmentId,
       claimId,
       buildTerminalAttachmentClaimPatch("orphaned", reason, timestamp, repair?.provenanceKind),
-      options
+      persistence
     );
   },
 
   async activateAttachmentSession(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachmentId: string,
     assignmentId: string,
     kind: "launch" | "resume",
     identity: HostSessionIdentity,
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     const existingAttachment = projection.attachments.get(attachmentId);
@@ -521,7 +506,6 @@ export const AttachmentLifecycleService = {
         : undefined;
 
     return updateAttachmentState(
-      store,
       projection,
       attachmentId,
       {
@@ -532,7 +516,7 @@ export const AttachmentLifecycleService = {
         provenance: buildAuthorityProvenance(kind),
         ...(adapterMetadata ? { adapterMetadata } : {})
       },
-      options,
+      persistence,
       {
         kind,
         attachmentId,
@@ -585,24 +569,20 @@ export const AttachmentLifecycleService = {
   },
 
   async requeueAssignmentForRetry(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     assignmentId: string,
     objective: string,
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     return (
-      await persistProjectionEvents(
-        store,
-        projection,
+      await persistence.persistEvents(
         AttachmentLifecycleService.buildRequeueAssignmentEvents(
           projection,
           assignmentId,
           objective,
           timestamp
-        ),
-        options
+        )
       )
     ).projection;
   },
@@ -614,7 +594,7 @@ export const AttachmentLifecycleService = {
     attachment: RuntimeAttachment,
     claim: AssignmentClaim,
     reason: string,
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<{
     projection: RuntimeProjection;
     diagnostics: CommandDiagnostic[];
@@ -626,13 +606,13 @@ export const AttachmentLifecycleService = {
       projection,
       attachment,
       claim,
-      reason,
-      {
-        ...(assignment ? { requeueObjective: assignment.objective } : {}),
-        provenanceKind: "resume"
-      },
-      options
-    );
+        reason,
+        {
+          ...(assignment ? { requeueObjective: assignment.objective } : {}),
+          provenanceKind: "resume"
+        },
+        persistence
+      );
     return {
       projection: orphaned.projection,
       diagnostics: diagnosticsFromWarning(orphaned.cleanupWarning, "host-run-persist-failed")
@@ -654,7 +634,7 @@ export const AttachmentLifecycleService = {
           provenanceKind?: RuntimeAuthorityProvenance["kind"];
         }
       | undefined,
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<{
     projection: RuntimeProjection;
     cleanupWarning?: string;
@@ -671,7 +651,6 @@ export const AttachmentLifecycleService = {
         )
       : undefined;
     let effectiveProjection = await AttachmentLifecycleService.orphanAttachmentClaim(
-      store,
       projection,
       attachment.id,
       claim.id,
@@ -679,7 +658,7 @@ export const AttachmentLifecycleService = {
         attachment: reason,
         claim: reason
       },
-      options,
+      persistence,
       cleanup?.provenanceKind ? { provenanceKind: cleanup.provenanceKind } : undefined
     );
     const cleanupAfterError = cleanupBefore
@@ -693,11 +672,10 @@ export const AttachmentLifecycleService = {
         );
     if (typeof cleanup?.requeueObjective === "string" && cleanup.requeueObjective.length > 0) {
       effectiveProjection = await AttachmentLifecycleService.requeueAssignmentForRetry(
-        store,
         effectiveProjection,
         claim.assignmentId,
         cleanup.requeueObjective,
-        options
+        persistence
       );
     }
     const effectiveCleanupWarning = cleanupError ?? cleanupAfterError;
@@ -724,18 +702,17 @@ export const AttachmentLifecycleService = {
           provenanceKind?: RuntimeAuthorityProvenance["kind"];
         }
       | undefined,
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<{
     projection: RuntimeProjection;
     cleanupWarning?: string;
   }> {
     const releasedProjection = await AttachmentLifecycleService.releaseAttachmentClaim(
-      store,
       projection,
       attachment.id,
       claim.id,
       releaseReason,
-      options,
+      persistence,
       cleanup?.provenanceKind ? { provenanceKind: cleanup.provenanceKind } : undefined
     );
     const cleanupWarning = await cleanupHostRunArtifactsWarning(
@@ -868,14 +845,13 @@ export const AttachmentLifecycleService = {
   },
 
   async finalizeAttachmentAuthority(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachmentId: string,
     claimId: string,
     execution: Pick<HostExecutionOutcome, "outcome" | "run">,
     provenanceKind: "launch" | "resume" | "recovery",
     verifiedNativeSessionId: string | undefined,
-    options?: ProjectionWriteOptions,
+    persistence: ProjectionPersistenceHandle,
     detachedAt?: string
   ): Promise<RuntimeProjection> {
     const claim = projection.claims.get(claimId);
@@ -915,7 +891,7 @@ export const AttachmentLifecycleService = {
     if (finalizationEvents.length === 0) {
       return projection;
     }
-    return (await persistProjectionEvents(store, projection, finalizationEvents, options)).projection;
+    return (await persistence.persistEvents(finalizationEvents)).projection;
   },
 
   buildCompletedAuthorityRepairEvents(
@@ -974,18 +950,16 @@ export const AttachmentLifecycleService = {
   },
 
   async promoteProvisionalAttachment(
-    store: RuntimeStore,
     projection: RuntimeProjection,
     attachmentId: string,
     claimId: string,
     nativeSessionId: string,
     adapterData: Record<string, unknown> | undefined,
-    options?: ProjectionWriteOptions
+    persistence: ProjectionPersistenceHandle
   ): Promise<RuntimeProjection> {
     const timestamp = nowIso();
     const adapterMetadata = sanitizeAttachmentAdapterMetadata(adapterData);
     return AttachmentLifecycleService.transitionAttachmentClaim(
-      store,
       projection,
       attachmentId,
       claimId,
@@ -997,7 +971,7 @@ export const AttachmentLifecycleService = {
         }),
         claim: buildClaimProvenancePatch("recovery", timestamp)
       },
-      options
+      persistence
     );
   }
 };

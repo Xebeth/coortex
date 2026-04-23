@@ -420,6 +420,9 @@ truth is authoritative:
 4. snapshot-only writes must preserve the latest durable `lastEventId`
    boundary from `snapshot.json`; they must not mint a newer replay
    boundary that does not exist in `events.ndjson`
+5. callers must use one persistence-owned mutation API or handle for
+   snapshot-fallback writes instead of threading raw fallback-policy
+   flags through command, lifecycle, or reconciliation code
 
 Snapshot-fallback durability must behave like one coherent state-machine
 transition, not a sequence of unrelated local rewrites.

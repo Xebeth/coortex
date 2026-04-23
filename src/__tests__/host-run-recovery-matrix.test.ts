@@ -730,7 +730,6 @@ test("host-run command matrix preserves duplicate-run protection", async (t) => 
         );
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
         const reconciled = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
 
         assert.deepEqual(reconciled.hiddenActiveLeases, [hiddenAssignmentId]);
@@ -1145,11 +1144,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         await corruptSnapshotBoundary(ctx.store);
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
         const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
 
         assert.equal(result.projection.assignments.has(hiddenAssignmentId), false);
@@ -1210,11 +1206,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         await corruptSnapshotBoundary(ctx.store);
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
         const repairedSnapshot = await ctx.store.loadSnapshot();
         const inspected = await ctx.adapter.inspectRun(ctx.store, degradedAssignmentId);
 
@@ -1243,11 +1236,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         await corruptSnapshotBoundary(ctx.store);
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
         const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
         const snapshot = await ctx.store.loadSnapshot();
 
@@ -1284,12 +1274,9 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         };
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
         await assert.rejects(
-          reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-            snapshotFallback: loaded.snapshotFallback
-          }),
+          reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection),
           /Host run reconciliation failed to clear the active lease for assignment/
         );
         assert.equal(
@@ -1298,9 +1285,7 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         );
 
         const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
-          snapshotFallback: retried.snapshotFallback
-        });
+        const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection);
         const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
 
         assert.equal(recovered.projection.assignments.has(hiddenAssignmentId), false);
@@ -1338,11 +1323,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         };
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
         const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
 
         assert.equal(result.projection.assignments.has(hiddenAssignmentId), false);
@@ -1372,11 +1354,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         await corruptSnapshotBoundary(ctx.store);
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
         const snapshot = await ctx.store.loadSnapshot();
 
         assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "queued");
@@ -1410,11 +1389,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         await corruptSnapshotBoundary(ctx.store);
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
         const inspected = await ctx.adapter.inspectRun(ctx.store, hiddenAssignmentId);
 
         assert.equal(result.projection.assignments.has(hiddenAssignmentId), false);
@@ -1456,11 +1432,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         await corruptSnapshotBoundary(ctx.store);
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
         const snapshot = await ctx.store.loadSnapshot();
 
         assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "completed");
@@ -1555,11 +1528,8 @@ test("host-run command matrix reconciles operator-visible runtime truth", async 
         });
 
         const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-        assert.equal(loaded.snapshotFallback, true);
 
-        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-          snapshotFallback: loaded.snapshotFallback
-        });
+        const result = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
 
         assert.equal(result.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
         assert.equal(result.projection.decisions.size, 1);
@@ -2259,8 +2229,6 @@ test("host-run command matrix treats a snapshot-fallback stale retry as a new st
 
   const reconciled = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
   const telemetry = await ctx.store.loadTelemetry();
-
-  assert.equal(reconciled.snapshotFallback, true);
   assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(
     reconciled.projection.assignments.get(ctx.assignmentId)?.lastStaleRunInstanceId,
@@ -2761,9 +2729,7 @@ test("host-run recovery matrix keeps a stale snapshot-fallback projection runnab
   const reconciled = await reconcileActiveRuns(
     ctx.store,
     ctx.adapter,
-    staleProjection,
-    { snapshotFallback: true }
-  );
+    staleProjection);
   const prepared = await prepareResumeRuntime(ctx.store, ctx.adapter);
 
   assert.equal(reconciled.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
@@ -2887,11 +2853,8 @@ test("host-run recovery matrix uses snapshot truth when stale recovery lines bec
   await writeFile(ctx.store.eventsPath, `${eventLines.join("\n")}\n`, "utf8");
 
   const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-  assert.equal(loaded.snapshotFallback, true);
 
-  const retried = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-    snapshotFallback: loaded.snapshotFallback
-  });
+  const retried = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
   const replayable = await ctx.store.loadReplayableEvents();
   const replayableQueuedTransitionCount = replayable.events.filter(
     (event) =>
@@ -3644,11 +3607,8 @@ test("host-run recovery matrix flushes completed-decision snapshot before cleanu
   };
 
   const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
-  assert.equal(retried.snapshotFallback, false);
 
-  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
-    snapshotFallback: retried.snapshotFallback
-  });
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection);
   const snapshot = await ctx.store.loadSnapshot();
   const recoveredDecisionCount = await countRecoveredOutcomeEvents(
     ctx.store,
@@ -3710,12 +3670,9 @@ test("host-run recovery matrix retries snapshot-fallback completed-run repair wi
   };
 
   const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-  assert.equal(loaded.snapshotFallback, true);
 
   await assert.rejects(
-    reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-      snapshotFallback: loaded.snapshotFallback
-    }),
+    reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection),
     /simulated snapshot write failure/
   );
 
@@ -3724,9 +3681,7 @@ test("host-run recovery matrix retries snapshot-fallback completed-run repair wi
   }).writeSnapshot = originalWriteSnapshot;
 
   const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
-  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
-    snapshotFallback: retried.snapshotFallback
-  });
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection);
   const recoveredEventCount = await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "result.submitted");
 
   assert.equal(recoveredEventCount, 0);
@@ -3901,11 +3856,8 @@ test("host-run recovery matrix replays completed results when snapshot-boundary 
   await corruptSnapshotBoundary(ctx.store);
 
   const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
-  assert.equal(loaded.snapshotFallback, true);
 
-  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection, {
-    snapshotFallback: loaded.snapshotFallback
-  });
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
   const repairedSnapshot = await ctx.store.loadSnapshot();
 
   assert.equal(recovered.projection.results.size, 1);
@@ -3965,11 +3917,8 @@ test("host-run recovery matrix repairs stale snapshot before cleanup on retry wh
   };
 
   const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
-  assert.equal(retried.snapshotFallback, false);
 
-  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
-    snapshotFallback: retried.snapshotFallback
-  });
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection);
   const snapshot = await ctx.store.loadSnapshot();
 
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "queued");
@@ -3997,9 +3946,7 @@ test("host-run recovery matrix retries malformed lease cleanup without duplicati
     /Host run reconciliation failed to clear the active lease for assignment/
   );
   const retried = await loadOperatorProjectionWithDiagnostics(ctx.store);
-  const secondRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection, {
-    snapshotFallback: retried.snapshotFallback
-  });
+  const secondRecovery = await reconcileActiveRuns(ctx.store, ctx.adapter, retried.projection);
   const events = await ctx.store.loadEvents();
   const queuedTransitionCount = events.filter(
     (event) =>

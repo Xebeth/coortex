@@ -22,7 +22,8 @@ import {
   selectSingleResumableAttachmentClaim
 } from "../projections/attachment-claim-queries.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
-import { RuntimeStore } from "../persistence/store.js";
+import type { ProjectionPersistenceHandle } from "../persistence/projection-recovery.js";
+import type { RuntimeStore } from "../persistence/store.js";
 import { recordNormalizedTelemetry } from "../telemetry/recorder.js";
 import { nowIso } from "../utils/time.js";
 import type { CommandDiagnostic } from "./types.js";
@@ -37,7 +38,6 @@ import {
   recoverCompletedWrappedExecution,
   synthesizeRecoveredExecutionFromReconciliation,
 } from "./run-operations.js";
-import type { ProjectionWriteOptions } from "./projection-write.js";
 import {
   loadReconciledProjectionWithDiagnostics,
   reconcileActiveRuns
@@ -391,7 +391,7 @@ async function recoverReclaimedResumeResult(
   attachmentId: string,
   claimId: string,
   verifiedSessionId: string | undefined,
-  options: ProjectionWriteOptions,
+  persistence: ProjectionPersistenceHandle,
   warningPrefix: string,
   stoppedAt: string | undefined,
   buildPreparedResult: (
@@ -410,7 +410,7 @@ async function recoverReclaimedResumeResult(
     attachmentId,
     claimId,
     verifiedSessionId,
-    options,
+    persistence,
     warningPrefix,
     stoppedAt
   );
@@ -458,9 +458,6 @@ export async function resumeRuntime(
     reconciled.activeLeases,
     resumableClaims
   );
-  const resumeWriteOptions = {
-    snapshotFallback: reconciled.snapshotFallback
-  } satisfies ProjectionWriteOptions;
   const buildPreparedResult = async (
     projection: Awaited<ReturnType<typeof loadOperatorProjection>>
   ): Promise<ResumeRuntimeResult> => {
@@ -546,19 +543,17 @@ export async function resumeRuntime(
         {
           onSessionIdentity: async (identity) => {
             effectiveProjection = await markAssignmentInProgress(
-              store,
               effectiveProjection,
               assignment.id,
-              resumeWriteOptions
+              reconciled.persistence
             );
             effectiveProjection = await AttachmentLifecycleService.activateAttachmentSession(
-              store,
               effectiveProjection,
               target.attachment.id,
               assignment.id,
               "resume",
               identity,
-              resumeWriteOptions
+              reconciled.persistence
             );
           }
         }
@@ -574,7 +569,7 @@ export async function resumeRuntime(
         target.attachment,
         target.claim,
         `Wrapped same-session resume failed. ${error instanceof Error ? error.message : String(error)}`,
-        resumeWriteOptions
+        reconciled.persistence
       );
       diagnostics.push(...failedResume.diagnostics);
       return await buildPreparedResult(failedResume.projection);
@@ -599,7 +594,7 @@ export async function resumeRuntime(
           target.attachment.id,
           target.claim.id,
           resumeResult.verifiedSessionId,
-          resumeWriteOptions,
+          reconciled.persistence,
           `Wrapped same-session resume verified the requested session but runtime persistence did not complete cleanly. ${
             resumeResult.warning ?? "No durable host completion could be recovered."
           }`,
@@ -619,7 +614,7 @@ export async function resumeRuntime(
           target.attachment,
           target.claim,
           resumeResult.warning ?? "Wrapped same-session resume failed.",
-          resumeWriteOptions
+          reconciled.persistence
         );
         diagnostics.push(...failedResume.diagnostics);
         return await buildPreparedResult(failedResume.projection);
@@ -646,19 +641,17 @@ export async function resumeRuntime(
     );
     try {
       const persistedOutcome = await persistWrappedExecutionOutcome(
-        store,
         effectiveProjection,
         {
           outcome: reclaimedResume.outcome,
           run: reclaimedResume.run
         },
         adapter,
-        resumeWriteOptions
+        reconciled.persistence
       );
       effectiveProjection = persistedOutcome.projection;
       diagnostics.push(...persistedOutcome.diagnostics);
       effectiveProjection = await AttachmentLifecycleService.finalizeAttachmentAuthority(
-        store,
         effectiveProjection,
         target.attachment.id,
         target.claim.id,
@@ -668,7 +661,7 @@ export async function resumeRuntime(
         },
         "resume",
         reclaimedResume.verifiedSessionId,
-        resumeWriteOptions,
+        reconciled.persistence,
         reclaimedResume.stoppedAt
       );
     } catch (error) {
@@ -680,7 +673,7 @@ export async function resumeRuntime(
         target.attachment.id,
         target.claim.id,
         reclaimedResume.verifiedSessionId,
-        resumeWriteOptions,
+        reconciled.persistence,
         `Runtime event persistence was interrupted after wrapped same-session resume completed durably. ${
           error instanceof Error ? error.message : String(error)
         }`,
@@ -725,15 +718,11 @@ export async function runRuntime(
   const reconciled = await reconcileActiveRuns(
     store,
     adapter,
-    projectionBeforeResult.projection,
-    { snapshotFallback: projectionBeforeResult.snapshotFallback }
+    projectionBeforeResult.projection
   );
   projectionBeforeResult.diagnostics.push(...reconciled.diagnostics);
   let projectionBefore = reconciled.projection;
   const diagnostics: CommandDiagnostic[] = [...projectionBeforeResult.diagnostics];
-  const launchWriteOptions = {
-    snapshotFallback: projectionBeforeResult.snapshotFallback
-  } satisfies ProjectionWriteOptions;
   const unmatchedActiveLeases = listUnmatchedActiveLeases(
     reconciled.activeLeases,
     listAuthoritativeAttachmentClaims(projectionBefore)
@@ -775,11 +764,10 @@ export async function runRuntime(
     let authorityPersisted = false;
     try {
       projectionBefore = await AttachmentLifecycleService.persistAttachmentAuthority(
-        store,
         projectionBefore,
         launchAuthority.attachment,
         launchAuthority.claim,
-        launchWriteOptions
+        reconciled.persistence
       );
       authorityPersisted = true;
     } catch (error) {
@@ -804,10 +792,9 @@ export async function runRuntime(
       const brief = buildRecoveryBrief(envelopeProjection);
       envelope = await adapter.buildResumeEnvelope(store, envelopeProjection, brief);
       launchedProjection = await markAssignmentInProgress(
-        store,
         projectionBefore,
         assignment.id,
-        launchWriteOptions
+        reconciled.persistence
       );
 
       const startedTelemetry = await recordNormalizedTelemetry(
@@ -830,35 +817,32 @@ export async function runRuntime(
         onSessionIdentity: async (identity) => {
           verifiedNativeSessionId = identity.nativeSessionId;
           launchedProjection = await AttachmentLifecycleService.activateAttachmentSession(
-            store,
             launchedProjection ?? projectionBefore,
             launchAuthority.attachment.id,
             assignment.id,
             "launch",
             identity,
-            launchWriteOptions
+            reconciled.persistence
           );
         }
       });
       diagnostics.push(...diagnosticsFromWarning(execution.warning, "host-run-persist-failed"));
       const persistedOutcome = await persistWrappedExecutionOutcome(
-        store,
         launchedProjection,
         execution,
         adapter,
-        launchWriteOptions
+        reconciled.persistence
       );
       let projectionAfter = persistedOutcome.projection;
       diagnostics.push(...persistedOutcome.diagnostics);
       projectionAfter = await AttachmentLifecycleService.finalizeAttachmentAuthority(
-        store,
         projectionAfter,
         launchAuthority.attachment.id,
         launchAuthority.claim.id,
         execution,
         "launch",
         verifiedNativeSessionId,
-        launchWriteOptions
+        reconciled.persistence
       );
 
       if (execution.telemetry) {
@@ -885,7 +869,6 @@ export async function runRuntime(
         await adapter.releaseRunLease(store, assignment.id, claimedRun);
         if (authorityPersisted) {
           projectionBefore = await AttachmentLifecycleService.releaseAttachmentClaim(
-            store,
             projectionBefore,
             launchAuthority.attachment.id,
             launchAuthority.claim.id,
@@ -895,7 +878,7 @@ export async function runRuntime(
               }`,
               claim: "Wrapped launch did not begin."
             },
-            launchWriteOptions
+            reconciled.persistence
           );
         }
       } else if (launchedProjection && envelope) {
@@ -907,7 +890,7 @@ export async function runRuntime(
           launchAuthority.attachment.id,
           launchAuthority.claim.id,
           verifiedNativeSessionId,
-          launchWriteOptions,
+          reconciled.persistence,
           `Runtime event persistence was interrupted after the host run completed durably. ${
             error instanceof Error ? error.message : String(error)
           }`
@@ -931,7 +914,6 @@ export async function runRuntime(
           launchedProjection = recoveredExecution.projection;
         } else {
           launchedProjection = await AttachmentLifecycleService.releaseAttachmentClaim(
-            store,
             launchedProjection,
             launchAuthority.attachment.id,
             launchAuthority.claim.id,
@@ -941,7 +923,7 @@ export async function runRuntime(
               }`,
               claim: "Wrapped launch ended before identity finalization."
             },
-            launchWriteOptions
+            reconciled.persistence
           );
         }
       }

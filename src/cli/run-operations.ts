@@ -21,21 +21,18 @@ import {
   findLatestOpenAssignmentDecision,
   findLatestTerminalAssignmentResult
 } from "../projections/assignment-outcome-queries.js";
+import { applyRuntimeEventsToProjection } from "../projections/runtime-projection.js";
 import { selectRunnableProjection } from "../recovery/host-runs.js";
 import { loadReconciledProjectionWithDiagnostics } from "./run-reconciliation.js";
 import { nowIso } from "../utils/time.js";
-import { RuntimeStore } from "../persistence/store.js";
+import type { ProjectionPersistenceHandle } from "../persistence/projection-recovery.js";
+import type { RuntimeStore } from "../persistence/store.js";
 import { buildRecoveryBrief } from "../recovery/brief.js";
 
 import { AttachmentLifecycleService } from "./attachment-lifecycle.js";
 import {
   cleanupHostRunArtifactsWithLeaseVerification
 } from "./host-run-cleanup.js";
-import {
-  applyRuntimeEventsToProjection,
-  persistProjectionEvents,
-  type ProjectionWriteOptions
-} from "./projection-write.js";
 import type { CommandDiagnostic } from "./types.js";
 import { buildNextRuntimeStatus } from "../recovery/runtime-status.js";
 import { diagnosticsFromWarning, loadOperatorProjection } from "./runtime-state.js";
@@ -58,12 +55,9 @@ export interface RecoveredExecutionFromReconciliation {
 }
 
 export async function markAssignmentInProgress(
-  store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   assignmentId: string,
-  options?: {
-    snapshotFallback?: boolean;
-  }
+  persistence: ProjectionPersistenceHandle
 ): Promise<Awaited<ReturnType<typeof loadOperatorProjection>>> {
   const assignment = projection.assignments.get(assignmentId);
   if (!assignment || assignment.state === "in_progress") {
@@ -102,30 +96,20 @@ export async function markAssignmentInProgress(
       }
     });
   }
-  if (!options?.snapshotFallback) {
-    await store.appendEvents(events);
-    return (await store.syncSnapshotFromEventsWithRecovery()).projection;
-  }
-  return store.mutateSnapshotProjection((latestProjection) =>
-    applyRuntimeEventsToProjection(latestProjection, events)
-  );
+  return (await persistence.persistEvents(events)).projection;
 }
 
 export async function persistWrappedExecutionOutcome(
-  store: RuntimeStore,
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>,
   execution: Pick<HostExecutionOutcome, "outcome" | "run">,
   adapter: HostAdapter,
-  options?: ProjectionWriteOptions
+  persistence: ProjectionPersistenceHandle
 ): Promise<{
   projection: Awaited<ReturnType<typeof loadOperatorProjection>>;
   diagnostics: CommandDiagnostic[];
 }> {
-  const projectionAfterResult = await persistProjectionEvents(
-    store,
-    projection,
-    buildOutcomeEvents(projection, execution, adapter),
-    options
+  const projectionAfterResult = await persistence.persistEvents(
+    buildOutcomeEvents(projection, execution, adapter)
   );
   return {
     projection: projectionAfterResult.projection,
@@ -163,7 +147,7 @@ export async function recoverCompletedWrappedExecution(
   attachmentId: string,
   claimId: string,
   verifiedNativeSessionId: string | undefined,
-  options: ProjectionWriteOptions,
+  persistence: ProjectionPersistenceHandle,
   warningPrefix: string,
   stoppedAt?: string
 ): Promise<WrappedExecutionRecoveryResult> {
@@ -173,16 +157,13 @@ export async function recoverCompletedWrappedExecution(
   if (recoveredExecution) {
     const recovered = await loadReconciledProjectionWithDiagnostics(store, adapter);
     const projectionAfter = await AttachmentLifecycleService.finalizeAttachmentAuthority(
-      store,
       recovered.projection,
       attachmentId,
       claimId,
       recoveredExecution,
       "recovery",
       verifiedNativeSessionId,
-      {
-        snapshotFallback: recovered.snapshotFallback
-      },
+      recovered.persistence,
       stoppedAt
     );
     return {
@@ -207,10 +188,9 @@ export async function recoverCompletedWrappedExecution(
       "host-run-persist-failed"
     );
     const detachedProjection = await AttachmentLifecycleService.updateAttachmentToDetachedResumable(
-      store,
       projection,
       attachmentId,
-      options,
+      persistence,
       stoppedAt,
       {
         claimId,

@@ -19,9 +19,9 @@ import {
 import { fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import {
   ProjectionRecoveryService,
-  selectReplayableSuffixEvents
+  type ProjectionPersistenceHandle
 } from "../persistence/projection-recovery.js";
-import { RuntimeStore } from "../persistence/store.js";
+import type { RuntimeStore } from "../persistence/store.js";
 import { buildStaleRunReconciliation, createActiveRunDiagnostic } from "../recovery/host-runs.js";
 import {
   buildCompletedRunReconciliation,
@@ -39,10 +39,6 @@ import {
 } from "./host-run-cleanup.js";
 import type { CommandDiagnostic } from "./types.js";
 import { loadOperatorProjectionWithDiagnostics } from "./runtime-state.js";
-
-type ProjectionWriteOptions = {
-  snapshotFallback?: boolean;
-};
 
 export interface RunReconciliationDiagnostic {
   level: "warning";
@@ -62,10 +58,7 @@ export interface RunReconciliationResult {
   projection: RuntimeProjection;
   diagnostics: RunReconciliationDiagnostic[];
   activeLeases: string[];
-}
-
-export interface RunReconciliationOptions {
-  snapshotFallback?: boolean;
+  persistence: ProjectionPersistenceHandle;
 }
 
 interface RunReconciliationContext {
@@ -81,12 +74,6 @@ interface CompletedRunReconciliationResult {
   replayableHydrated: boolean;
 }
 
-interface RecoveryProjectionOptions {
-  snapshotFallback: boolean;
-  replayableEvents: RuntimeEvent[] | undefined;
-  snapshotBoundaryEventId: string | undefined;
-}
-
 export class RunReconciliationService {
   private readonly projectionRecovery: ProjectionRecoveryService;
 
@@ -98,8 +85,7 @@ export class RunReconciliationService {
   }
 
   async reconcileActiveRuns(
-    projection: RuntimeProjection,
-    options?: RunReconciliationOptions
+    projection: RuntimeProjection
   ): Promise<RunReconciliationResult> {
     return reconcileActiveRunsInContext(
       {
@@ -107,8 +93,7 @@ export class RunReconciliationService {
         adapter: this.adapter,
         projectionRecovery: this.projectionRecovery
       },
-      projection,
-      options
+      projection
     );
   }
 }
@@ -123,10 +108,9 @@ function listHiddenActiveLeaseAssignments(
 export async function reconcileActiveRuns(
   store: RuntimeStore,
   adapter: HostAdapter,
-  projection: RuntimeProjection,
-  options?: RunReconciliationOptions
+  projection: RuntimeProjection
 ): Promise<RunReconciliationResult> {
-  return new RunReconciliationService(store, adapter).reconcileActiveRuns(projection, options);
+  return new RunReconciliationService(store, adapter).reconcileActiveRuns(projection);
 }
 
 export async function loadReconciledProjectionWithDiagnostics(
@@ -137,12 +121,10 @@ export async function loadReconciledProjectionWithDiagnostics(
   diagnostics: CommandDiagnostic[];
   activeLeases: string[];
   hiddenActiveLeases: string[];
-  snapshotFallback: boolean;
+  persistence: ProjectionPersistenceHandle;
 }> {
   const loaded = await loadOperatorProjectionWithDiagnostics(store);
-  const reconciled = await reconcileActiveRuns(store, adapter, loaded.projection, {
-    snapshotFallback: loaded.snapshotFallback
-  });
+  const reconciled = await reconcileActiveRuns(store, adapter, loaded.projection);
   const hiddenActiveLeases = listHiddenActiveLeaseAssignments(
     reconciled.projection,
     reconciled.activeLeases
@@ -152,24 +134,19 @@ export async function loadReconciledProjectionWithDiagnostics(
     diagnostics: [...loaded.diagnostics, ...reconciled.diagnostics],
     activeLeases: reconciled.activeLeases,
     hiddenActiveLeases,
-    snapshotFallback: loaded.snapshotFallback
+    persistence: reconciled.persistence
   };
 }
 
 async function reconcileActiveRunsInContext(
   context: RunReconciliationContext,
-  projection: RuntimeProjection,
-  options?: RunReconciliationOptions
+  projection: RuntimeProjection
 ): Promise<RunReconciliationResult> {
   const diagnostics: RunReconciliationDiagnostic[] = [];
-  const snapshotFallback = options?.snapshotFallback ?? false;
-  const snapshotBoundaryEventId = snapshotFallback ? (await context.store.loadSnapshot())?.lastEventId : undefined;
-  const replayableEvents = snapshotFallback
-    ? (await context.projectionRecovery.loadReplayableEvents()).events
-    : undefined;
+  const persistence = await context.projectionRecovery.createProjectionPersistenceHandle();
   let effectiveProjection = fromSnapshot(toSnapshot(projection));
   let changed = false;
-  let snapshotFallbackReplayHydrated = false;
+  let replayableHydrated = false;
   let handledCompletedRun = false;
   const runtimeKnownAssignmentIds = [...projection.assignments.keys()];
   const enumeratedRecords = await context.adapter.inspectRuns(context.store);
@@ -180,16 +157,12 @@ async function reconcileActiveRunsInContext(
     ...new Set([...runtimeKnownAssignmentIds, ...enumeratedRecordByAssignmentId.keys()])
   ];
 
-  const hydrateSnapshotFallbackReplayableSuffix = () => {
-    if (!snapshotFallback || snapshotFallbackReplayHydrated) {
+  const hydrateReplayableSuffix = () => {
+    if (replayableHydrated) {
       return;
     }
-    snapshotFallbackReplayHydrated = true;
-    const replayableHydration = context.projectionRecovery.hydrateProjectionFromReplayableEvents(
-      effectiveProjection,
-      replayableEvents,
-      snapshotBoundaryEventId
-    );
+    replayableHydrated = true;
+    const replayableHydration = persistence.hydrateProjection(effectiveProjection);
     if (replayableHydration.hydrated) {
       effectiveProjection = replayableHydration.projection;
       changed = true;
@@ -203,20 +176,14 @@ async function reconcileActiveRunsInContext(
       continue;
     }
 
-    if (snapshotFallback && isStaleRunReconciliationCandidate(record)) {
-      hydrateSnapshotFallbackReplayableSuffix();
+    if (isStaleRunReconciliationCandidate(record)) {
+      hydrateReplayableSuffix();
     }
 
-    if (
-      snapshotFallback &&
-      !effectiveProjection.assignments.has(assignmentId) &&
-      isStaleRunReconciliationCandidate(record)
-    ) {
-      const replayableHydration = context.projectionRecovery.hydrateMissingAssignmentFromReplayableEvents(
+    if (!effectiveProjection.assignments.has(assignmentId) && isStaleRunReconciliationCandidate(record)) {
+      const replayableHydration = persistence.hydrateMissingAssignment(
         effectiveProjection,
-        assignmentId,
-        replayableEvents,
-        snapshotBoundaryEventId
+        assignmentId
       );
       if (replayableHydration.hydrated) {
         effectiveProjection = replayableHydration.projection;
@@ -236,14 +203,12 @@ async function reconcileActiveRunsInContext(
         diagnostics,
         {
           cleanupRecord: record,
-          replayableEvents,
-          snapshotBoundaryEventId,
-          snapshotFallback
+          persistence
         }
       );
       effectiveProjection = completedRecovery.projection;
       changed ||= completedRecovery.changed;
-      snapshotFallbackReplayHydrated ||= completedRecovery.replayableHydrated;
+      replayableHydrated ||= completedRecovery.replayableHydrated;
       continue;
     }
 
@@ -266,11 +231,7 @@ async function reconcileActiveRunsInContext(
         assignmentId,
         record,
         diagnostics,
-        {
-          snapshotFallback,
-          replayableEvents,
-          snapshotBoundaryEventId
-        }
+        persistence
       );
       continue;
     }
@@ -283,16 +244,14 @@ async function reconcileActiveRunsInContext(
         diagnostics,
         {
           cleanupRecord: undefined,
-          replayableEvents,
-          snapshotBoundaryEventId,
-          snapshotFallback
+          persistence
         }
       );
       if (completedRecovery.handled) {
         handledCompletedRun = true;
         effectiveProjection = completedRecovery.projection;
         changed ||= completedRecovery.changed;
-        snapshotFallbackReplayHydrated ||= completedRecovery.replayableHydrated;
+        replayableHydrated ||= completedRecovery.replayableHydrated;
         continue;
       }
 
@@ -300,7 +259,7 @@ async function reconcileActiveRunsInContext(
     }
 
     if (!effectiveProjection.assignments.has(assignmentId)) {
-      if (!isLiveLeaseRecord(record) && snapshotFallback && isStaleRunReconciliationCandidate(record)) {
+      if (!isLiveLeaseRecord(record) && isStaleRunReconciliationCandidate(record)) {
         await reconcileOutOfProjectionStaleRun(
           context,
           effectiveProjection,
@@ -323,11 +282,7 @@ async function reconcileActiveRunsInContext(
       assignmentId,
       record,
       diagnostics,
-      {
-        snapshotFallback,
-        replayableEvents,
-        snapshotBoundaryEventId
-      }
+      persistence
     );
   }
 
@@ -345,14 +300,12 @@ async function reconcileActiveRunsInContext(
       diagnostics,
       {
         cleanupRecord: undefined,
-        replayableEvents,
-        snapshotBoundaryEventId,
-        snapshotFallback
+        persistence
       }
     );
     effectiveProjection = completedRecovery.projection;
     changed ||= completedRecovery.changed;
-    snapshotFallbackReplayHydrated ||= completedRecovery.replayableHydrated;
+    replayableHydrated ||= completedRecovery.replayableHydrated;
   }
 
   const reconciledRecordsBeforeProvisional = await context.adapter.inspectRuns(context.store);
@@ -361,7 +314,7 @@ async function reconcileActiveRunsInContext(
     effectiveProjection,
     diagnostics,
     new Map(reconciledRecordsBeforeProvisional.map((record) => [record.assignmentId, record] as const)),
-    { snapshotFallback }
+    persistence
   );
   effectiveProjection = provisionalReconciliation.projection;
   changed ||= provisionalReconciliation.changed;
@@ -375,7 +328,8 @@ async function reconcileActiveRunsInContext(
       ...diagnostics,
       ...finalLiveLeaseRecords.map((record) => createActiveRunDiagnostic(record.assignmentId, record))
     ],
-    activeLeases: finalActiveLeases
+    activeLeases: finalActiveLeases,
+    persistence
   };
 }
 
@@ -384,7 +338,7 @@ async function reconcileProvisionalAttachmentClaims(
   projection: RuntimeProjection,
   diagnostics: RunReconciliationDiagnostic[],
   recordByAssignmentId: Map<string, HostRunRecord>,
-  options?: ProjectionWriteOptions
+  persistence: ProjectionPersistenceHandle
 ): Promise<{
   projection: RuntimeProjection;
   changed: boolean;
@@ -402,13 +356,12 @@ async function reconcileProvisionalAttachmentClaims(
 
     if (hasLiveLease && liveNativeSessionId) {
       effectiveProjection = await AttachmentLifecycleService.promoteProvisionalAttachment(
-        context.store,
         effectiveProjection,
         attachment.id,
         claim.id,
         liveNativeSessionId,
         record?.adapterData,
-        options
+        persistence
       );
       diagnostics.push({
         level: "warning",
@@ -438,7 +391,7 @@ async function reconcileProvisionalAttachmentClaims(
           ...(record ? { inspectedRecord: record } : {}),
           ...(shouldRequeue && assignment ? { requeueObjective: assignment.objective } : {})
         },
-        options
+        persistence
       );
       effectiveProjection = clearedProvisional.projection;
       diagnostics.push(...warningDiagnostics(clearedProvisional.cleanupWarning, "host-run-persist-failed"));
@@ -458,7 +411,7 @@ async function reconcileProvisionalAttachmentClaims(
           provenanceKind: "recovery",
           ...(record ? { inspectedRecord: record } : {})
         },
-        options
+        persistence
       );
       effectiveProjection = releasedProvisional.projection;
       diagnostics.push(...warningDiagnostics(releasedProvisional.cleanupWarning, "host-run-persist-failed"));
@@ -484,35 +437,27 @@ async function reconcileCompletedRunRecord(
   diagnostics: RunReconciliationDiagnostic[],
   options: {
     cleanupRecord: HostRunRecord | undefined;
-    replayableEvents: RuntimeEvent[] | undefined;
-    snapshotBoundaryEventId: string | undefined;
-    snapshotFallback: boolean;
+    persistence: ProjectionPersistenceHandle;
   }
 ): Promise<CompletedRunReconciliationResult> {
   let effectiveProjection = projection;
   let changed = false;
-  const replayableHydration = context.projectionRecovery.hydrateProjectionFromReplayableEvents(
-    effectiveProjection,
-    options.replayableEvents,
-    options.snapshotBoundaryEventId
-  );
+  const replayableHydration = options.persistence.hydrateProjection(effectiveProjection);
   if (replayableHydration.hydrated) {
     effectiveProjection = replayableHydration.projection;
     changed = true;
   }
-  if (options.snapshotFallback && !effectiveProjection.assignments.has(record.assignmentId)) {
-    const missingAssignmentHydration = context.projectionRecovery.hydrateMissingAssignmentFromReplayableEvents(
+  if (!effectiveProjection.assignments.has(record.assignmentId)) {
+    const missingAssignmentHydration = options.persistence.hydrateMissingAssignment(
       effectiveProjection,
-      record.assignmentId,
-      options.replayableEvents,
-      options.snapshotBoundaryEventId
+      record.assignmentId
     );
     if (missingAssignmentHydration.hydrated) {
       effectiveProjection = missingAssignmentHydration.projection;
       changed = true;
     }
   }
-  if (options.snapshotFallback && !effectiveProjection.assignments.has(record.assignmentId)) {
+  if (!effectiveProjection.assignments.has(record.assignmentId)) {
     return {
       projection: effectiveProjection,
       changed,
@@ -521,15 +466,7 @@ async function reconcileCompletedRunRecord(
     };
   }
 
-  const completedReplayableEvents =
-    options.replayableEvents ??
-    (options.snapshotFallback ? undefined : (await context.projectionRecovery.loadReplayableEvents()).events);
-  const completedRecoveryProofEvents = options.snapshotFallback
-    ? selectReplayableSuffixEvents(
-        completedReplayableEvents,
-        options.snapshotBoundaryEventId ?? ""
-      )
-    : completedReplayableEvents;
+  const completedRecoveryProofEvents = await options.persistence.loadCompletedRecoveryProofEvents();
   const completedDecisionHydration = hydrateCompletedDecisionFromReplayableEvents(
     effectiveProjection,
     record,
@@ -562,45 +499,18 @@ async function reconcileCompletedRunRecord(
 
   if (completedEvents.length > 0) {
     changed = true;
-    effectiveProjection = await applyRecoveryProjectionEvents(
-      context,
-      effectiveProjection,
-      completedEvents,
-      diagnostics,
-      {
-        snapshotFallback: options.snapshotFallback,
-        replayableEvents: options.replayableEvents,
-        snapshotBoundaryEventId: options.snapshotBoundaryEventId
-      }
-    );
-    diagnostics.push(completedRecovery.diagnostic);
-  } else if (options.snapshotFallback) {
-    changed = true;
-    effectiveProjection = await applyRecoveryProjectionEvents(
-      context,
-      effectiveProjection,
-      [],
-      diagnostics,
-      {
-        snapshotFallback: true,
-        replayableEvents: options.replayableEvents,
-        snapshotBoundaryEventId: options.snapshotBoundaryEventId
-      }
-    );
+    const persisted = await options.persistence.persistEvents(completedEvents);
+    effectiveProjection = persisted.projection;
+    diagnostics.push(...warningDiagnostics(persisted.warning, "event-log-repaired"));
     diagnostics.push(completedRecovery.diagnostic);
   } else {
     changed = true;
-    effectiveProjection = await applyRecoveryProjectionEvents(
-      context,
-      effectiveProjection,
-      [],
-      diagnostics,
-      {
-        snapshotFallback: false,
-        replayableEvents: options.replayableEvents,
-        snapshotBoundaryEventId: options.snapshotBoundaryEventId
-      }
-    );
+    const persisted = await options.persistence.persistEvents([]);
+    effectiveProjection = persisted.projection;
+    diagnostics.push(...warningDiagnostics(persisted.warning, "event-log-repaired"));
+    if (options.persistence.reportsCompletedRecoveryWithoutEvents()) {
+      diagnostics.push(completedRecovery.diagnostic);
+    }
   }
 
   const cleanupError = await reconcileStaleRunWithLeaseVerification(
@@ -631,7 +541,7 @@ async function reconcileInProjectionStaleRun(
   assignmentId: string,
   record: HostRunRecord,
   diagnostics: RunReconciliationDiagnostic[],
-  recoveryOptions: RecoveryProjectionOptions,
+  persistence: ProjectionPersistenceHandle,
   options?: {
     alreadyReconciledCleanupRecord?: HostRunRecord;
   }
@@ -653,19 +563,14 @@ async function reconcileInProjectionStaleRun(
     const cleanupNeeded =
       cleanupSource.state === "running" ||
       await context.adapter.hasRunLease(context.store, assignmentId);
-    const syncedProjection = await context.projectionRecovery.syncProjectionSnapshot({
-      snapshotFallback: recoveryOptions.snapshotFallback
-    });
+    const syncedProjection = await persistence.syncProjection();
     diagnostics.push(...warningDiagnostics(syncedProjection.warning, "event-log-repaired"));
     await addHostRunPersistFailureWarnings(
       context,
       diagnostics,
       options?.alreadyReconciledCleanupRecord ?? reconciliation.staleRecord
     );
-    if (cleanupNeeded && shouldEmitAlreadyReconciledStaleRunSuccess(
-      recoveryOptions,
-      cleanupSource
-    )) {
+    if (cleanupNeeded && persistence.shouldEmitAlreadyReconciledStaleRunSuccess(cleanupSource)) {
       await emitStaleRunReconciled(
         context,
         projection.sessionId,
@@ -686,15 +591,9 @@ async function reconcileInProjectionStaleRun(
   );
   const recoveryEvents = [...pendingEvents, ...authorityRepairEvents];
 
-  const nextProjection = await applyRecoveryProjectionEvents(
-    context,
-    projection,
-    recoveryEvents.length === 0 && recoveryOptions.snapshotFallback
-      ? reconciliation.events
-      : recoveryEvents,
-    diagnostics,
-    recoveryOptions
-  );
+  const persisted = await persistence.persistEvents(recoveryEvents);
+  diagnostics.push(...warningDiagnostics(persisted.warning, "event-log-repaired"));
+  const nextProjection = persisted.projection;
 
   await addHostRunPersistFailureWarnings(
     context,
@@ -879,13 +778,6 @@ function buildCompletedRunRecordFromRuntimeOutcome(
   return buildCompletedRunRecord(execution, assignmentId, startedAt, decision!.createdAt);
 }
 
-function shouldEmitAlreadyReconciledStaleRunSuccess(
-  recoveryOptions: RecoveryProjectionOptions,
-  cleanupSource: HostRunRecord
-): boolean {
-  return !recoveryOptions.snapshotFallback && isStaleRunCleanupRecord(cleanupSource);
-}
-
 function isStaleRunAlreadyReconciled(
   projection: RuntimeProjection,
   assignmentId: string,
@@ -905,45 +797,14 @@ function isDegradedRunRecord(record: HostRunRecord): boolean {
     isRunLeaseExpired(record);
 }
 
-function isStaleRunCleanupRecord(record: HostRunRecord): boolean {
-  return (
-    (record.state === "running" &&
-      record.staleReasonCode !== "malformed_lease_artifact" &&
-      isRunLeaseExpired(record)) ||
-    (record.state === "completed" && Boolean(record.staleReasonCode) && !record.terminalOutcome)
-  );
-}
-
 function isStaleRunReconciliationCandidate(record: HostRunRecord): boolean {
   return isDegradedRunRecord(record);
-}
-
-function listLiveLeaseAssignments(records: HostRunRecord[]): string[] {
-  return records
-    .filter(isLiveLeaseRecord)
-    .map((record) => record.assignmentId);
 }
 
 function isLiveLeaseRecord(
   record: HostRunRecord | undefined
 ): record is HostRunRecord & { state: "running" } {
   return record?.state === "running" && !hasMalformedLeaseBlocker(record) && !isRunLeaseExpired(record);
-}
-
-async function applyRecoveryProjectionEvents(
-  context: RunReconciliationContext,
-  projection: RuntimeProjection,
-  events: RuntimeEvent[],
-  diagnostics: RunReconciliationDiagnostic[],
-  options: RecoveryProjectionOptions
-): Promise<RuntimeProjection> {
-  const persisted = await context.projectionRecovery.applyRecoveryProjectionEvents(
-    projection,
-    events,
-    { snapshotFallback: options.snapshotFallback }
-  );
-  diagnostics.push(...warningDiagnostics(persisted.warning, "event-log-repaired"));
-  return persisted.projection;
 }
 
 async function addHostRunPersistFailureWarnings(

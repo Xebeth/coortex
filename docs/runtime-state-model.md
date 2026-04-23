@@ -316,6 +316,11 @@ later mutation must start from the projection produced by the earlier
 durable write rather than from the stale pre-write projection loaded at
 command start.
 
+The append-vs-snapshot choice for those writes is persistence-owned.
+Commands, lifecycle helpers, and reconciliation paths may carry a
+persistence-provided mutation handle, but they must not propagate raw
+snapshot-fallback flags or re-decide the write mode themselves.
+
 Those snapshot-only writes still inherit the current durable event-log
 boundary. They may summarize newer state in `snapshot.json`, but they
 must not advance `lastEventId` beyond an event that actually exists in

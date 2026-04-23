@@ -1,6 +1,7 @@
 import type { RuntimeConfig } from "../config/types.js";
 import type { RuntimeEvent } from "../core/events.js";
-import type { RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
+import { isRunLeaseExpired } from "../core/run-state.js";
+import type { HostRunRecord, RuntimeProjection, RuntimeSnapshot } from "../core/types.js";
 import { parseJson } from "../utils/json.js";
 import {
   applyRuntimeEventsToProjection,
@@ -16,10 +17,23 @@ export interface ReplayableRuntimeEvents {
   malformedLines: number[];
 }
 
+export interface ProjectionPersistenceHandle {
+  persistEvents(events: RuntimeEvent[]): Promise<ProjectionSyncResult>;
+  syncProjection(): Promise<ProjectionSyncResult>;
+  hydrateProjection(projection: RuntimeProjection): ProjectionHydrationResult;
+  hydrateMissingAssignment(
+    projection: RuntimeProjection,
+    assignmentId: string
+  ): ProjectionHydrationResult;
+  loadCompletedRecoveryProofEvents(): Promise<RuntimeEvent[] | undefined>;
+  reportsCompletedRecoveryWithoutEvents(): boolean;
+  shouldEmitAlreadyReconciledStaleRunSuccess(cleanupSource: HostRunRecord): boolean;
+}
+
 export interface ProjectionRecoveryResult {
   projection: RuntimeProjection;
   warning?: string;
-  snapshotFallback: boolean;
+  persistence: ProjectionPersistenceHandle;
 }
 
 export interface ProjectionSyncResult {
@@ -54,6 +68,20 @@ export interface ProjectionRecoveryStore {
 
 type ProjectionRecoveryWarningBearingError = Error & {
   projectionRecoveryWarning?: string;
+};
+
+type ProjectionWriteStrategy = "event-log" | "snapshot-fallback";
+
+type ProjectionRecoveryState = {
+  projection: RuntimeProjection;
+  warning?: string;
+  strategy: ProjectionWriteStrategy;
+};
+
+type ProjectionRecoveryArtifacts = {
+  snapshot: RuntimeSnapshot | undefined;
+  replayableEvents: ReplayableRuntimeEvents;
+  recovered: ProjectionRecoveryState;
 };
 
 export class ProjectionRecoveryService {
@@ -93,118 +121,22 @@ export class ProjectionRecoveryService {
   }
 
   async loadProjectionWithRecovery(): Promise<ProjectionRecoveryResult> {
-    const snapshot = await this.store.loadSnapshot();
-    const { events, warning } = await this.loadReplayableEvents();
-    const fallbackToSnapshot = (reason: string): ProjectionRecoveryResult => {
-      const recoveryWarning = [warning, reason].filter(Boolean).join(" ").trim();
-      try {
-        return {
-          projection: fromSnapshot(snapshot!),
-          warning: recoveryWarning,
-          snapshotFallback: true
+    const { snapshot, replayableEvents, recovered } = await this.loadProjectionRecoveryArtifacts();
+    const persistence = this.buildProjectionPersistenceHandle(
+      recovered.strategy,
+      replayableEvents.events,
+      snapshot?.lastEventId
+    );
+    return recovered.warning
+      ? {
+          projection: recovered.projection,
+          warning: recovered.warning,
+          persistence
+        }
+      : {
+          projection: recovered.projection,
+          persistence
         };
-      } catch (error) {
-        throw attachProjectionRecoveryWarning(error, recoveryWarning);
-      }
-    };
-    const replayAfterSnapshot = () => {
-      try {
-        return {
-          replayed: replayEventsAfterSnapshot(snapshot!, events)
-        };
-      } catch (error) {
-        if (isRuntimeAuthorityIntegrityError(error)) {
-          throw attachProjectionRecoveryWarning(error, warning);
-        }
-        const detail = error instanceof Error ? error.message : String(error);
-        return {
-          fallback: fallbackToSnapshot(
-            `Event replay after ${this.store.snapshotPath} could not rebuild runtime state; fell back to ${this.store.snapshotPath}. ${detail}`
-          )
-        };
-      }
-    };
-
-    if (warning && snapshot) {
-      const replayAttempt = replayAfterSnapshot();
-      if (replayAttempt.fallback) {
-        return replayAttempt.fallback;
-      }
-      if (replayAttempt.replayed) {
-        return {
-          projection: replayAttempt.replayed,
-          warning: `${warning} Rebuilt runtime state from ${this.store.snapshotPath} plus replayable events after ${snapshot.lastEventId ?? "the snapshot boundary"}.`,
-          snapshotFallback: false
-        };
-      }
-      return fallbackToSnapshot(
-        `Fell back to ${this.store.snapshotPath} to avoid rewriting rolled-back salvaged state.`
-      );
-    }
-
-    if (events.length > 0) {
-      if (snapshot) {
-        const replayAttempt = replayAfterSnapshot();
-        if (replayAttempt.fallback) {
-          return replayAttempt.fallback;
-        }
-        if (replayAttempt.replayed) {
-          return warning
-            ? { projection: replayAttempt.replayed, warning, snapshotFallback: false }
-            : { projection: replayAttempt.replayed, snapshotFallback: false };
-        }
-        if (snapshot.lastEventId) {
-          return fallbackToSnapshot(
-            `${this.store.eventsPath} no longer contains snapshot boundary ${snapshot.lastEventId}. Fell back to ${this.store.snapshotPath} to avoid replacing newer durable state.`
-          );
-        }
-      }
-
-      if (events[0]?.type !== "runtime.initialized") {
-        const message = `${this.store.eventsPath} no longer starts at runtime.initialized.`;
-        if (snapshot) {
-          return fallbackToSnapshot(
-            `Event replay could not rebuild runtime state because ${message} Fell back to ${this.store.snapshotPath} to avoid replacing newer durable state.`
-          );
-        }
-        throw new Error(
-          `Event replay could not rebuild runtime state from replayable events because ${message}`
-        );
-      }
-
-      const config = await this.loadRuntimeConfig();
-      try {
-        const projection = projectRuntimeState(config.sessionId, config.rootPath, config.adapter, events);
-        return warning ? { projection, warning, snapshotFallback: false } : { projection, snapshotFallback: false };
-      } catch (error) {
-        if (isRuntimeAuthorityIntegrityError(error)) {
-          throw attachProjectionRecoveryWarning(error, warning);
-        }
-        if (!snapshot) {
-          throw error;
-        }
-        const detail = error instanceof Error ? error.message : String(error);
-        const fallbackWarning = `${warning ?? ""} Event replay could not rebuild runtime state; fell back to ${this.store.snapshotPath}. ${detail}`.trim();
-        return {
-          projection: fromSnapshot(snapshot),
-          warning: fallbackWarning,
-          snapshotFallback: true
-        };
-      }
-    }
-
-    if (snapshot) {
-      const snapshotWarning =
-        warning ??
-        `No replayable runtime events were available from ${this.store.eventsPath}. Fell back to ${this.store.snapshotPath}.`;
-      return {
-        projection: fromSnapshot(snapshot),
-        warning: snapshotWarning,
-        snapshotFallback: true
-      };
-    }
-
-    throw new Error(`No persisted runtime state found at ${this.store.rootDir}`);
   }
 
   async loadProjection(): Promise<RuntimeProjection> {
@@ -221,7 +153,7 @@ export class ProjectionRecoveryService {
     return this.store.withEventsLock(async () => {
       return this.store.withSnapshotLock(async () => {
         const repairWarning = await this.repairEventLogLocked();
-        const recovered = await this.loadProjectionWithRecovery();
+        const { recovered } = await this.loadProjectionRecoveryArtifacts();
         const latestSnapshot = await this.store.loadSnapshot();
         if (
           latestSnapshot &&
@@ -320,28 +252,24 @@ export class ProjectionRecoveryService {
     }
   }
 
-  async syncProjectionSnapshot(options: { snapshotFallback: boolean }): Promise<ProjectionSyncResult> {
-    if (options.snapshotFallback) {
-      return this.mutateSnapshotFallbackProjection((latestProjection) => latestProjection);
-    }
-    return this.syncSnapshotFromEventsWithRecovery();
+  async syncProjectionSnapshot(): Promise<ProjectionSyncResult> {
+    const persistence = await this.createProjectionPersistenceHandle();
+    return persistence.syncProjection();
   }
 
   async applyRecoveryProjectionEvents(
-    projection: RuntimeProjection,
-    events: RuntimeEvent[],
-    options: { snapshotFallback: boolean }
+    events: RuntimeEvent[]
   ): Promise<ProjectionSyncResult> {
-    if (events.length === 0) {
-      return this.syncProjectionSnapshot(options);
-    }
-    if (!options.snapshotFallback) {
-      await this.store.appendEvents(events);
-      return this.syncSnapshotFromEventsWithRecovery();
-    }
+    const persistence = await this.createProjectionPersistenceHandle();
+    return persistence.persistEvents(events);
+  }
 
-    return this.mutateSnapshotFallbackProjection((latestProjection) =>
-      applyRuntimeEventsToProjection(latestProjection, events)
+  async createProjectionPersistenceHandle(): Promise<ProjectionPersistenceHandle> {
+    const { snapshot, replayableEvents, recovered } = await this.loadProjectionRecoveryArtifacts();
+    return this.buildProjectionPersistenceHandle(
+      recovered.strategy,
+      replayableEvents.events,
+      snapshot?.lastEventId
     );
   }
 
@@ -386,6 +314,197 @@ export class ProjectionRecoveryService {
 
   private parseRuntimeEvent(line: string, index: number): RuntimeEvent {
     return parseJson<RuntimeEvent>(line, `runtime event ${index + 1} from ${this.store.eventsPath}`);
+  }
+
+  private async loadProjectionRecoveryArtifacts(): Promise<ProjectionRecoveryArtifacts> {
+    const snapshot = await this.store.loadSnapshot();
+    const replayableEvents = await this.loadReplayableEvents();
+    return {
+      snapshot,
+      replayableEvents,
+      recovered: await this.loadProjectionRecoveryState(snapshot, replayableEvents)
+    };
+  }
+
+  private async loadProjectionRecoveryState(
+    snapshot: RuntimeSnapshot | undefined,
+    replayableEvents: ReplayableRuntimeEvents
+  ): Promise<ProjectionRecoveryState> {
+    const { events, warning } = replayableEvents;
+    const fallbackToSnapshot = (reason: string): ProjectionRecoveryState => {
+      const recoveryWarning = [warning, reason].filter(Boolean).join(" ").trim();
+      try {
+        return {
+          projection: fromSnapshot(snapshot!),
+          warning: recoveryWarning,
+          strategy: "snapshot-fallback"
+        };
+      } catch (error) {
+        throw attachProjectionRecoveryWarning(error, recoveryWarning);
+      }
+    };
+    const replayAfterSnapshot = () => {
+      try {
+        return {
+          replayed: replayEventsAfterSnapshot(snapshot!, events)
+        };
+      } catch (error) {
+        if (isRuntimeAuthorityIntegrityError(error)) {
+          throw attachProjectionRecoveryWarning(error, warning);
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        return {
+          fallback: fallbackToSnapshot(
+            `Event replay after ${this.store.snapshotPath} could not rebuild runtime state; fell back to ${this.store.snapshotPath}. ${detail}`
+          )
+        };
+      }
+    };
+
+    if (warning && snapshot) {
+      const replayAttempt = replayAfterSnapshot();
+      if (replayAttempt.fallback) {
+        return replayAttempt.fallback;
+      }
+      if (replayAttempt.replayed) {
+        return {
+          projection: replayAttempt.replayed,
+          warning: `${warning} Rebuilt runtime state from ${this.store.snapshotPath} plus replayable events after ${snapshot.lastEventId ?? "the snapshot boundary"}.`,
+          strategy: "event-log"
+        };
+      }
+      return fallbackToSnapshot(
+        `Fell back to ${this.store.snapshotPath} to avoid rewriting rolled-back salvaged state.`
+      );
+    }
+
+    if (events.length > 0) {
+      if (snapshot) {
+        const replayAttempt = replayAfterSnapshot();
+        if (replayAttempt.fallback) {
+          return replayAttempt.fallback;
+        }
+        if (replayAttempt.replayed) {
+          return warning
+            ? { projection: replayAttempt.replayed, warning, strategy: "event-log" }
+            : { projection: replayAttempt.replayed, strategy: "event-log" };
+        }
+        if (snapshot.lastEventId) {
+          return fallbackToSnapshot(
+            `${this.store.eventsPath} no longer contains snapshot boundary ${snapshot.lastEventId}. Fell back to ${this.store.snapshotPath} to avoid replacing newer durable state.`
+          );
+        }
+      }
+
+      if (events[0]?.type !== "runtime.initialized") {
+        const message = `${this.store.eventsPath} no longer starts at runtime.initialized.`;
+        if (snapshot) {
+          return fallbackToSnapshot(
+            `Event replay could not rebuild runtime state because ${message} Fell back to ${this.store.snapshotPath} to avoid replacing newer durable state.`
+          );
+        }
+        throw new Error(
+          `Event replay could not rebuild runtime state from replayable events because ${message}`
+        );
+      }
+
+      const config = await this.loadRuntimeConfig();
+      try {
+        const projection = projectRuntimeState(
+          config.sessionId,
+          config.rootPath,
+          config.adapter,
+          events
+        );
+        return warning
+          ? { projection, warning, strategy: "event-log" }
+          : { projection, strategy: "event-log" };
+      } catch (error) {
+        if (isRuntimeAuthorityIntegrityError(error)) {
+          throw attachProjectionRecoveryWarning(error, warning);
+        }
+        if (!snapshot) {
+          throw error;
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        const fallbackWarning = `${warning ?? ""} Event replay could not rebuild runtime state; fell back to ${this.store.snapshotPath}. ${detail}`.trim();
+        return {
+          projection: fromSnapshot(snapshot),
+          warning: fallbackWarning,
+          strategy: "snapshot-fallback"
+        };
+      }
+    }
+
+    if (snapshot) {
+      const snapshotWarning =
+        warning ??
+        `No replayable runtime events were available from ${this.store.eventsPath}. Fell back to ${this.store.snapshotPath}.`;
+      return {
+        projection: fromSnapshot(snapshot),
+        warning: snapshotWarning,
+        strategy: "snapshot-fallback"
+      };
+    }
+
+    throw new Error(`No persisted runtime state found at ${this.store.rootDir}`);
+  }
+
+  private buildProjectionPersistenceHandle(
+    strategy: ProjectionWriteStrategy,
+    replayableEvents: RuntimeEvent[],
+    snapshotBoundaryEventId: string | undefined
+  ): ProjectionPersistenceHandle {
+    return {
+      persistEvents: async (events) => {
+        if (events.length === 0) {
+          return strategy === "snapshot-fallback"
+            ? this.mutateSnapshotFallbackProjection((latestProjection) => latestProjection)
+            : this.syncSnapshotFromEventsWithRecovery();
+        }
+        if (strategy === "event-log") {
+          await this.store.appendEvents(events);
+          return this.syncSnapshotFromEventsWithRecovery();
+        }
+        return this.mutateSnapshotFallbackProjection((latestProjection) =>
+          applyRuntimeEventsToProjection(latestProjection, events)
+        );
+      },
+      syncProjection: async () =>
+        strategy === "snapshot-fallback"
+          ? this.mutateSnapshotFallbackProjection((latestProjection) => latestProjection)
+          : this.syncSnapshotFromEventsWithRecovery(),
+      hydrateProjection: (projection) =>
+        strategy === "snapshot-fallback"
+          ? this.hydrateProjectionFromReplayableEvents(
+              projection,
+              replayableEvents,
+              snapshotBoundaryEventId
+            )
+          : {
+              projection,
+              hydrated: false
+            },
+      hydrateMissingAssignment: (projection, assignmentId) =>
+        strategy === "snapshot-fallback"
+          ? this.hydrateMissingAssignmentFromReplayableEvents(
+              projection,
+              assignmentId,
+              replayableEvents,
+              snapshotBoundaryEventId
+            )
+          : {
+              projection,
+              hydrated: false
+            },
+      loadCompletedRecoveryProofEvents: async () =>
+        strategy === "snapshot-fallback"
+          ? selectReplayableSuffixEvents(replayableEvents, snapshotBoundaryEventId ?? "")
+          : replayableEvents,
+      reportsCompletedRecoveryWithoutEvents: () => strategy === "snapshot-fallback",
+      shouldEmitAlreadyReconciledStaleRunSuccess: (cleanupSource) =>
+        strategy === "event-log" && isStaleRunCleanupRecord(cleanupSource)
+    };
   }
 
   private async mutateSnapshotFallbackProjection(
@@ -458,4 +577,15 @@ function replayEventsAfterSnapshot(
 
 function snapshotFingerprint(snapshot: RuntimeSnapshot | undefined): string {
   return snapshot ? JSON.stringify(snapshot) : "<missing>";
+}
+
+function isStaleRunCleanupRecord(record: HostRunRecord): boolean {
+  return (
+    (
+      record.state === "running" &&
+      record.staleReasonCode !== "malformed_lease_artifact" &&
+      isRunLeaseExpired(record)
+    ) ||
+    (record.state === "completed" && Boolean(record.staleReasonCode) && !record.terminalOutcome)
+  );
 }

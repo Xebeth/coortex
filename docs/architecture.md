@@ -107,6 +107,11 @@ shared lifecycle mutation facility. Commands and recovery may decide
 when authority needs to change, but they should not hand-build separate
 launch, reclaim, and recovery mutation rules beside each other.
 
+The persistence/recovery seam also owns the append-vs-snapshot write
+strategy for those transitions. CLI and lifecycle code may use a
+persistence-provided mutation handle, but they must not propagate raw
+snapshot-fallback policy or branch on write mode themselves.
+
 ---
 
 ## 4. Workflows

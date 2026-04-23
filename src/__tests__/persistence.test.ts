@@ -13,7 +13,6 @@ import { createBootstrapRuntime } from "../core/runtime.js";
 import { applyRuntimeEvent, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import type { RuntimeEvent } from "../core/events.js";
 import { nowIso } from "../utils/time.js";
-import { persistProjectionEvents } from "../cli/projection-write.js";
 
 test("runtime store rebuilds projection from durable events and snapshots", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-"));
@@ -119,7 +118,6 @@ test("projection recovery service repairs a salvageable event log through store 
 
   assert.match(warning ?? "", /Rewrote .*events\.ndjson with \d+ replayable event\(s\)\./);
   assert.equal(repairedEvents.length, bootstrap.events.length + 1);
-  assert.equal(recovered.snapshotFallback, false);
   assert.equal(recovered.projection.results.size, 1);
   assert.equal(
     recovered.projection.results.get(resultEvent.payload.result.resultId)?.summary,
@@ -900,7 +898,6 @@ test("runtime store falls back to the snapshot when the event log is cleanly tru
   const synced = await store.syncSnapshotFromEventsWithRecovery();
   const repairedSnapshot = await store.loadSnapshot();
 
-  assert.equal(recovered.snapshotFallback, true);
   assert.match(recovered.warning ?? "", /(runtime\.initialized|snapshot boundary)/);
   assert.equal(recovered.projection.status.activeHost, snapshot.status.activeHost);
   assert.equal(recovered.projection.status.currentObjective, snapshot.status.currentObjective);
@@ -1068,7 +1065,6 @@ test("runtime store falls back to the snapshot when a parseable suffix no longer
 
   const recovered = await store.loadProjectionWithRecovery();
 
-  assert.equal(recovered.snapshotFallback, true);
   assert.match(recovered.warning ?? "", /could not rebuild runtime state; fell back to .*snapshot\.json/i);
   assert.equal(recovered.projection.status.currentObjective, snapshot.status.currentObjective);
   assert.deepEqual(recovered.projection.status.activeAssignmentIds, snapshot.status.activeAssignmentIds);
@@ -1412,8 +1408,8 @@ test("runtime store snapshot-only mutations preserve the durable event boundary"
   assert.equal([...recovered.projection.results.values()].at(-1)?.summary, "Later event-log suffix survived the snapshot-only mutation.");
 });
 
-test("projection-write snapshot fallback preserves later real event suffixes", async () => {
-  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-projection-write-boundary-"));
+test("projection persistence handle snapshot fallback preserves later real event suffixes", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-handle-boundary-"));
   const store = RuntimeStore.forProject(projectRoot);
   const sessionId = randomUUID();
   const config: RuntimeConfig = {
@@ -1438,31 +1434,38 @@ test("projection-write snapshot fallback preserves later real event suffixes", a
   const initialProjection = await store.syncSnapshotFromEvents();
   const boundaryBefore = (await store.loadSnapshot())?.lastEventId;
   assert.ok(boundaryBefore, "expected an event boundary before snapshot-fallback write");
+  const originalEventLog = await readFile(store.eventsPath, "utf8");
 
   const assignmentId = bootstrap.initialAssignmentId;
   const timestamp = nowIso();
-  const projectionAfterFallback = await persistProjectionEvents(
-    store,
-    initialProjection,
-    [
-      {
-        eventId: randomUUID(),
-        sessionId,
-        timestamp,
-        type: "assignment.updated",
-        payload: {
-          assignmentId,
-          patch: {
-            state: "queued",
-            updatedAt: timestamp
-          }
+  const eventLines = (await readFile(store.eventsPath, "utf8")).trimEnd().split("\n");
+  const boundaryIndex = eventLines.findIndex((line) => {
+    const parsed = JSON.parse(line) as { eventId?: string };
+    return parsed.eventId === boundaryBefore;
+  });
+  assert.ok(boundaryIndex >= 0, "expected to find the snapshot boundary before forcing fallback writes");
+  eventLines[boundaryIndex] = "{\"broken\":";
+  await writeFile(store.eventsPath, `${eventLines.join("\n")}\n`, "utf8");
+  const fallbackLoaded = await store.loadProjectionWithRecovery();
+  assert.match(fallbackLoaded.warning ?? "", /fell back to .*snapshot\.json/i);
+  const projectionAfterFallback = await fallbackLoaded.persistence.persistEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp,
+      type: "assignment.updated",
+      payload: {
+        assignmentId,
+        patch: {
+          state: "queued",
+          updatedAt: timestamp
         }
       }
-    ],
-    { snapshotFallback: true }
-  );
+    }
+  ]);
   assert.equal(projectionAfterFallback.projection.assignments.get(assignmentId)?.state, "queued");
   assert.equal((await store.loadSnapshot())?.lastEventId, boundaryBefore);
+  await writeFile(store.eventsPath, originalEventLog, "utf8");
 
   await store.appendEvent({
     eventId: randomUUID(),
@@ -1676,7 +1679,7 @@ test("projection recovery syncProjectionSnapshot preserves malformed replay warn
   await store.writeSnapshot(toSnapshot(await store.rebuildProjection()));
   await writeFile(store.eventsPath, `${await readFile(store.eventsPath, "utf8")}{"broken":\n`, "utf8");
 
-  const synced = await service.syncProjectionSnapshot({ snapshotFallback: true });
+  const synced = await service.syncProjectionSnapshot();
 
   assert.match(synced.warning ?? "", /skipped malformed line \d+/);
   assert.equal(synced.projection.assignments.size, 1);
@@ -1711,9 +1714,8 @@ test("projection recovery applyRecoveryProjectionEvents preserves malformed repl
 
   const updatedObjective = "Snapshot fallback warning propagation test.";
   const timestamp = nowIso();
-  const repaired = await service.applyRecoveryProjectionEvents(
-    baseProjection,
-    [{
+  const repaired = await service.applyRecoveryProjectionEvents([
+    {
       eventId: randomUUID(),
       sessionId,
       timestamp,
@@ -1725,9 +1727,8 @@ test("projection recovery applyRecoveryProjectionEvents preserves malformed repl
           lastDurableOutputAt: timestamp
         }
       }
-    }],
-    { snapshotFallback: true }
-  );
+    }
+  ]);
 
   assert.match(repaired.warning ?? "", /skipped malformed line \d+/);
   assert.equal(repaired.projection.status.currentObjective, updatedObjective);

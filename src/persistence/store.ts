@@ -23,6 +23,7 @@ import { parseJson, toPrettyJson } from "../utils/json.js";
 import { createEmptyProjection, fromSnapshot, toSnapshot } from "../projections/runtime-projection.js";
 import {
   ProjectionRecoveryService,
+  type ProjectionPersistenceHandle,
   type ProjectionRecoveryResult,
   type ProjectionRecoveryStore,
   type ProjectionSyncResult,
@@ -147,6 +148,10 @@ export class RuntimeStore implements ProjectionRecoveryStore {
 
   async loadProjectionWithRecovery(): Promise<ProjectionRecoveryResult> {
     return this.projectionRecovery().loadProjectionWithRecovery();
+  }
+
+  async createProjectionPersistenceHandle(): Promise<ProjectionPersistenceHandle> {
+    return this.projectionRecovery().createProjectionPersistenceHandle();
   }
 
   async loadProjection(): Promise<RuntimeProjection> {

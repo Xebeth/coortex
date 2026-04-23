@@ -1809,8 +1809,7 @@ test("run reconciliation forwards malformed replay warnings from snapshot-fallba
   const reconciled = await reconcileActiveRuns(
     store,
     adapter,
-    await store.loadProjection(),
-    { snapshotFallback: true }
+    await store.loadProjection()
   );
 
   assert.ok(

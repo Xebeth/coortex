@@ -1,4 +1,4 @@
-import { RuntimeStore } from "../persistence/store.js";
+import type { RuntimeStore } from "../persistence/store.js";
 
 import type { CommandDiagnostic } from "./types.js";
 
@@ -17,14 +17,14 @@ export async function loadOperatorProjection(store: RuntimeStore) {
 export async function loadOperatorProjectionWithDiagnostics(store: RuntimeStore): Promise<{
   projection: Awaited<ReturnType<RuntimeStore["loadProjection"]>>;
   diagnostics: CommandDiagnostic[];
-  snapshotFallback: boolean;
+  persistence: Awaited<ReturnType<RuntimeStore["createProjectionPersistenceHandle"]>>;
 }> {
   try {
-    const { projection, warning, snapshotFallback } = await store.loadProjectionWithRecovery();
+    const { projection, warning, persistence } = await store.loadProjectionWithRecovery();
     return {
       projection,
       diagnostics: diagnosticsFromWarning(warning, "event-log-salvaged"),
-      snapshotFallback
+      persistence
     };
   } catch (error) {
     const diagnostics = diagnosticsFromWarning(
