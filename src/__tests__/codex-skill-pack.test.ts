@@ -206,6 +206,38 @@ test("managed skills explain installed script path resolution", async () => {
   }
 });
 
+test("script-using managed skills treat helper steps as canonical protocol", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /canonical|exact helper command|exact command|named subcommands|canonical identity check|canonical safety check/i,
+      path
+    );
+    assert.match(content, /authoritative/i, path);
+    assert.match(
+      content,
+      /stop rather than|protocol error|replace .* with prose|do not reconstruct|do not recreat/i,
+      path
+    );
+  }
+});
+
 test("fixer orchestrator explicitly requires same-worker continuation semantics", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",

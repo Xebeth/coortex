@@ -37,6 +37,13 @@ Resolve bundled script paths relative to the installed skill directories under
 relative to `.codex/skills/coortex-fixer-lane/`, not relative to the
 repository root.
 
+When a continuation packet is present,
+`../fixer-orchestrator/scripts/fix_result_state.py validate-lane-continuation`
+is the canonical identity check. Run that exact helper command instead of
+re-deriving lane/session/slice matching by hand, treat the helper result as
+authoritative, and stop with a protocol error if the validation step cannot
+run or fails.
+
 1. Read the scoped family or continuation packet.
 2. If this is a continuation packet, validate it before resuming. When the
    original lane plan JSON is available, use the shared helper from the sibling

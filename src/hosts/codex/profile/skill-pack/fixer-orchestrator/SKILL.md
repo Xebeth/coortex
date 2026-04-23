@@ -50,6 +50,14 @@ workflow runs so the user can tell which family or phase is active.
 Resolve bundled script paths relative to this installed skill directory under
 `.codex/skills/fixer-orchestrator/`, not relative to the repository root.
 
+When this workflow names a `scripts/fix_result_state.py` subcommand for trace
+init, slice planning, lane continuation, review-return validation, or terminal
+append-trace handling, run that exact helper command instead of hand-planning
+equivalents or backfilling artifacts later. Treat helper-produced lane
+metadata, trace paths, and terminal lock-clearing status as authoritative. If
+any helper-owned continuation, validation, or terminal trace step fails, stop
+and surface the protocol error instead of prose-completing the run.
+
 1. Load the review input.
 2. Load these references as needed:
    - `references/intake-and-normalization.md`

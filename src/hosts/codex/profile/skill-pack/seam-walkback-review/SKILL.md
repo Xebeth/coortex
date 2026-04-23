@@ -121,6 +121,15 @@ Resolve bundled script paths relative to this installed skill directory under
 `../review-orchestrator/scripts/...`, resolve them from that installed skill
 directory, not from the repository root.
 
+When this workflow names a `walkback_state.py` or sibling
+`return_review_state.py` subcommand for inventory, trace init, packet pathing,
+packet validation, or terminal handoff validation, run that exact helper
+command instead of recreating campaign state, packet paths, or handoff status
+by hand. Treat helper-produced campaign metadata and packet/handoff paths as
+authoritative. If a required helper-owned validation or handoff step fails,
+stop with a protocol error instead of ending with a prose-only "packet ready"
+or "ready to explore" state.
+
 ### Seam-walk helper
 
 Use this skill's helper for worktree inventory, packet pathing, campaign lock

@@ -70,6 +70,13 @@ top-level review/fix campaign in the same worktree:
 Resolve bundled script paths relative to this installed skill directory under
 `.codex/skills/coortex-review/`, not relative to the repository root.
 
+`scripts/review_state.py check-active-campaign` is the canonical standalone
+review safety check. Run that exact helper command before starting standalone
+review, treat its lock metadata as authoritative, and do not reconstruct
+`active-review-campaign.json` state by hand. If the helper cannot complete,
+stop and surface that protocol failure instead of guessing whether standalone
+review is safe.
+
 ```bash
 python scripts/review_state.py check-active-campaign --project-root .
 ```

@@ -30,6 +30,14 @@ needed, and assigns the final family grouping, reopen status, and downstream
 Resolve bundled script paths relative to this installed skill directory under
 `.codex/skills/review-orchestrator/`, not relative to the repository root.
 
+When this workflow names a `scripts/return_review_state.py` subcommand for
+trace init, packet validation, canonical handoff pathing/writing, omission
+summaries, ledger updates, or reopen reporting, run that exact helper command
+instead of recreating those outputs by hand. Treat helper-produced paths,
+validation results, and ledger summaries as authoritative. If a required
+helper-owned artifact or trace step cannot be produced, stop and surface a
+protocol error instead of prose-completing the review.
+
 1. Load these references as needed:
    - `references/prep-and-refusal.md`
    - `references/execution-model.md`

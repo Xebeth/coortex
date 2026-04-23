@@ -79,6 +79,13 @@ Use the bundled helper for the mechanical parts that benefit from consistency:
 Resolve bundled script paths relative to this installed skill directory under
 `.codex/skills/coortex-deslop/`, not relative to the repository root.
 
+`scripts/deslop_state.py resolve-scope` owns bounded file intake and
+`scripts/deslop_state.py run-gates` owns deterministic gate capture. Use those
+exact subcommands instead of rebuilding scope lists or pass/fail summaries by
+hand, treat the returned repo-relative scope and gate results as canonical
+and authoritative, and stop with a protocol error if a helper-owned scope or
+gate step cannot be produced.
+
 - `scripts/deslop_state.py resolve-scope` to normalize an explicit file list or
   changed-files artifact into a bounded repo-relative scope
 - `scripts/deslop_state.py run-gates` to execute pre/post cleanup verification
