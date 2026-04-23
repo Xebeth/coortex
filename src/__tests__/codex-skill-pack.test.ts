@@ -178,6 +178,65 @@ test("review orchestrator requires persisted review handoff artifacts for action
   }
 });
 
+test("review baseline supports optional surface focus areas without extra matrix refs", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-baseline/references/baseline-schema.md",
+    "src/hosts/codex/profile/skill-pack/review-baseline/references/quality-gate.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /review_focus_areas/i, path);
+    assert.doesNotMatch(content, /test_matrix_refs/i, path);
+  }
+
+  const schema = await readFile(
+    resolve(
+      process.cwd(),
+      "src/hosts/codex/profile/skill-pack/review-baseline/references/baseline-schema.md"
+    ),
+    "utf8"
+  );
+  assert.match(schema, /supporting_anchors[\s\S]*contract_docs|contract_docs[\s\S]*supporting_anchors/i);
+  assert.match(schema, /review_focus_areas.*list of short strings|list of short strings.*review_focus_areas/i);
+});
+
+test("review skills consume baseline focus areas as recurring failure checks", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-review-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review-lane/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/execution-model.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /review_focus_areas/i, path);
+    assert.match(content, /recurring[\s-]+failure[\s-]+checks|recurring[\s-]+failure[\s-]+themes/i, path);
+    assert.match(
+      content,
+      /automatic findings|replacement custom lenses|extra lanes|does not create extra lanes/i,
+      path
+    );
+  }
+
+  const executionModel = await readFile(
+    resolve(
+      process.cwd(),
+      "src/hosts/codex/profile/skill-pack/review-orchestrator/references/execution-model.md"
+    ),
+    "utf8"
+  );
+  assert.match(
+    executionModel,
+    /Family exploration lanes[\s\S]*review_focus_areas[\s\S]*originating surface ids/i
+  );
+});
+
 test("managed skills explain installed script path resolution", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",

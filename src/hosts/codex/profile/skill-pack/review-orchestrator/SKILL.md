@@ -118,6 +118,16 @@ Rules:
 - the coordinator's combined synthesis decides whether advisory signals join a
   final family
 
+## Surface focus areas
+
+When a mapped baseline surface includes `review_focus_areas`:
+
+- pass them through to the relevant coverage, exploration, and return-review
+  lanes as recurring failure checks
+- use them to sharpen sibling inspection and return-review rechecks
+- do not create extra lanes just because focus areas exist
+- do not treat them as automatic findings or as replacements for custom lenses
+
 ## Conversation-visible plan
 
 Because orchestrated review can run for a while, keep a short

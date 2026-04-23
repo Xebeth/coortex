@@ -37,6 +37,10 @@ Pass the configured surface lenses through unchanged. The lane skill owns the
 meaning of each built-in lens id. If prep validated run-local focus emphasis
 for the narrowed run, pass it separately in the lane prompt as extra emphasis
 without rewriting the configured lens list.
+If the mapped surface includes baseline `review_focus_areas`, pass them through
+unchanged as recurring failure checks for that lane. They sharpen bounded
+inspection and sibling-path checks, but they do not create extra lanes, mutate
+the lens bundle, or become automatic findings on their own.
 
 Scheduling:
 - if coverage lanes exceed current subagent capacity, run them in bounded waves
@@ -98,6 +102,9 @@ input, not an automatic lane.
 For lane prompting:
 - pass the `closure_gate`, the family-local authoritative diff/scope, and the
   exact family-local return-review schema from `references/return-review.md`
+- when the reviewed family maps to a surface with `review_focus_areas`, pass
+  those focus areas through so the return-review lane rechecks the recurring
+  failure themes most likely to regress on that surface
 - let `$coortex-review-lane` own the lane-local review method for that schema
 
 Scheduling:
@@ -156,6 +163,13 @@ Rules:
 - invoke `$coortex-review-lane` explicitly inside the lane prompt
 - keep the worker prompt family-local and task-scoped
 - do not substitute `explorer` or `worker` for final review output
+- if an explored candidate family stays grounded in one mapped surface, pass
+  that surface's `review_focus_areas` through unchanged as recurring failure
+  checks for the exploration lane
+- if a candidate family spans multiple mapped surfaces, pass only the
+  originating surfaces' grounded `review_focus_areas`, deduplicated, and keep
+  the originating surface ids explicit in the lane prompt instead of inventing
+  a merged generic focus list
 
 Each family-exploration lane must emit the exploration-lane contract from
 `references/report-contract.md`.

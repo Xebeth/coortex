@@ -28,6 +28,10 @@ Do not use it as a general fix or implementation skill.
   instead of the default summary shape.
 - If the lane prompt provides configured lenses, use those lenses as the
   ordered review concerns for this lane.
+- If the lane prompt provides `review_focus_areas`, treat them as recurring
+  failure checks for this lane. Use them to sharpen bounded inspection and
+  sibling-path checks, but only emit findings when current evidence grounds
+  them.
 - If the lane prompt also provides run-local focus emphasis, treat that as an
   extra bounded concern for this lane without mutating the configured lens
   bundle for the run. That emphasis may be either a baseline-configured built-in
@@ -65,14 +69,17 @@ They should match the built-in lens ids configured by `review-baseline`.
 3. Apply the configured lenses inside the bounded lane scope. If no lenses
    are provided, default to `goal-fidelity`, `quality`, and
    `context-history`.
-4. If the lane prompt includes run-local focus emphasis, apply it as a
+4. If the lane prompt includes `review_focus_areas`, check them as recurring
+   failure themes after honoring the configured lenses. Treat them as review
+   guidance, not as automatic findings or replacement custom lenses.
+5. If the lane prompt includes run-local focus emphasis, apply it as a
    plain-language emphasis inside the bounded lane scope after honoring the
    configured lenses.
-5. Inspect the local sibling paths needed to judge whether the same root
+6. Inspect the local sibling paths needed to judge whether the same root
    cause still exists in the lane scope.
-6. Run available diagnostics or lightweight verification only when the
+7. Run available diagnostics or lightweight verification only when the
    environment supports them and they matter to correctness for this lane.
-7. Return severity-rated findings with concrete file evidence.
+8. Return severity-rated findings with concrete file evidence.
 
 ## Lane types
 

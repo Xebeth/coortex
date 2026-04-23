@@ -35,6 +35,10 @@ In those cases, use `$review-orchestrator` instead.
 - If the prompt gives an exact output schema, follow it instead of the default
   summary format.
 - If the prompt gives configured lenses, use them as ordered review concerns.
+- If the prompt or mapped baseline surface provides `review_focus_areas`, treat
+  them as recurring failure checks for this bounded scope. Use them to guide
+  inspection and sibling-path checks, but only emit findings when current
+  code/test/doc evidence actually grounds them.
 
 ## Built-in lenses
 
@@ -102,11 +106,14 @@ recorded `owner_host_session_id`, fallback `owner_host_thread_id`, and
    of reviewing a mutating worktree.
 6. Apply the configured lenses inside the bounded scope. If none are provided,
    default to `goal-fidelity`, `quality`, and `context-history`.
-7. Inspect the sibling paths needed to judge whether the same root cause still
+7. If `review_focus_areas` are provided, check them as recurring failure themes
+   after honoring the configured lenses. Treat them as review guidance, not as
+   automatic findings or replacement custom lenses.
+8. Inspect the sibling paths needed to judge whether the same root cause still
    exists inside the bounded review scope.
-8. Run lightweight diagnostics or execution evidence only when the environment
+9. Run lightweight diagnostics or execution evidence only when the environment
    supports them and they materially affect correctness for this review.
-9. Return severity-rated findings with concrete file evidence.
+10. Return severity-rated findings with concrete file evidence.
 
 ## Conversation-visible progress
 

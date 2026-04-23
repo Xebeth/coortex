@@ -83,6 +83,9 @@ runs so the user can see which phase is in flight.
 - Discover surfaces in the broadest stable sense: major modules, layers, subsystems, workflows, or boundary-shaped areas.
 - Use the per-surface structure from `references/baseline-schema.md`.
 - Keep surfaces broad enough to survive across reviews, but distinct enough that an execution skill can map changed files without rediscovering ownership.
+- When a surface has recurring semantic traps or failure families that are too
+  narrow for `purpose` and too lightweight for a custom lens, capture them in
+  optional `review_focus_areas`.
 - In alternative baseline files, it is acceptable to use a finer-grained surface split than the primary baseline, but the split must still be stable enough for repeated use.
 
 ## Lens Configuration

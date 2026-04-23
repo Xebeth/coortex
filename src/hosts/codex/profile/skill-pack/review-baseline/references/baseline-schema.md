@@ -55,6 +55,9 @@ surfaces:
     contract_docs:
       - "docs/runtime-state-model.md"
       - "docs/architecture.md"
+    review_focus_areas:
+      - "provisional authority must not be treated as resumable truth until promoted"
+      - "provenance must track launch vs resume vs recovery correctly"
     configured_builtin_lenses:
       - lens_id: "goal-fidelity"
         priority: "high"
@@ -138,6 +141,9 @@ Required per-surface fields:
 - `configured_builtin_lenses`
 - `configured_custom_lenses` (use `[]` when a surface has no custom lenses)
 
+Optional per-surface fields:
+- `review_focus_areas` (list of short strings)
+
 Required built-in lens fields:
 - `lens_id`
 - `priority`
@@ -163,6 +169,16 @@ Schema rules:
 - Use project-relative paths or globs.
 - Prefer distinct surfaces over heavily overlapping ones.
 - Store project configuration only. Do not restate the generic built-in lens definitions here.
+- `review_focus_areas` is optional advisory guidance for recurring
+  surface-specific failure or risk themes.
+- Model each `review_focus_areas` entry as a short standalone recurring check,
+  not as a nested object or mini-lens.
+- Keep `review_focus_areas` short, concrete, and reviewable as recurring
+  checks.
+- Use `supporting_anchors` and `contract_docs` for matrix, invariant, and test
+  references. Do not add a separate refs field for those.
+- Do not use `review_focus_areas` as a replacement for `purpose` or
+  `configured_custom_lenses`.
 - Custom lenses should be project-specific and meaningfully distinct. If two custom lenses differ only cosmetically, merge or rewrite them.
 - `reviewer_model_recommendation` is advisory metadata. Another skill may record or report it, but should not pretend it is a guaranteed runtime control unless the environment actually supports that control.
 - The primary baseline should use `baseline_kind: "primary"` when that metadata is present.

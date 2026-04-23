@@ -9,6 +9,8 @@ Run these checks on the drafted baseline before it is written. If any check fail
 - No surfaces are defined.
 - A surface is missing `id`, `purpose`, or `primary_anchors`.
 - A surface has no configured built-in or custom lenses.
+- `review_focus_areas` restate the surface `purpose`, duplicate built-in lens
+  reasons, or are so vague that another reviewer could not use them.
 - Surface anchors are so overlapping that another skill would have to rediscover ownership.
 - Surface anchors are so narrow that they only describe one current review target instead of a stable project area.
 - Surface anchors rely on overly broad patterns that cause unrelated files to map into the same surface by default.
@@ -25,6 +27,8 @@ Run these checks on the drafted baseline before it is written. If any check fail
 ## Contract failures
 
 - Relevant contract docs are discoverable but omitted from the surface.
+- `review_focus_areas` are really custom lenses in disguise or are just docs,
+  tests, or matrix refs that belong in `supporting_anchors` or `contract_docs`.
 - The baseline is too underspecified for another skill to map changed files into surfaces without rediscovery.
 - `reviewer_model_recommendation` is present but malformed or presented as a guaranteed runtime control rather than advisory metadata.
 - A primary baseline lists alternative baseline files whose paths, ids, or stated purposes are inconsistent with what was actually written.
