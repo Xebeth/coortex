@@ -15,6 +15,10 @@ python scripts/return_review_state.py append-family-ledger --run-id <run_id> --r
 python scripts/return_review_state.py current-run-reopens --run-id <run_id>
 ```
 
+Resolve these bundled script paths relative to the installed
+`.codex/skills/review-orchestrator/` directory, not relative to the repository
+root.
+
 The helper owns:
 - run-directory creation
 - active top-level review-campaign lock handling for the current worktree

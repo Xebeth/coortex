@@ -13,6 +13,10 @@ python scripts/fix_result_state.py lane-trace-file --trace-dir <dir> --lane-type
 python scripts/fix_result_state.py append-trace --trace-file <path> --record-file <json-file>
 ```
 
+Resolve these bundled script paths relative to the installed
+`.codex/skills/fixer-orchestrator/` directory, not relative to the repository
+root.
+
 The helper owns:
 - run-directory creation
 - active top-level review-campaign lock handling for the current worktree

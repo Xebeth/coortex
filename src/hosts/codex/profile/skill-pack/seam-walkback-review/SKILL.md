@@ -116,6 +116,11 @@ instead of redoing their jobs:
 
 Push the truly mechanical pieces into scripts.
 
+Resolve bundled script paths relative to this installed skill directory under
+`.codex/skills/seam-walkback-review/`. For sibling helper references such as
+`../review-orchestrator/scripts/...`, resolve them from that installed skill
+directory, not from the repository root.
+
 ### Seam-walk helper
 
 Use this skill's helper for worktree inventory, packet pathing, campaign lock

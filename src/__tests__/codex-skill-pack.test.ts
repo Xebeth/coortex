@@ -178,6 +178,34 @@ test("review orchestrator requires persisted review handoff artifacts for action
   }
 });
 
+test("managed skills explain installed script path resolution", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/trace-artifact.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/trace-artifact.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/seam-walkback-review/references/trace-artifact.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /\.codex\/skills|installed skill directory|not relative to the repository root/i,
+      path
+    );
+  }
+});
+
 test("fixer orchestrator explicitly requires same-worker continuation semantics", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",

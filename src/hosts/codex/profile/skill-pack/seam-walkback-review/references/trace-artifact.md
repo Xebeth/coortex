@@ -11,6 +11,11 @@ python scripts/walkback_state.py packet-path --trace-dir .coortex/review-trace/<
 python scripts/walkback_state.py append-trace --trace-file <path> --record-file <json-file>
 ```
 
+Resolve these bundled script paths relative to the installed
+`.codex/skills/seam-walkback-review/` directory, not relative to the
+repository root. Resolve sibling helper references such as
+`../review-orchestrator/scripts/...` from that installed skill directory.
+
 The helper owns:
 - run-directory creation
 - coordinator file creation

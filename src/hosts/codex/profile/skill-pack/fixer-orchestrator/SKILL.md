@@ -47,6 +47,9 @@ workflow runs so the user can tell which family or phase is active.
 
 ## Workflow
 
+Resolve bundled script paths relative to this installed skill directory under
+`.codex/skills/fixer-orchestrator/`, not relative to the repository root.
+
 1. Load the review input.
 2. Load these references as needed:
    - `references/intake-and-normalization.md`

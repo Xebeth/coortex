@@ -76,6 +76,9 @@ The mutating cleanup workflow below applies only to post-fix cleanup slices.
 
 Use the bundled helper for the mechanical parts that benefit from consistency:
 
+Resolve bundled script paths relative to this installed skill directory under
+`.codex/skills/coortex-deslop/`, not relative to the repository root.
+
 - `scripts/deslop_state.py resolve-scope` to normalize an explicit file list or
   changed-files artifact into a bounded repo-relative scope
 - `scripts/deslop_state.py run-gates` to execute pre/post cleanup verification

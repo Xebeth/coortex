@@ -32,6 +32,11 @@ structured coordinated repair.
 
 ## Workflow
 
+Resolve bundled script paths relative to the installed skill directories under
+`.codex/skills/`. For sibling helpers, resolve `../fixer-orchestrator/...`
+relative to `.codex/skills/coortex-fixer-lane/`, not relative to the
+repository root.
+
 1. Read the scoped family or continuation packet.
 2. If this is a continuation packet, validate it before resuming. When the
    original lane plan JSON is available, use the shared helper from the sibling

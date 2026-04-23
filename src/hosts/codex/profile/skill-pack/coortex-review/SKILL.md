@@ -67,6 +67,9 @@ These match the built-in lens ids configured by `review-baseline` and used by
 Use the bundled helper to avoid standalone review against an already active
 top-level review/fix campaign in the same worktree:
 
+Resolve bundled script paths relative to this installed skill directory under
+`.codex/skills/coortex-review/`, not relative to the repository root.
+
 ```bash
 python scripts/review_state.py check-active-campaign --project-root .
 ```

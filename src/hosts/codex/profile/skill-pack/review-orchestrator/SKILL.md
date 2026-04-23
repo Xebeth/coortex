@@ -27,6 +27,9 @@ needed, and assigns the final family grouping, reopen status, and downstream
 
 ## Workflow
 
+Resolve bundled script paths relative to this installed skill directory under
+`.codex/skills/review-orchestrator/`, not relative to the repository root.
+
 1. Load these references as needed:
    - `references/prep-and-refusal.md`
    - `references/execution-model.md`
