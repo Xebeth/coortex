@@ -20,6 +20,7 @@ TRACE_PHASES = {
     "lane_result",
     "omission_followup",
     "family_synthesis",
+    "review_handoff_emitted",
     "refreshed_review_handoff",
     "final_review",
 }
@@ -78,6 +79,11 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "thin_areas": "list",
         "still_actionable": "bool",
     },
+    "review_handoff_emitted": {
+        "path": "string",
+        "family_ids": "list",
+        "kind": "string",
+    },
     "refreshed_review_handoff": {
         "family_ids_carried_forward": "list",
         "reason": "string",
@@ -89,6 +95,9 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "boundedness_exceptions_summary": "present",
     },
 }
+
+ACTIONABLE_FINAL_VERDICTS = {"REQUEST CHANGES", "REQUEST_CHANGES", "HANDOFF_READY"}
+HANDOFF_EMISSION_KINDS = {"initial", "refreshed"}
 
 KNOWN_RUNTIME_FOCUS_TOKENS = {
     "goal-fidelity",
@@ -286,7 +295,40 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
         errors.extend(validate_omission_entries(record.get("omission_entries"), f"{prefix} phase {phase!r}"))
     if phase == "omission_followup":
         errors.extend(validate_followup_decisions(record, f"{prefix} phase {phase!r}"))
+    if phase == "review_handoff_emitted":
+        errors.extend(validate_review_handoff_emitted_record(record, f"{prefix} phase {phase!r}"))
+    if phase == "final_review":
+        errors.extend(validate_final_review_record(record, f"{prefix} phase {phase!r}"))
 
+    return errors
+
+
+def validate_review_handoff_emitted_record(record: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    kind = record.get("kind")
+    if kind not in HANDOFF_EMISSION_KINDS:
+        errors.append(f"{prefix} kind must be one of {sorted(HANDOFF_EMISSION_KINDS)}")
+    family_ids = record.get("family_ids")
+    if isinstance(family_ids, list):
+        if not family_ids:
+            errors.append(f"{prefix} family_ids must not be empty")
+        elif any(not isinstance(item, str) or not item.strip() for item in family_ids):
+            errors.append(f"{prefix} family_ids entries must be non-empty strings")
+    return errors
+
+
+def validate_final_review_record(record: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    final_verdict = record.get("final_verdict")
+    if final_verdict in ACTIONABLE_FINAL_VERDICTS:
+        require_trace_field_type(record, "review_handoff_path", "string", errors, prefix)
+        require_trace_field_type(record, "actionable_family_ids", "list", errors, prefix)
+        actionable_family_ids = record.get("actionable_family_ids")
+        if isinstance(actionable_family_ids, list):
+            if not actionable_family_ids:
+                errors.append(f"{prefix} actionable_family_ids must not be empty when final_verdict is actionable")
+            elif any(not isinstance(item, str) or not item.strip() for item in actionable_family_ids):
+                errors.append(f"{prefix} actionable_family_ids entries must be non-empty strings")
     return errors
 
 
@@ -950,6 +992,85 @@ def lane_trace_file(args: argparse.Namespace) -> int:
     return 0
 
 
+def review_handoff_path(trace_dir: pathlib.Path) -> pathlib.Path:
+    return trace_dir / "review-handoff.json"
+
+
+def resolve_handoff_artifact_path(raw_path: str, trace_root: pathlib.Path) -> pathlib.Path:
+    path = pathlib.Path(raw_path)
+    if path.is_absolute():
+        return path
+    project_root = trace_root.parent.parent
+    return (project_root / path).resolve()
+
+
+def handoff_path_cmd(args: argparse.Namespace) -> int:
+    trace_dir = pathlib.Path(args.trace_dir)
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    path = review_handoff_path(trace_dir)
+    print(json.dumps({"review_handoff_path": str(path)}, indent=2, sort_keys=True))
+    return 0
+
+
+def load_review_handoff_payload(input_json: str) -> dict[str, Any]:
+    data = parse_json_record(input_json)
+    if "review_handoff" in data:
+        root = data.get("review_handoff")
+        if not isinstance(root, dict):
+            raise SystemExit("review_handoff must be a mapping")
+        payload = data
+    else:
+        payload = {"review_handoff": data}
+        root = data
+    families = root.get("families")
+    if not isinstance(families, list):
+        raise SystemExit("review_handoff.families must be a list")
+    return payload
+
+
+def write_review_handoff(args: argparse.Namespace) -> int:
+    trace_dir = pathlib.Path(args.trace_dir)
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    if args.input_file:
+        payload = load_review_handoff_payload(pathlib.Path(args.input_file).read_text(encoding="utf-8"))
+    else:
+        payload = load_review_handoff_payload(args.input_json)
+    handoff_path = review_handoff_path(trace_dir)
+    handoff_path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    review_handoff = payload["review_handoff"]
+    family_ids = [
+        str(entry.get("family_id"))
+        for entry in review_handoff.get("families", [])
+        if isinstance(entry, dict) and isinstance(entry.get("family_id"), str) and str(entry.get("family_id")).strip()
+    ]
+    print(
+        json.dumps(
+            {
+                "review_handoff_path": str(handoff_path),
+                "family_ids": family_ids,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def latest_review_handoff_emission(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for record in reversed(records):
+        phase = str(record.get("phase") or "")
+        if phase == "review_handoff_emitted":
+            return record
+        if phase == "refreshed_review_handoff":
+            return {
+                "phase": phase,
+                "path": record.get("path"),
+                "family_ids": record.get("family_ids_carried_forward"),
+                "kind": "refreshed",
+            }
+    return None
+
+
 def append_trace(args: argparse.Namespace) -> int:
     trace_file = pathlib.Path(args.trace_file)
     trace_file.parent.mkdir(parents=True, exist_ok=True)
@@ -972,15 +1093,95 @@ def append_trace(args: argparse.Namespace) -> int:
             )
         )
         return 2
+    existing_records = read_jsonl(trace_file)
+    phase = str(record.get("phase") or "")
+    if phase == "final_review" and str(record.get("final_verdict") or "") in ACTIONABLE_FINAL_VERDICTS:
+        review_handoff_path_value = str(record.get("review_handoff_path") or "")
+        handoff_emission = latest_review_handoff_emission(existing_records)
+        actionable_family_ids = [str(item) for item in record.get("actionable_family_ids") or []]
+        if handoff_emission is None:
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": False,
+                        "status": "error",
+                        "errors": ["trace record phase 'final_review' is actionable but no prior review_handoff_emitted record exists"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        trace_root = trace_file.parent.parent
+        handoff_path = resolve_handoff_artifact_path(review_handoff_path_value, trace_root)
+        if not handoff_path.exists():
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": False,
+                        "status": "error",
+                        "errors": ["trace record phase 'final_review' review_handoff_path does not exist on disk"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        emitted_path = str(handoff_emission.get("path") or "")
+        emitted_family_ids = [str(item) for item in handoff_emission.get("family_ids") or []]
+        if emitted_path:
+            resolved_emitted_path = resolve_handoff_artifact_path(emitted_path, trace_root)
+            if resolved_emitted_path != handoff_path:
+                print(
+                    json.dumps(
+                        {
+                            "trace_file": str(trace_file),
+                            "appended": False,
+                            "status": "error",
+                            "errors": ["trace record phase 'final_review' review_handoff_path does not match the latest review_handoff_emitted record"],
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 2
+        if emitted_family_ids != actionable_family_ids:
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": False,
+                        "status": "error",
+                        "errors": ["trace record phase 'final_review' actionable_family_ids must match the latest review_handoff_emitted record"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+
     with trace_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True))
         handle.write("\n")
 
     trace_root = trace_file.parent.parent
     active_cleared = False
-    phase = record.get("phase")
     record_run_id = str(record.get("run_id") or "")
     record_campaign_id = str(record.get("campaign_id") or "")
+    if phase == "review_handoff_emitted":
+        active = load_active_campaign(trace_root)
+        if active and str(active.get("campaign_type") or "") == "seam-walkback-review":
+            active_campaign_id = str(active.get("campaign_id") or "")
+            if record_campaign_id and record_campaign_id == active_campaign_id:
+                active["child_review_handoff_path"] = record.get("path")
+                active["child_review_handoff_family_ids"] = list(record.get("family_ids") or [])
+                active["child_review_handoff_kind"] = record.get("kind")
+                active["child_review_handoff_emitted_at_utc"] = str(
+                    record.get("timestamp_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
+                write_active_campaign(trace_root, active)
     if phase == "final_review":
         active = load_active_campaign(trace_root)
         if active:
@@ -992,6 +1193,13 @@ def append_trace(args: argparse.Namespace) -> int:
             elif active_type == "seam-walkback-review" and record_campaign_id and record_campaign_id == active_campaign_id:
                 active["child_final_review_run_id"] = record_run_id
                 active["child_final_review_at_utc"] = str(record.get("timestamp_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                active["child_final_verdict"] = record.get("final_verdict")
+                review_handoff_path_value = record.get("review_handoff_path")
+                if review_handoff_path_value:
+                    active["child_review_handoff_path"] = review_handoff_path_value
+                actionable_family_ids = record.get("actionable_family_ids")
+                if isinstance(actionable_family_ids, list):
+                    active["child_review_handoff_family_ids"] = [str(item) for item in actionable_family_ids]
                 write_active_campaign(trace_root, active)
 
     print(
@@ -1818,6 +2026,23 @@ def build_parser() -> argparse.ArgumentParser:
     lane_file.add_argument("--family-name")
     lane_file.add_argument("--target")
     lane_file.set_defaults(func=lane_trace_file)
+
+    handoff_path = subparsers.add_parser(
+        "handoff-path",
+        help="Resolve the canonical review_handoff path inside an orchestrator run directory.",
+    )
+    handoff_path.add_argument("--trace-dir", required=True)
+    handoff_path.set_defaults(func=handoff_path_cmd)
+
+    write_handoff = subparsers.add_parser(
+        "write-review-handoff",
+        help="Persist a review_handoff to the canonical path inside an orchestrator run directory.",
+    )
+    write_handoff.add_argument("--trace-dir", required=True)
+    write_handoff_group = write_handoff.add_mutually_exclusive_group(required=True)
+    write_handoff_group.add_argument("--input-json")
+    write_handoff_group.add_argument("--input-file")
+    write_handoff.set_defaults(func=write_review_handoff)
 
     append = subparsers.add_parser(
         "append-trace",

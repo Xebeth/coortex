@@ -162,6 +162,10 @@ When targeted return review leaves one or more families still open and
 actionable, also emit a refreshed downstream `review_handoff` containing only
 those families.
 
+Persist that refreshed handoff to the canonical run-local
+`.coortex/review-trace/<run_id>/review-handoff.json` path. Do not leave the
+next fixer slice with only prose or verdict rows.
+
 Use the normal `review_handoff` contract shape from
 `references/review-handoff.md`, but rebuild each open family entry from:
 - the original family entry
@@ -225,6 +229,8 @@ Rules for the refreshed downstream handoff:
   manifestations, sibling paths, thin areas, or revised owning-seam hints
 - make the refreshed handoff absorb the subagent feedback so the next fixer run
   does not need to reverse-engineer the open seam from prose
+- trace the persisted handoff with `review_handoff_emitted` and keep its family
+  ids aligned with the final actionable-family set surfaced in `final_review`
 - do not drop a fixer-reported deferred family that still remains actionable; either carry it forward with structured context or explain why it was excluded
 - when a deferred family is carried forward without a new lane, let the helper
   normalize `closure_status`, `open_reason_kind`, and `carry_forward_context`

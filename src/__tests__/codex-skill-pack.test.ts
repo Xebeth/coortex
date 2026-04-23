@@ -159,6 +159,25 @@ test("seam walkback explicitly forbids offer-to-continue stops after successful 
   }
 });
 
+test("review orchestrator requires persisted review handoff artifacts for actionable outcomes", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/report-contract.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/trace-artifact.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/return-review.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /review-handoff\.json|persist(?:ed)? .*review_handoff|review_handoff_path|review_handoff_emitted/i,
+      path
+    );
+  }
+});
+
 test("fixer orchestrator explicitly requires same-worker continuation semantics", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",

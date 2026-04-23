@@ -164,6 +164,7 @@ Include:
     - highest severity
     - why the seam is hot
 - structured `review_handoff` for downstream fix workflows
+- `review_handoff_path` when actionable families remain
 - per-family `closure_gate` inside the `review_handoff`
 - when doing targeted return review, per-family closure-claim verdicts from targeted return-review synthesis comparing the `review_return_handoff` and actual fix diff against the `closure_gate` embedded in the `review_handoff`
 - when doing targeted return review, per-family `closure_gate_checked` results showing which gate items were satisfied, unsatisfied, or inconclusive and why
@@ -202,6 +203,8 @@ Rules:
   outcome such as `HANDOFF_READY` instead of forcing the normal
   `APPROVE`/`REQUEST CHANGES` verdict shape when the coordinator's job was to
   emit a fixer-ready handoff rather than judge a concrete patch.
+- Do not emit `HANDOFF_READY` or an actionable `REQUEST CHANGES` terminal
+  outcome unless the downstream `review_handoff` has been persisted to disk.
 - Keep families as the canonical problem-tracking unit. Use seams as an
   ownership and follow-up grouping, not as a replacement for family identity.
 - Aggregate the final families by likely owning seam and surface a concise hot
@@ -222,6 +225,10 @@ Rules:
 - Use the helper's current-run reopen summary, not prose reconstruction, to decide which reopened families to surface in the human-facing final output.
 - In targeted return-review mode, when the reviewer can name a concrete next action or unblock step for a still-actionable family, encode it in that family's `next_step` instead of leaving it only in human prose.
 - In targeted return-review mode, do not misuse the `review_handoff` key for a verdict ledger. A downstream handoff must follow `references/review-handoff.md`.
+- If actionable families remain, persist the structured `review_handoff` to the
+  canonical run-local file instead of only describing it in prose.
+- `review_handoff_path` must point at that persisted file, and the human-facing
+  family summary must match the family ids written there.
 - In targeted return-review mode, the lane output schema overrides the default `$coortex-review-lane` summary format. Emit the requested closure-verdict fields directly instead of wrapping them in a generic issue-review heading.
 - In targeted return-review mode, surface the `closure_gate_checked` evidence directly. A family-level sentence such as "family closed confirmed" is not enough by itself.
 - Keep deferred-thread reporting attached to the family that produced the thread. Do not flatten multiple families' deferred work into one unlabeled list.

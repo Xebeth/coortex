@@ -62,8 +62,8 @@ needed, and assigns the final family grouping, reopen status, and downstream
 6. If this is a targeted return review:
    - keep the current return-review flow
 7. Synthesize the final review result.
-8. Emit a fixer-ready downstream `review_handoff` when actionable families
-   remain.
+8. Emit **and persist** a fixer-ready downstream `review_handoff` at the
+   canonical trace path when actionable families remain.
 9. Append final trace records and normalized family-ledger outcomes.
 10. Surface families reopened in the current run using the helper's ledger
     summary rather than prose reconstruction.
@@ -132,6 +132,10 @@ active.
   stale, or too underspecified for grounded execution.
 - In packet-driven exploration mode, refuse if the packet fails validation or
   no longer matches the current worktree/head state.
+- A run with actionable families is not complete until `review-handoff.json`
+  has been written to the canonical trace path, traced via
+  `review_handoff_emitted`, and referenced by the terminal `final_review`
+  record.
 - Standalone top-level orchestrator campaigns must not run concurrently with an
   active seam-walk or fixer-orchestrator campaign in the same worktree.
 - Packet-driven orchestrator exploration is allowed during an active seam-walk

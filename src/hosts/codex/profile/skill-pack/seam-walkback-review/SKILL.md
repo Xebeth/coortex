@@ -260,12 +260,26 @@ exploration mode in the same workflow turn. The user should not need to
 manually chain the next skill, and packet emission alone is not a successful
 stop point.
 
+If the downstream orchestrator leaves actionable families, do not consider the
+handoff complete until it has persisted the canonical downstream
+`review-handoff.json` artifact. Surface the packet path, downstream
+orchestrator run id, and downstream `review_handoff` path in the final summary
+when that artifact exists.
+
 ### 8. End with a real terminal record
 
 Every non-aborted run must end with an explicit terminal record after handoff.
 `handoff_emitted` is not terminal by itself; the downstream
 `$review-orchestrator` packet-driven run must have completed its own
 `final_review` before the seam-walk campaign may report completion.
+
+Use `handoff-completed` only when the downstream orchestrator either:
+- ended with `NO_ACTIONABLE_FAMILIES`, or
+- persisted and traced the downstream `review_handoff`
+
+If actionable families remain but the downstream handoff artifact is missing,
+end as `blocked` with the missing-handoff reason instead of reporting a clean
+handoff completion.
 
 Do not leave a campaign with only intermediate records such as review,
 verification, or commit-like boundaries.

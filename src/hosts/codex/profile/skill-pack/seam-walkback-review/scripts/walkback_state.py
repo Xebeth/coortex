@@ -410,8 +410,12 @@ def append_trace(args: argparse.Namespace) -> int:
         terminal_state = str(record.get("terminal_state") or "")
         if terminal_state == "handoff-completed":
             child_final_review_run_id = ""
+            child_final_verdict = ""
+            child_review_handoff_path = ""
             if active and str(active.get("campaign_id") or "") == run_id:
                 child_final_review_run_id = str(active.get("child_final_review_run_id") or "")
+                child_final_verdict = str(active.get("child_final_verdict") or "")
+                child_review_handoff_path = str(active.get("child_review_handoff_path") or "")
             if not child_final_review_run_id:
                 print(
                     json.dumps(
@@ -427,6 +431,40 @@ def append_trace(args: argparse.Namespace) -> int:
                     )
                 )
                 return 2
+            if child_final_verdict != "NO_ACTIONABLE_FAMILIES":
+                if not child_review_handoff_path:
+                    print(
+                        json.dumps(
+                            {
+                                "trace_file": str(trace_file),
+                                "appended": False,
+                                "status": "error",
+                                "reason": "missing-review-handoff-artifact",
+                                "active_campaign_cleared": False,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                    )
+                    return 2
+                handoff_path = Path(child_review_handoff_path)
+                if not handoff_path.is_absolute():
+                    handoff_path = (trace_root.parent.parent / handoff_path).resolve()
+                if not handoff_path.exists():
+                    print(
+                        json.dumps(
+                            {
+                                "trace_file": str(trace_file),
+                                "appended": False,
+                                "status": "error",
+                                "reason": "missing-review-handoff-artifact",
+                                "active_campaign_cleared": False,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        )
+                    )
+                    return 2
 
     with trace_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True) + "\n")

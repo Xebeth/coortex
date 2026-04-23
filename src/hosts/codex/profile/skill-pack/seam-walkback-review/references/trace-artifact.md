@@ -156,3 +156,13 @@ downstream packet-driven `$review-orchestrator` phase through its own terminal
 `final_review`, and then recorded its own terminal walkback state. Packet
 emission alone does not justify
 `handoff-completed`.
+
+`handoff-completed` is valid only when one of these is true:
+- the downstream packet-driven orchestrator finished with
+  `NO_ACTIONABLE_FAMILIES`
+- the downstream packet-driven orchestrator persisted
+  `.coortex/review-trace/<run_id>/review-handoff.json` and traced that path
+
+If actionable families remain but the downstream `review_handoff` artifact is
+missing, do not use `handoff-completed`; treat the campaign as blocked on a
+missing downstream handoff artifact instead.

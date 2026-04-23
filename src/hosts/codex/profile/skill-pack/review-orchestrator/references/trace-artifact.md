@@ -7,6 +7,8 @@ Use the bundled helper for deterministic path/file management:
 ```bash
 python scripts/return_review_state.py init-trace --project-root . --mode <mode>
 python scripts/return_review_state.py lane-trace-file --trace-dir <dir> --lane-type <type> --session-id <id> --family-id <family_id> --family-name "<family name>"
+python scripts/return_review_state.py handoff-path --trace-dir <dir>
+python scripts/return_review_state.py write-review-handoff --trace-dir <dir> --input-file <handoff-json>
 python scripts/return_review_state.py append-trace --trace-file <path> --record-file <json-file>
 python scripts/return_review_state.py summarize-lane-omissions --lane-result-file <lane-json> [--lane-result-file <lane-json> ...]
 python scripts/return_review_state.py append-family-ledger --run-id <run_id> --review-mode <mode> --review-target-mode <target_mode> --review-target-summary "<summary>" --family-id <family_id> --family-state <state>
@@ -43,6 +45,8 @@ Suggested `run_id` shape:
 Inside that run directory:
 - coordinator file:
   - `coordinator.jsonl`
+- canonical downstream handoff artifact when actionable families remain:
+  - `review-handoff.json`
 - subagent/lane files:
   - for family-local lanes:
     - `<lane_type>-<family_id>-<family_name_slug>-<session_id>.jsonl`
@@ -83,7 +87,7 @@ At minimum, append these record types when applicable:
 - `lane_result`
 - `omission_followup`
 - `family_synthesis`
-- `refreshed_review_handoff`
+- `review_handoff_emitted`
 - `final_review`
 
 ## Common fields
@@ -185,11 +189,23 @@ Include:
 - `thin_areas`
 - `still_actionable`
 
-## Refreshed-handof record
+## Review-handoff-emitted record
 
 Include:
-- `family_ids_carried_forward`
-- `reason`
+- `path`
+- `family_ids`
+- `kind`
+  - `initial`
+  - `refreshed`
+
+Rules:
+- When actionable families remain, persist the machine-oriented downstream
+  `review_handoff` to the canonical run-local file:
+  `.coortex/review-trace/<run_id>/review-handoff.json`
+- `review_handoff_emitted` records the persisted artifact path and the exact
+  actionable family ids included in that file.
+- Do not treat prose describing the handoff as a substitute for the persisted
+  file and trace record.
 
 ## Final-review record
 
@@ -198,6 +214,8 @@ Include:
 - `review_shape_trace_summary`
 - `unexplored_area_ledger_summary`
 - `boundedness_exceptions_summary`
+- `review_handoff_path` when actionable families remain
+- `actionable_family_ids` when actionable families remain
 
 ## Family ledger
 
@@ -215,3 +233,12 @@ The ledger is primarily an analysis artifact on disk. Do not serialize the full
 ledger into normal review output or handoffs unless the user explicitly asks
 for it. If the current run needs reopened-family notes in normal output, get
 that list from `current-run-reopens`.
+
+## Actionable completion rule
+
+- A run with actionable families is not complete until `review-handoff.json`
+  has been written, `review_handoff_emitted` has been appended, and
+  `final_review` points at that persisted path.
+- `append-trace` should reject actionable `final_review` records when the
+  canonical handoff file is missing or the prior `review_handoff_emitted`
+  record does not match the final actionable family set.

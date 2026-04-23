@@ -188,7 +188,10 @@ The coordinator must:
 - deduplicate manifestations
 - roll severity up to family and review levels
 - preserve deferred-thread results under the family they came from instead of flattening them into one global list
-- when targeted return review leaves one or more families actionable, synthesize a refreshed open-families-only downstream `review_handoff`
+- when targeted return review leaves one or more families actionable, synthesize
+  a refreshed open-families-only downstream `review_handoff`, persist it to the
+  canonical `review-handoff.json` path, and trace that emission before
+  `final_review`
 - rebuild each carried-forward family entry from the original family plus the independent lane findings
 - do not use the `review_handoff` key for a verdict ledger or unchanged copy of the original handoff
 - roll lane self-check signals up into the final report so skipped areas, stop reasons, confidence limits, remaining coverage risks, and boundedness exceptions are visible to the user

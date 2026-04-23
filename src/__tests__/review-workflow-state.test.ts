@@ -1588,6 +1588,117 @@ test("orchestrator packet mode validates discovery packets and respects the acti
   });
 
   const finalReviewPath = join(tempDir, "packet-final-review.json");
+  const missingHandoffFinalReviewPath = join(tempDir, "packet-final-review-missing-handoff.json");
+  await writeFile(
+    missingHandoffFinalReviewPath,
+    JSON.stringify(
+      {
+        run_id: packetModeJson.run_id,
+        campaign_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-20T12:28:00Z",
+        skill: "review-orchestrator",
+        mode: "packet-exploration",
+        phase: "final_review",
+        review_target: { mode: "branch", scope_summary: "test" },
+        final_verdict: "REQUEST_CHANGES",
+        actionable_family_ids: ["F-OP-001"],
+        review_handoff_path: join(tempDir, traceRoot, packetModeJson.run_id, "review-handoff.json"),
+        review_shape_trace_summary: { mode: "packet-exploration" },
+        unexplored_area_ledger_summary: { areas: [] },
+        boundedness_exceptions_summary: { exceptions: [] }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const missingHandoffFinalReview = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    missingHandoffFinalReviewPath
+  ]);
+  assert.equal(missingHandoffFinalReview.exitCode, 2);
+  assert.deepEqual(missingHandoffFinalReview.json, {
+    appended: false,
+    errors: ["trace record phase 'final_review' is actionable but no prior review_handoff_emitted record exists"],
+    status: "error",
+    trace_file: join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl")
+  });
+
+  const handoffPathResult = await runPythonJson(returnReviewStateScript, [
+    "handoff-path",
+    "--trace-dir",
+    join(tempDir, traceRoot, packetModeJson.run_id)
+  ]);
+  assert.equal(handoffPathResult.exitCode, 0);
+  const handoffPathJson = handoffPathResult.json as { review_handoff_path: string };
+  const handoffPath = handoffPathJson.review_handoff_path;
+  assert.equal(handoffPath, join(tempDir, traceRoot, packetModeJson.run_id, "review-handoff.json"));
+
+  const reviewHandoffSourcePath = join(tempDir, "packet-review-handoff-source.json");
+  await writeFile(
+    reviewHandoffSourcePath,
+    JSON.stringify(
+      {
+        review_handoff: {
+          families: [
+            {
+              family_id: "F-OP-001",
+              title: "Example family"
+            }
+          ]
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const writeReviewHandoff = await runPythonJson(returnReviewStateScript, [
+    "write-review-handoff",
+    "--trace-dir",
+    join(tempDir, traceRoot, packetModeJson.run_id),
+    "--input-file",
+    reviewHandoffSourcePath
+  ]);
+  assert.equal(writeReviewHandoff.exitCode, 0);
+  assert.deepEqual(writeReviewHandoff.json, {
+    family_ids: ["F-OP-001"],
+    review_handoff_path: handoffPath
+  });
+
+  const handoffTraceRecordPath = join(tempDir, "packet-review-handoff-emitted.json");
+  await writeFile(
+    handoffTraceRecordPath,
+    JSON.stringify(
+      {
+        run_id: packetModeJson.run_id,
+        campaign_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-20T12:27:00Z",
+        skill: "review-orchestrator",
+        mode: "packet-exploration",
+        phase: "review_handoff_emitted",
+        review_target: { mode: "branch", scope_summary: "test" },
+        path: handoffPath,
+        family_ids: ["F-OP-001"],
+        kind: "initial"
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const handoffTraceRecord = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    handoffTraceRecordPath
+  ]);
+  assert.equal(handoffTraceRecord.exitCode, 0);
+
   await writeFile(
     finalReviewPath,
     JSON.stringify(
@@ -1600,6 +1711,8 @@ test("orchestrator packet mode validates discovery packets and respects the acti
         phase: "final_review",
         review_target: { mode: "branch", scope_summary: "test" },
         final_verdict: "REQUEST_CHANGES",
+        actionable_family_ids: ["F-OP-001"],
+        review_handoff_path: handoffPath,
         review_shape_trace_summary: { mode: "packet-exploration" },
         unexplored_area_ledger_summary: { areas: [] },
         boundedness_exceptions_summary: { exceptions: [] }
@@ -1664,6 +1777,104 @@ test("orchestrator packet mode validates discovery packets and respects the acti
     "review-orchestrator-full-review-20260420T130000Z"
   ]);
   assert.equal(standaloneAfterTerminal.exitCode, 0);
+});
+
+test("seam walk handoff-completed requires downstream handoff artifact when no clean no-actionable outcome exists", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-seam-walk-handoff-artifact-"));
+  const traceRoot = join(".coortex", "review-trace");
+
+  const seamInit = await runPythonJson(seamWalkbackStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--run-id",
+    "seam-walkback-review-20260423T090000Z"
+  ]);
+  assert.equal(seamInit.exitCode, 0);
+  const seamInitJson = seamInit.json as { run_id: string };
+
+  const packetMode = await runPythonJson(returnReviewStateScript, [
+    "init-trace",
+    "--project-root",
+    tempDir,
+    "--trace-root",
+    traceRoot,
+    "--mode",
+    "packet-exploration",
+    "--campaign-id",
+    seamInitJson.run_id,
+    "--run-id",
+    "review-orchestrator-packet-20260423T091000Z"
+  ]);
+  assert.equal(packetMode.exitCode, 0);
+  const packetModeJson = packetMode.json as { run_id: string };
+
+  const finalReviewPath = join(tempDir, "packet-final-review-blocked.json");
+  await writeFile(
+    finalReviewPath,
+    JSON.stringify(
+      {
+        run_id: packetModeJson.run_id,
+        campaign_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-23T09:12:00Z",
+        skill: "review-orchestrator",
+        mode: "packet-exploration",
+        phase: "final_review",
+        review_target: { mode: "branch", scope_summary: "test" },
+        final_verdict: "BLOCKED",
+        review_shape_trace_summary: { mode: "packet-exploration" },
+        unexplored_area_ledger_summary: { areas: [] },
+        boundedness_exceptions_summary: { exceptions: [] }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const finalReview = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    finalReviewPath
+  ]);
+  assert.equal(finalReview.exitCode, 0);
+
+  const finalWalkbackPath = join(tempDir, "final-walkback-missing-review-handoff.json");
+  await writeFile(
+    finalWalkbackPath,
+    JSON.stringify(
+      {
+        run_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-23T09:13:00Z",
+        skill: "seam-walkback-review",
+        phase: "final_walkback",
+        worktree_root: tempDir,
+        outcome_summary: "The orchestrator finished, but no downstream handoff artifact was written.",
+        terminal_state: "handoff-completed"
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const finalWalkback = await runPythonJson(seamWalkbackStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, seamInitJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    finalWalkbackPath
+  ]);
+  assert.equal(finalWalkback.exitCode, 2);
+  assert.deepEqual(finalWalkback.json, {
+    active_campaign_cleared: false,
+    appended: false,
+    reason: "missing-review-handoff-artifact",
+    status: "error",
+    trace_file: join(tempDir, traceRoot, seamInitJson.run_id, "coordinator.jsonl")
+  });
 });
 
 test("orchestrator targeted return review can run inside an active fixer campaign", async () => {
