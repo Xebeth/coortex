@@ -337,6 +337,39 @@ test("fixer verification boundary keeps broader suites on the coordinator", asyn
   }
 });
 
+test("fixer lanes require lane-safe self-review under parent campaigns", async () => {
+  const laneFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of laneFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /\$coortex-review-lane/i, path);
+    assert.match(
+      content,
+      /standalone[\s`]+\$coortex-review[\s\S]*refus|parent[\s\S]*campaign|active .*campaign lock/i,
+      path
+    );
+  }
+
+  const coordinatorFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of coordinatorFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /\$coortex-review-lane/i, path);
+    assert.match(
+      content,
+      /standalone[\s`]+\$coortex-review[\s\S]*refus|parent[\s\S]*campaign|active .*campaign lock/i,
+      path
+    );
+  }
+});
+
 test("fixer orchestrator explicitly requires atomic semantic commits and patient waiting", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",

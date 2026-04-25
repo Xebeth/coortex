@@ -109,11 +109,14 @@ Rules:
 - do not run repo-wide/full-suite broader verification in every lane by default
 - the fixer coordinator owns broader verification required for `family-closed`
 - after the worker implements the slice, it must run lane-local
-  `$coortex-review`
+  `$coortex-review-lane`
 - after that, it must run lane-local `$coortex-deslop`
 - the worker reruns targeted verification after that self-cleanup
 - the worker emits `review_return_handoff`
 - the worker does **not** commit
+- do not substitute standalone `$coortex-review` for that worker self-review,
+  because standalone review should refuse while the parent fixer or review
+  campaign still owns the worktree
 
 The fixer coordinator then:
 - invokes `$review-orchestrator` in targeted return-review mode

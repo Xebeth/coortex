@@ -82,7 +82,7 @@ and surface the protocol error instead of prose-completing the run.
      state
    - implement the fix by editing code, tests, and docs at the owning seam
    - run targeted verification only
-   - run lane-local `$coortex-review`
+   - run lane-local `$coortex-review-lane`
    - run lane-local `$coortex-deslop`
    - rerun targeted verification only
    - emit a mandatory `review_return_handoff`
@@ -225,8 +225,11 @@ Use `references/intake-and-normalization.md`.
 - Keep the same worker attached to the same lane until
   `$review-orchestrator` targeted return review either approves closure or a
   genuine blocker forces the lane terminal.
-- Each worker lane must run lane-local `$coortex-review` and lane-local
+- Each worker lane must run lane-local `$coortex-review-lane` and lane-local
   `$coortex-deslop` before handing results back to the coordinator.
+- Worker self-review must not fall back to standalone `$coortex-review`,
+  because standalone review correctly refuses while the parent fixer or review
+  campaign owns the worktree.
 - The coordinator must then send the lane output to `$review-orchestrator`
   targeted return review. If return review rejects closure, use
   `scripts/fix_result_state.py build-lane-continuation ...` to send the
