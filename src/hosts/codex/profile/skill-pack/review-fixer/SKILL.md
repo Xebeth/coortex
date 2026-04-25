@@ -33,7 +33,7 @@ In those cases, use `$fixer-orchestrator`, `$coortex-review`, or
 - Repair at the owning seam, not the nearest manifestation.
 - Prefer converging on an existing owner over adding new helper glue.
 - Lock behavior with targeted verification before and after repair.
-- Run a bounded `$coortex-review` and `$coortex-deslop` pass on your own
+- Run a bounded `$coortex-deslop` and `$coortex-review` pass on your own
   changes before you claim the slice is done.
 - Prefer explicit residual risk over pretending closure is stronger than the
   evidence.
@@ -49,8 +49,8 @@ In those cases, use `$fixer-orchestrator`, `$coortex-review`, or
 4. Normalize the work into one bounded repair objective and one closure target.
 5. Implement the fix at the owning seam.
 6. Run targeted verification.
-7. Run bounded `$coortex-review` on the touched scope.
-8. Run bounded `$coortex-deslop` on the touched scope.
+7. Run bounded `$coortex-deslop` on the touched scope.
+8. Run bounded `$coortex-review` on the touched scope.
 9. Rerun targeted verification after any cleanup.
 10. Report the resulting state, residual risks, and any still-open adjacent
     threads.

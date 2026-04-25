@@ -82,8 +82,8 @@ and surface the protocol error instead of prose-completing the run.
      state
    - implement the fix by editing code, tests, and docs at the owning seam
    - run targeted verification only
-   - run lane-local `$coortex-review-lane`
    - run lane-local `$coortex-deslop`
+   - run lane-local `$coortex-review-lane`
    - rerun targeted verification only
    - emit a mandatory `review_return_handoff`
 10. The fixer coordinator must send every lane result through
@@ -93,8 +93,8 @@ and surface the protocol error instead of prose-completing the run.
     coordinator-side **read-only** pre-commit gate over the final approved
     diff and append a `closure_approved` trace record for the approved family
     set:
-    - bounded `$coortex-review`
     - bounded `$coortex-deslop` in advisory/read-only mode
+    - bounded `$coortex-review`
     - rerun verification only if the same implementer lane had to make follow-up
       changes after the gate handed back new work
 12. Append `pre_commit_gate_result` for that gate outcome. If the gate finds
@@ -196,7 +196,7 @@ and surface the protocol error instead of prose-completing the run.
 - Only interrupt or replace a live lane when the user explicitly asks, a
   deterministic validation/blocker failure appears, or the lane is clearly
   stuck outside its contract and cannot make forward progress.
-- If coordinator-side `$coortex-review`, coordinator-side `$coortex-deslop`, or
+- If coordinator-side `$coortex-deslop`, coordinator-side `$coortex-review`, or
   targeted return review finds more work, the coordinator must hand that work
   back to the same implementer lane and resume the review loop. It must not
   patch the repo locally to "finish the slice."
@@ -235,8 +235,8 @@ Use `references/intake-and-normalization.md`.
 - Keep the same worker attached to the same lane until
   `$review-orchestrator` targeted return review either approves closure or a
   genuine blocker forces the lane terminal.
-- Each worker lane must run lane-local `$coortex-review-lane` and lane-local
-  `$coortex-deslop` before handing results back to the coordinator.
+- Each worker lane must run lane-local `$coortex-deslop` and lane-local
+  `$coortex-review-lane` before handing results back to the coordinator.
 - Worker self-review must not fall back to standalone `$coortex-review`,
   because standalone review correctly refuses while the parent fixer or review
   campaign owns the worktree.
@@ -255,9 +255,9 @@ Use `references/intake-and-normalization.md`.
   because the run has been quiet for several minutes.
 - Coordinator-side pre-commit gate is mandatory after return review approval
   and before commit:
-  - run bounded `$coortex-review` on the final approved diff
   - run bounded `$coortex-deslop` on that same bounded scope in advisory/read-
     only mode
+  - run bounded `$coortex-review` on the final approved diff
   - if either gate finds more work, send it back to the same implementer lane
     and resume the loop instead of patching locally
   - if the gate stays clear, commit immediately for that approved lane/slice

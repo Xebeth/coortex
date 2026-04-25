@@ -405,11 +405,23 @@ test("fixer orchestrator explicitly requires atomic semantic commits and patient
       /wait patiently|do not steer|do not interrupt|do not .*kill|quiet/i,
       path
     );
-    assert.match(
-      content,
-      /\$coortex-review[\s\S]*\$coortex-deslop|\$coortex-deslop[\s\S]*\$coortex-review/i,
-      path
-    );
+  }
+});
+
+test("repair-oriented skills run deslop before review", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /\$coortex-deslop[\s\S]*\$coortex-review(?:-lane)?/i, path);
   }
 });
 

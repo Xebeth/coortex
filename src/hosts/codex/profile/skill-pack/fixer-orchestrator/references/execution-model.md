@@ -8,7 +8,7 @@
 4. Owning-seam and write-set validation
 5. Execution decision
 6. Repair lanes
-7. Lane-local self-review and self-deslop
+7. Lane-local self-deslop and self-review
 8. Independent targeted return review
 9. Same-lane continuation or approval
 10. Family closeout checkpoint
@@ -109,8 +109,8 @@ Rules:
 - do not run repo-wide/full-suite broader verification in every lane by default
 - the fixer coordinator owns broader verification required for `family-closed`
 - after the worker implements the slice, it must run lane-local
-  `$coortex-review-lane`
-- after that, it must run lane-local `$coortex-deslop`
+  `$coortex-deslop`
+- after that, it must run lane-local `$coortex-review-lane`
 - the worker reruns targeted verification after that self-cleanup
 - the worker emits `review_return_handoff`
 - the worker does **not** commit
@@ -150,8 +150,8 @@ If return review approves closure:
 - append `closure_approved` for the approved family set
 - the fixer coordinator must run a coordinator-side pre-commit gate on the
   final approved diff:
-  - bounded `$coortex-review`
   - bounded `$coortex-deslop` in advisory/read-only mode
+  - bounded `$coortex-review`
 - append `pre_commit_gate_result` for that gate outcome
 - if the gate finds cleanup-only residue, send back one consolidated
   `commit-ready cleanup sweep` to the same implementer lane instead of
@@ -188,7 +188,7 @@ After the coordinator spawns a worker lane or a targeted return-review lane:
 authority for this transitional orchestrated fixer model.
 
 That means:
-- worker self-review and self-deslop are required but not sufficient
+- worker self-deslop and self-review are required but not sufficient
 - fixer coordinator batching is required but not sufficient
 - only reviewer-approved families may be committed as closed
 

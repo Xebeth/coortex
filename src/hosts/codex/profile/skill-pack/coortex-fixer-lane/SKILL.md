@@ -27,7 +27,7 @@ structured coordinated repair.
 - Treat the closure gate as the family acceptance target.
 - Preserve same-worker thread continuity when resuming from a valid
   continuation packet.
-- Run lane-safe self-review and self-deslop before handing back results.
+- Run lane-safe self-deslop and self-review before handing back results.
 - Emit `review_return_handoff` and never commit.
 
 ## Workflow
@@ -62,11 +62,11 @@ python ../fixer-orchestrator/scripts/fix_result_state.py validate-lane-continuat
    analysis from scratch after a valid continuation packet.
 4. Implement the bounded fix at the owning seam.
 5. Run targeted verification only.
-6. Run lane-local `$coortex-review-lane`, not standalone `$coortex-review`.
+6. Run lane-local `$coortex-deslop`.
+7. Run lane-local `$coortex-review-lane`, not standalone `$coortex-review`.
    Standalone `$coortex-review` correctly refuses while the parent
    fixer-orchestrator or review-orchestrator campaign owns the worktree, so it
    must not be used to satisfy worker self-review.
-7. Run lane-local `$coortex-deslop`.
 8. Rerun targeted verification only.
 9. Emit `review_return_handoff` for the coordinator.
 10. Stop. Do not commit.
