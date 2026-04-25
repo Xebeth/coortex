@@ -73,6 +73,11 @@ The mutating cleanup workflow below applies only to post-fix cleanup slices.
   already exists.
 - Remove or absorb stale glue instead of layering new local plumbing beside the
   real owner.
+- Keep semantic ownership-collapse checks checklist-driven. Mechanical
+  seam-move residue may be flagged or cleaned inside scope, but semantic
+  ownership decisions such as moving stale-run cleanup classification back into
+  persistence require explicit implementer/reviewer judgment, not automatic
+  deslop deletion.
 - If the cleanup reveals a sibling smell inside the same touched files, clean it
   up in-scope. If it points outside the bounded slice, report it as residual
   risk rather than widening the pass.

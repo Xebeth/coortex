@@ -171,6 +171,11 @@ and surface the protocol error instead of prose-completing the run.
 - Treat reviewer approval, pre-commit gate outcome, and actual commit-readiness
   as separate traceable states. Record them with `closure_approved`,
   `pre_commit_gate_result`, and `commit_ready` before any `family_commit`.
+- `commit_ready` must include explicit self-deslop evidence, lane-safe
+  self-review evidence, seam-residue sweep evidence, final targeted
+  verification, and any excluded unrelated edits. Reviewer approval, green gate
+  reruns, `git diff --check`, narrow greps, and passing targeted suites are not
+  sufficient by themselves.
 - Do not append `family_commit` unless the same family set already has a clear
   `pre_commit_gate_result` and an explicit `commit_ready` record.
 - The fixer coordinator is read-only with respect to repo content. It must not
@@ -200,6 +205,10 @@ and surface the protocol error instead of prose-completing the run.
   targeted return review finds more work, the coordinator must hand that work
   back to the same implementer lane and resume the review loop. It must not
   patch the repo locally to "finish the slice."
+- If a coordinator-side gate produces unrelated edits outside the intended
+  commit set, leave them uncommitted, exclude them from the current atomic
+  commit, record them in `commit_ready.excluded_unrelated_edits`, and surface
+  them to the user for disposition.
 - Always emit a `review_return_handoff`. Do not rely on fixer self-audit as the terminal acceptance step.
 - Use the bundled `scripts/fix_result_state.py` helper to validate the final `review_return_handoff` and deferred-family structure before finalizing. Serialize the relevant handoff blocks to JSON before invoking it.
 - Use the bundled `scripts/fix_result_state.py` helper for deterministic trace path/file handling as well as final handoff validation. Keep the model focused on repair judgments and evidence.

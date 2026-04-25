@@ -479,6 +479,23 @@ test("fixer orchestrator makes approval ladder and cleanup sweep explicit", asyn
   }
 });
 
+test("fixer commit-ready evidence and unrelated edit handling are explicit", async () => {
+  const fixerFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/trace-artifact.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of fixerFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /self[_-]?deslop|lane-safe\s+self-review|lane_review_evidence/i, path);
+    assert.match(content, /seam-residue sweep|seam_residue_sweep_evidence/i, path);
+    assert.match(content, /final targeted|final_targeted_verification/i, path);
+    assert.match(content, /excluded_unrelated_edits|unrelated edits/i, path);
+  }
+});
+
 test("coortex deslop flags mechanical seam-move residue in touched scope", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
@@ -492,6 +509,19 @@ test("coortex deslop flags mechanical seam-move residue in touched scope", async
       /stale shims|pass-through wrappers|dead helpers|unused params|type-only import|removed-symbol residue/i,
       path
     );
+  }
+});
+
+test("coortex deslop keeps semantic ownership checks judgment-driven", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /semantic ownership|ownership-collapse/i, path);
+    assert.match(content, /checklist-driven|implementer\/reviewer judgment|not automatic/i, path);
   }
 });
 

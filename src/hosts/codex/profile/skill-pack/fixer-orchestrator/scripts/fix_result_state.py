@@ -95,6 +95,11 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     "commit_ready": {
         "family_ids": "list",
         "readiness_basis": "string",
+        "self_deslop_evidence": "list",
+        "lane_review_evidence": "list",
+        "seam_residue_sweep_evidence": "list",
+        "final_targeted_verification": "list",
+        "excluded_unrelated_edits": "list",
     },
     "lane_continuation": {
         "lane_id": "string",
@@ -190,6 +195,17 @@ PRE_COMMIT_GATE_FOLLOW_UP_KINDS = {
     "correctness",
     "mixed",
 }
+
+WEAK_COMMIT_READY_BASIS_PATTERNS = (
+    "reviewer approval",
+    "reviewer-approved",
+    "green gate",
+    "green rerun",
+    "git diff --check",
+    "narrow grep",
+    "targeted suite",
+    "targeted tests",
+)
 
 
 def load_json_object(path: pathlib.Path) -> dict[str, Any]:
@@ -685,6 +701,25 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
             errors.append(
                 f"{prefix} phase 'pre_commit_gate_result' follow_up_kind must describe the follow-up when gate_status is 'needs-followup'"
             )
+
+    if phase == "commit_ready":
+        readiness_basis = str(record.get("readiness_basis") or "").strip().lower()
+        for pattern in WEAK_COMMIT_READY_BASIS_PATTERNS:
+            if readiness_basis == pattern:
+                errors.append(
+                    f"{prefix} phase 'commit_ready' readiness_basis must not rely on {pattern!r} alone"
+                )
+                break
+        for field in (
+            "self_deslop_evidence",
+            "lane_review_evidence",
+            "seam_residue_sweep_evidence",
+            "final_targeted_verification",
+        ):
+            if not as_list(record.get(field)):
+                errors.append(
+                    f"{prefix} phase 'commit_ready' field {field} must not be empty"
+                )
 
     if phase == "family_commit":
         family_ids = normalize_string_list(record.get("family_ids"))

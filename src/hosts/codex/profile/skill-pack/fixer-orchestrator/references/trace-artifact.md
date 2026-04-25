@@ -177,10 +177,20 @@ Rules:
 Include:
 - `family_ids`
 - `readiness_basis`
+- `self_deslop_evidence`
+- `lane_review_evidence`
+- `seam_residue_sweep_evidence`
+- `final_targeted_verification`
+- `excluded_unrelated_edits`
 
 Rules:
 - append `commit_ready` only after the latest `pre_commit_gate_result` for the
   same family set is `clear`
+- reviewer approval, green gate reruns, `git diff --check`, narrow greps, and
+  passing targeted suites are not sufficient `readiness_basis` by themselves
+- use `excluded_unrelated_edits` to record unrelated edits produced by
+  coordinator-side gates that were left uncommitted and excluded from the
+  current atomic commit
 - `family_commit` must not be written before `commit_ready`
 
 ## Lane-continuation record

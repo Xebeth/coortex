@@ -2551,7 +2551,12 @@ test("fixer trace helper validates per-family return-review round counts", async
       phase: "commit_ready",
       review_target: { mode: "return-review", scope_summary: "test" },
       family_ids: ["F-001", "F-002"],
-      readiness_basis: "approved-diff-plus-clear-gate"
+      readiness_basis: "approved diff plus clear pre-commit gate plus lane evidence",
+      self_deslop_evidence: ["coortex-deslop completed"],
+      lane_review_evidence: ["coortex-review-lane completed"],
+      seam_residue_sweep_evidence: ["stale shim and removed-symbol sweep completed"],
+      final_targeted_verification: ["node --test targeted"],
+      excluded_unrelated_edits: []
     })
   ]);
   assert.equal(commitReady.exitCode, 0);
@@ -2666,6 +2671,84 @@ test("fixer trace helper requires closure approval before pre-commit gate record
   );
 });
 
+test("fixer trace helper rejects weak commit-ready evidence", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
+  const traceFile = join(tempDir, "coordinator.jsonl");
+
+  const closureApproved = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T120500Z",
+      timestamp_utc: "2026-04-25T12:05:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "closure_approved",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      reviewer_run_id: "review-orchestrator-targeted-return-review-1",
+      review_result: "closure-approved",
+      return_review_rounds_taken_by_family: {
+        "F-001": 1
+      }
+    })
+  ]);
+  assert.equal(closureApproved.exitCode, 0);
+
+  const clearGate = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T120600Z",
+      timestamp_utc: "2026-04-25T12:06:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "pre_commit_gate_result",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      gate_status: "clear",
+      review_gate_result: "clear",
+      deslop_gate_result: "clear",
+      follow_up_kind: "none"
+    })
+  ]);
+  assert.equal(clearGate.exitCode, 0);
+
+  const weakReady = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T120700Z",
+      timestamp_utc: "2026-04-25T12:07:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "commit_ready",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      readiness_basis: "reviewer approval",
+      self_deslop_evidence: [],
+      lane_review_evidence: [],
+      seam_residue_sweep_evidence: [],
+      final_targeted_verification: [],
+      excluded_unrelated_edits: []
+    })
+  ]);
+
+  assert.equal(weakReady.exitCode, 2);
+  const errors = (weakReady.json as { errors: string[] }).errors;
+  assert.ok(errors.some((error) => error.includes("reviewer approval") && error.includes("alone")));
+  assert.ok(errors.some((error) => error.includes("self_deslop_evidence") && error.includes("must not be empty")));
+  assert.ok(errors.some((error) => error.includes("lane_review_evidence") && error.includes("must not be empty")));
+  assert.ok(errors.some((error) => error.includes("seam_residue_sweep_evidence") && error.includes("must not be empty")));
+  assert.ok(errors.some((error) => error.includes("final_targeted_verification") && error.includes("must not be empty")));
+});
+
 test("fixer trace helper enforces clear gate and commit_ready before family_commit", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");
@@ -2726,7 +2809,12 @@ test("fixer trace helper enforces clear gate and commit_ready before family_comm
       phase: "commit_ready",
       review_target: { mode: "return-review", scope_summary: "test" },
       family_ids: ["F-001"],
-      readiness_basis: "approved-diff-plus-clear-gate"
+      readiness_basis: "approved diff plus clear pre-commit gate plus lane evidence",
+      self_deslop_evidence: ["coortex-deslop completed"],
+      lane_review_evidence: ["coortex-review-lane completed"],
+      seam_residue_sweep_evidence: ["stale shim and removed-symbol sweep completed"],
+      final_targeted_verification: ["node --test targeted"],
+      excluded_unrelated_edits: []
     })
   ]);
   assert.equal(commitReadyBlocked.exitCode, 2);
@@ -2797,7 +2885,12 @@ test("fixer trace helper enforces clear gate and commit_ready before family_comm
       phase: "commit_ready",
       review_target: { mode: "return-review", scope_summary: "test" },
       family_ids: ["F-001"],
-      readiness_basis: "approved-diff-plus-clear-gate"
+      readiness_basis: "approved diff plus clear pre-commit gate plus lane evidence",
+      self_deslop_evidence: ["coortex-deslop completed"],
+      lane_review_evidence: ["coortex-review-lane completed"],
+      seam_residue_sweep_evidence: ["stale shim and removed-symbol sweep completed"],
+      final_targeted_verification: ["node --test targeted"],
+      excluded_unrelated_edits: []
     })
   ]);
   assert.equal(commitReady.exitCode, 0);

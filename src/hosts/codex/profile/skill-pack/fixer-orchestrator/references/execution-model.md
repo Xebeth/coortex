@@ -161,6 +161,10 @@ If return review approves closure:
   patch code, tests, or docs locally
 - append `commit_ready` only after the latest `pre_commit_gate_result` for
   that family set is clear
+- `commit_ready` must include explicit self-deslop evidence, lane-safe
+  self-review evidence, seam-residue sweep evidence, final targeted
+  verification, and any unrelated edits intentionally excluded from the atomic
+  commit
 - append a `family_commit` trace record with per-family
   `return_review_rounds_taken_by_family` counts so the trace shows how many
   return-review send-back rounds it took each family to close
