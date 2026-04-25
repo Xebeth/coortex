@@ -147,13 +147,20 @@ If return review keeps the family actionable:
   default
 
 If return review approves closure:
+- append `closure_approved` for the approved family set
 - the fixer coordinator must run a coordinator-side pre-commit gate on the
   final approved diff:
   - bounded `$coortex-review`
   - bounded `$coortex-deslop` in advisory/read-only mode
+- append `pre_commit_gate_result` for that gate outcome
+- if the gate finds cleanup-only residue, send back one consolidated
+  `commit-ready cleanup sweep` to the same implementer lane instead of
+  repeated piecemeal cleanup loops
 - if either pre-commit gate finds more work, send it back to the same
   implementer lane and resume targeted return review; the coordinator does not
   patch code, tests, or docs locally
+- append `commit_ready` only after the latest `pre_commit_gate_result` for
+  that family set is clear
 - append a `family_commit` trace record with per-family
   `return_review_rounds_taken_by_family` counts so the trace shows how many
   return-review send-back rounds it took each family to close

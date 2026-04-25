@@ -24,6 +24,8 @@ The helper owns:
 - lane filename construction
 - JSONL append mechanics
 - trace-record validation for known phase-boundary record types
+- approval-ladder ordering for `closure_approved`,
+  `pre_commit_gate_result`, `commit_ready`, and `family_commit`
 
 The model still owns the contents of each trace record.
 
@@ -81,6 +83,9 @@ At minimum, append these record types when applicable:
 - `family_closeout`
 - `verification`
 - `return_review_loop`
+- `closure_approved`
+- `pre_commit_gate_result`
+- `commit_ready`
 - `lane_continuation`
 - `review_return_handoff`
 - `family_commit`
@@ -133,6 +138,51 @@ Include:
 - `review_result`
 - `return_review_round`
 
+## Closure-approved record
+
+Include:
+- `family_ids`
+- `reviewer_run_id`
+- `review_result`
+  - use `closure-approved`
+- `return_review_rounds_taken_by_family`
+  - mapping from `family_id` to the number of targeted return-review send-back
+    rounds it took for that family set to earn reviewer approval
+
+This record exists so reviewer approval is machine-readable before the
+coordinator-side pre-commit gate runs.
+
+## Pre-commit-gate-result record
+
+Include:
+- `family_ids`
+- `gate_status`
+  - `clear` or `needs-followup`
+- `review_gate_result`
+- `deslop_gate_result`
+- `follow_up_kind`
+  - use `none` when `gate_status` is `clear`
+  - otherwise classify the follow-up as `cleanup-only`, `correctness`, or
+    `mixed`
+
+Rules:
+- append this record after the coordinator-side bounded `$coortex-review` and
+  bounded advisory `$coortex-deslop` pre-commit gate runs
+- if `follow_up_kind` is `cleanup-only`, route one consolidated
+  `commit-ready cleanup sweep` back to the same implementer lane instead of
+  repeated piecemeal cleanup loops
+
+## Commit-ready record
+
+Include:
+- `family_ids`
+- `readiness_basis`
+
+Rules:
+- append `commit_ready` only after the latest `pre_commit_gate_result` for the
+  same family set is `clear`
+- `family_commit` must not be written before `commit_ready`
+
 ## Lane-continuation record
 
 Include:
@@ -159,6 +209,8 @@ Rules:
   id
 - do not include generated `lane_id`, `slice_id`, or `wave_id` tokens in
   `commit_subject`
+- `family_commit` requires the same family set to already have, in order, a
+  prior `closure_approved`, a clear `pre_commit_gate_result`, and `commit_ready`
 
 ## Family-closeout record
 

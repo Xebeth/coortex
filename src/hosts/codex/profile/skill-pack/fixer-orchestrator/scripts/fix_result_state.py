@@ -17,6 +17,9 @@ TRACE_PHASES = {
     "family_closeout",
     "verification",
     "return_review_loop",
+    "closure_approved",
+    "pre_commit_gate_result",
+    "commit_ready",
     "lane_continuation",
     "review_return_handoff",
     "family_commit",
@@ -75,6 +78,23 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "reviewer_run_id": "string",
         "review_result": "string",
         "return_review_round": "int",
+    },
+    "closure_approved": {
+        "family_ids": "list",
+        "reviewer_run_id": "string",
+        "review_result": "string",
+        "return_review_rounds_taken_by_family": "mapping",
+    },
+    "pre_commit_gate_result": {
+        "family_ids": "list",
+        "gate_status": "string",
+        "review_gate_result": "string",
+        "deslop_gate_result": "string",
+        "follow_up_kind": "string",
+    },
+    "commit_ready": {
+        "family_ids": "list",
+        "readiness_basis": "string",
     },
     "lane_continuation": {
         "lane_id": "string",
@@ -154,6 +174,22 @@ GENERATED_COMMIT_ID_PATTERNS = (
     re.compile(r"\bS-\d+\b"),
     re.compile(r"\bW-\d+\b"),
 )
+
+CLOSURE_APPROVAL_RESULTS = {
+    "closure-approved",
+}
+
+PRE_COMMIT_GATE_STATUSES = {
+    "clear",
+    "needs-followup",
+}
+
+PRE_COMMIT_GATE_FOLLOW_UP_KINDS = {
+    "none",
+    "cleanup-only",
+    "correctness",
+    "mixed",
+}
 
 
 def load_json_object(path: pathlib.Path) -> dict[str, Any]:
@@ -566,6 +602,26 @@ def require_trace_field_type(
         return
 
 
+def validate_round_count_mapping(
+    family_ids: list[str],
+    rounds_taken: Any,
+    errors: list[str],
+    prefix: str,
+) -> None:
+    if not isinstance(rounds_taken, dict):
+        return
+    mapping_keys = sorted(str(key) for key in rounds_taken.keys())
+    if sorted(family_ids) != mapping_keys:
+        errors.append(
+            f"{prefix} return_review_rounds_taken_by_family keys must match family_ids exactly"
+        )
+    for family_id, round_count in rounds_taken.items():
+        if not isinstance(round_count, int) or round_count < 0:
+            errors.append(
+                f"{prefix} round-trip count for family {family_id!r} must be a non-negative integer"
+            )
+
+
 def validate_trace_record(record: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     prefix = "trace record"
@@ -596,10 +652,43 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
     if phase in {"execution_plan", "family_closeout", "verification"} and "family_id" not in record:
         errors.append(f"{prefix} phase {phase!r} missing family_id")
 
+    if phase == "closure_approved":
+        family_ids = normalize_string_list(record.get("family_ids"))
+        review_result = record.get("review_result")
+        if review_result not in CLOSURE_APPROVAL_RESULTS:
+            errors.append(
+                f"{prefix} phase 'closure_approved' review_result must be 'closure-approved'"
+            )
+        validate_round_count_mapping(
+            family_ids,
+            record.get("return_review_rounds_taken_by_family"),
+            errors,
+            f"{prefix} phase 'closure_approved'",
+        )
+
+    if phase == "pre_commit_gate_result":
+        gate_status = record.get("gate_status")
+        follow_up_kind = record.get("follow_up_kind")
+        if gate_status not in PRE_COMMIT_GATE_STATUSES:
+            errors.append(
+                f"{prefix} phase 'pre_commit_gate_result' gate_status must be one of {sorted(PRE_COMMIT_GATE_STATUSES)!r}"
+            )
+        if follow_up_kind not in PRE_COMMIT_GATE_FOLLOW_UP_KINDS:
+            errors.append(
+                f"{prefix} phase 'pre_commit_gate_result' follow_up_kind must be one of {sorted(PRE_COMMIT_GATE_FOLLOW_UP_KINDS)!r}"
+            )
+        if gate_status == "clear" and follow_up_kind != "none":
+            errors.append(
+                f"{prefix} phase 'pre_commit_gate_result' follow_up_kind must be 'none' when gate_status is 'clear'"
+            )
+        if gate_status == "needs-followup" and follow_up_kind == "none":
+            errors.append(
+                f"{prefix} phase 'pre_commit_gate_result' follow_up_kind must describe the follow-up when gate_status is 'needs-followup'"
+            )
+
     if phase == "family_commit":
         family_ids = normalize_string_list(record.get("family_ids"))
         commit_subject = record.get("commit_subject")
-        rounds_taken = record.get("return_review_rounds_taken_by_family")
         if isinstance(commit_subject, str):
             for pattern in GENERATED_COMMIT_ID_PATTERNS:
                 if pattern.search(commit_subject):
@@ -607,17 +696,123 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
                         f"{prefix} phase 'family_commit' commit_subject must not include generated lane/slice/wave ids"
                     )
                     break
-        if isinstance(rounds_taken, dict):
-            mapping_keys = sorted(str(key) for key in rounds_taken.keys())
-            if sorted(family_ids) != mapping_keys:
-                errors.append(
-                    f"{prefix} phase 'family_commit' return_review_rounds_taken_by_family keys must match family_ids exactly"
-                )
-            for family_id, round_count in rounds_taken.items():
-                if not isinstance(round_count, int) or round_count < 0:
-                    errors.append(
-                        f"{prefix} phase 'family_commit' round-trip count for family {family_id!r} must be a non-negative integer"
-                    )
+        validate_round_count_mapping(
+            family_ids,
+            record.get("return_review_rounds_taken_by_family"),
+            errors,
+            f"{prefix} phase 'family_commit'",
+        )
+
+    return errors
+
+
+def load_existing_trace_records(trace_file: pathlib.Path) -> tuple[list[dict[str, Any]], list[str]]:
+    if not trace_file.exists():
+        return [], []
+
+    records: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for line_number, line in enumerate(trace_file.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(
+                f"existing trace file {trace_file} contains invalid JSON on line {line_number}: {exc.msg}"
+            )
+            continue
+        if not isinstance(parsed, dict):
+            errors.append(
+                f"existing trace file {trace_file} line {line_number} must be a JSON object"
+            )
+            continue
+        records.append(parsed)
+    return records, errors
+
+
+def matching_family_phase_indexes(
+    records: list[dict[str, Any]],
+    phase: str,
+    family_ids: list[str],
+) -> list[int]:
+    normalized = sorted(family_ids)
+    indexes: list[int] = []
+    for index, prior in enumerate(records):
+        if str(prior.get("phase") or "") != phase:
+            continue
+        prior_family_ids = normalize_string_list(prior.get("family_ids"))
+        if sorted(prior_family_ids) == normalized:
+            indexes.append(index)
+    return indexes
+
+
+def validate_trace_record_against_history(
+    record: dict[str, Any],
+    trace_file: pathlib.Path,
+) -> list[str]:
+    phase = str(record.get("phase") or "")
+    if phase not in {"pre_commit_gate_result", "commit_ready", "family_commit"}:
+        return []
+
+    records, parse_errors = load_existing_trace_records(trace_file)
+    if parse_errors:
+        return parse_errors
+
+    family_ids = normalize_string_list(record.get("family_ids"))
+    errors: list[str] = []
+
+    approval_indexes = matching_family_phase_indexes(records, "closure_approved", family_ids)
+    gate_indexes = matching_family_phase_indexes(records, "pre_commit_gate_result", family_ids)
+    clear_gate_indexes = [
+        index
+        for index in gate_indexes
+        if records[index].get("gate_status") == "clear"
+    ]
+    ready_indexes = matching_family_phase_indexes(records, "commit_ready", family_ids)
+
+    last_approval = approval_indexes[-1] if approval_indexes else -1
+    last_gate = gate_indexes[-1] if gate_indexes else -1
+    last_clear_gate = clear_gate_indexes[-1] if clear_gate_indexes else -1
+    last_ready = ready_indexes[-1] if ready_indexes else -1
+
+    if phase == "pre_commit_gate_result":
+        if last_approval == -1:
+            errors.append(
+                "trace record phase 'pre_commit_gate_result' requires a prior 'closure_approved' record for the same family_ids"
+            )
+        return errors
+
+    if last_approval == -1:
+        errors.append(
+            f"trace record phase {phase!r} requires a prior 'closure_approved' record for the same family_ids"
+        )
+
+    if last_gate == -1:
+        errors.append(
+            f"trace record phase {phase!r} requires a prior 'pre_commit_gate_result' record for the same family_ids"
+        )
+    elif last_gate != last_clear_gate:
+        errors.append(
+            f"trace record phase {phase!r} requires the latest 'pre_commit_gate_result' for the same family_ids to have gate_status 'clear'"
+        )
+
+    if last_approval != -1 and last_clear_gate != -1 and last_clear_gate <= last_approval:
+        errors.append(
+            f"trace record phase {phase!r} requires a clear 'pre_commit_gate_result' recorded after the latest 'closure_approved' for the same family_ids"
+        )
+
+    if phase == "commit_ready":
+        return errors
+
+    if last_ready == -1:
+        errors.append(
+            "trace record phase 'family_commit' requires a prior 'commit_ready' record for the same family_ids"
+        )
+    elif last_clear_gate != -1 and last_ready <= last_clear_gate:
+        errors.append(
+            "trace record phase 'family_commit' requires 'commit_ready' to be recorded after the latest clear 'pre_commit_gate_result' for the same family_ids"
+        )
 
     return errors
 
@@ -1253,6 +1448,7 @@ def append_trace(args: argparse.Namespace) -> int:
     else:
         record = parse_json_record(args.record_json)
     errors = validate_trace_record(record)
+    errors.extend(validate_trace_record_against_history(record, trace_file))
     if errors:
         print(
             json.dumps(

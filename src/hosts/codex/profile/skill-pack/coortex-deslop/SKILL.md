@@ -49,6 +49,13 @@ In that read-only mode:
   - helper sprawl
   - ownership confusion
   - cleanup debt
+  - mechanical seam-move residue in touched scope:
+    - stale shims
+    - pass-through wrappers
+    - dead helpers
+    - unused params
+    - type-only import cleanup
+    - removed-symbol residue grep matches
 - treat those signals as advisory until the combined coordinator synthesis
   grounds them alongside the primary review lens
 - when `fixer-orchestrator` uses this advisory mode in its coordinator-side
@@ -150,6 +157,9 @@ Categorize issues before editing:
   leftovers
 - **Needless abstraction** — pass-through wrappers, speculative indirection,
   single-use helper layers
+- **Mechanical seam-move residue** — stale shims, dead helpers, unused params,
+  type-only import cleanup, removed-symbol residue, and other leftovers from
+  collapsing ownership back to the real seam
 - **Boundary violations** — hidden coupling, leaky responsibilities, wrong-layer
   imports or side effects
 - **Missing tests** — behavior not locked, weak regression coverage, edge-case

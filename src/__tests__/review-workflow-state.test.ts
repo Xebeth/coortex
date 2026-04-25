@@ -2494,6 +2494,68 @@ test("fixer trace helper validates per-family return-review round counts", async
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");
 
+  const closureApproved = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260420T115800Z",
+      timestamp_utc: "2026-04-20T11:58:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "closure_approved",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001", "F-002"],
+      reviewer_run_id: "review-orchestrator-targeted-return-review-1",
+      review_result: "closure-approved",
+      return_review_rounds_taken_by_family: {
+        "F-001": 2,
+        "F-002": 0
+      }
+    })
+  ]);
+  assert.equal(closureApproved.exitCode, 0);
+
+  const clearGate = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260420T115900Z",
+      timestamp_utc: "2026-04-20T11:59:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "pre_commit_gate_result",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001", "F-002"],
+      gate_status: "clear",
+      review_gate_result: "clear",
+      deslop_gate_result: "clear",
+      follow_up_kind: "none"
+    })
+  ]);
+  assert.equal(clearGate.exitCode, 0);
+
+  const commitReady = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260420T115950Z",
+      timestamp_utc: "2026-04-20T11:59:50Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "commit_ready",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001", "F-002"],
+      readiness_basis: "approved-diff-plus-clear-gate"
+    })
+  ]);
+  assert.equal(commitReady.exitCode, 0);
+
   const valid = await runPythonJson(fixResultStateScript, [
     "append-trace",
     "--trace-file",
@@ -2563,6 +2625,204 @@ test("fixer trace helper validates per-family return-review round counts", async
       error.includes("commit_subject must not include generated lane/slice/wave ids")
     )
   );
+});
+
+test("fixer trace helper requires closure approval before pre-commit gate records", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
+  const traceFile = join(tempDir, "coordinator.jsonl");
+
+  const invalid = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T120000Z",
+      timestamp_utc: "2026-04-25T12:00:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "pre_commit_gate_result",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      gate_status: "clear",
+      review_gate_result: "clear",
+      deslop_gate_result: "clear",
+      follow_up_kind: "none"
+    })
+  ]);
+
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as {
+    appended: boolean;
+    errors: string[];
+    status: string;
+  };
+  assert.equal(invalidJson.appended, false);
+  assert.equal(invalidJson.status, "error");
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("requires a prior 'closure_approved' record")
+    )
+  );
+});
+
+test("fixer trace helper enforces clear gate and commit_ready before family_commit", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
+  const traceFile = join(tempDir, "coordinator.jsonl");
+
+  const closureApproved = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T121000Z",
+      timestamp_utc: "2026-04-25T12:10:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "closure_approved",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      reviewer_run_id: "review-orchestrator-targeted-return-review-1",
+      review_result: "closure-approved",
+      return_review_rounds_taken_by_family: {
+        "F-001": 1
+      }
+    })
+  ]);
+  assert.equal(closureApproved.exitCode, 0);
+
+  const cleanupOnlyGate = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T121100Z",
+      timestamp_utc: "2026-04-25T12:11:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "pre_commit_gate_result",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      gate_status: "needs-followup",
+      review_gate_result: "clear",
+      deslop_gate_result: "cleanup-residue",
+      follow_up_kind: "cleanup-only"
+    })
+  ]);
+  assert.equal(cleanupOnlyGate.exitCode, 0);
+
+  const commitReadyBlocked = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T121200Z",
+      timestamp_utc: "2026-04-25T12:12:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "commit_ready",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      readiness_basis: "approved-diff-plus-clear-gate"
+    })
+  ]);
+  assert.equal(commitReadyBlocked.exitCode, 2);
+  assert.ok(
+    (commitReadyBlocked.json as { errors: string[] }).errors.some((error) =>
+      error.includes("latest 'pre_commit_gate_result'") && error.includes("gate_status 'clear'")
+    )
+  );
+
+  const clearGate = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T121300Z",
+      timestamp_utc: "2026-04-25T12:13:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "pre_commit_gate_result",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      gate_status: "clear",
+      review_gate_result: "clear",
+      deslop_gate_result: "clear",
+      follow_up_kind: "none"
+    })
+  ]);
+  assert.equal(clearGate.exitCode, 0);
+
+  const familyCommitBlocked = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T121400Z",
+      timestamp_utc: "2026-04-25T12:14:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "family_commit",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      commit_sha: "abc1234",
+      commit_subject: "fix: commit after clear gate",
+      return_review_rounds_taken_by_family: {
+        "F-001": 1
+      }
+    })
+  ]);
+  assert.equal(familyCommitBlocked.exitCode, 2);
+  assert.ok(
+    (familyCommitBlocked.json as { errors: string[] }).errors.some((error) =>
+      error.includes("requires a prior 'commit_ready'")
+    )
+  );
+
+  const commitReady = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T121500Z",
+      timestamp_utc: "2026-04-25T12:15:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "commit_ready",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      readiness_basis: "approved-diff-plus-clear-gate"
+    })
+  ]);
+  assert.equal(commitReady.exitCode, 0);
+
+  const familyCommit = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T121600Z",
+      timestamp_utc: "2026-04-25T12:16:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "family_commit",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_ids: ["F-001"],
+      commit_sha: "def5678",
+      commit_subject: "fix: commit after clear gate",
+      return_review_rounds_taken_by_family: {
+        "F-001": 1
+      }
+    })
+  ]);
+  assert.equal(familyCommit.exitCode, 0);
 });
 
 test("fixer trace helper blocks concurrent campaigns and clears after final fix", async () => {

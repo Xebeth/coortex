@@ -91,24 +91,29 @@ and surface the protocol error instead of prose-completing the run.
     `review_handoff`, the lane's `review_return_handoff`, and the actual diff.
 11. If targeted return review approves the family closure, run an explicit
     coordinator-side **read-only** pre-commit gate over the final approved
-    diff:
+    diff and append a `closure_approved` trace record for the approved family
+    set:
     - bounded `$coortex-review`
     - bounded `$coortex-deslop` in advisory/read-only mode
     - rerun verification only if the same implementer lane had to make follow-up
       changes after the gate handed back new work
-12. If that pre-commit gate stays clear, make one atomic commit for the
-    approved lane/slice, then close that family lane.
-13. If targeted return review keeps the family actionable, build a lane-local
+12. Append `pre_commit_gate_result` for that gate outcome. If the gate finds
+    cleanup-only residue, route one consolidated `commit-ready cleanup sweep`
+    back to the same implementer lane instead of dribbling out repeated
+    piecemeal cleanup loops.
+13. If that pre-commit gate stays clear, append `commit_ready`, then make one
+    atomic commit for the approved lane/slice and close that family lane.
+14. If targeted return review keeps the family actionable, build a lane-local
     continuation packet and send it back to the **same original implementer
     lane**. Resume the same worker thread for that lane. Do not close that
     worker, do not spawn a replacement worker for the same family, and do not
     hand the family to a new lane unless the workflow has a genuine blocker or
     explicit operator override.
-14. Before moving to a different family, emit a short family closeout
+15. Before moving to a different family, emit a short family closeout
     checkpoint.
-15. After the last atomic commit for the run, append a `final_fix` record via
+16. After the last atomic commit for the run, append a `final_fix` record via
     `scripts/fix_result_state.py append-trace`.
-16. Require that helper call to report `active_campaign_cleared: true` and
+17. Require that helper call to report `active_campaign_cleared: true` and
     verify `.coortex/review-trace/active-review-campaign.json` is gone before
     reporting completion.
 
@@ -163,6 +168,11 @@ and surface the protocol error instead of prose-completing the run.
   bounded `$coortex-deslop` explicitly in **read-only** mode. That gate is
   required before every commit and does not replace `$review-orchestrator` as
   closure authority.
+- Treat reviewer approval, pre-commit gate outcome, and actual commit-readiness
+  as separate traceable states. Record them with `closure_approved`,
+  `pre_commit_gate_result`, and `commit_ready` before any `family_commit`.
+- Do not append `family_commit` unless the same family set already has a clear
+  `pre_commit_gate_result` and an explicit `commit_ready` record.
 - The fixer coordinator is read-only with respect to repo content. It must not
   edit code, tests, or docs itself; only worker lanes may do that.
 - Make atomic commits only: one reviewer-approved lane/slice per commit. Do not

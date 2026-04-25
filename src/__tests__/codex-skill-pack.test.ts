@@ -452,6 +452,37 @@ test("fixer orchestrator makes terminal lock clearing explicit", async () => {
   }
 });
 
+test("fixer orchestrator makes approval ladder and cleanup sweep explicit", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/trace-artifact.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /closure_approved|pre_commit_gate_result|commit_ready/i, path);
+    assert.match(content, /cleanup-only|commit-ready cleanup sweep/i, path);
+  }
+});
+
+test("coortex deslop flags mechanical seam-move residue in touched scope", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-deslop/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(
+      content,
+      /stale shims|pass-through wrappers|dead helpers|unused params|type-only import|removed-symbol residue/i,
+      path
+    );
+  }
+});
+
 test("coortex review explicitly checks the shared campaign lock before standalone review", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
