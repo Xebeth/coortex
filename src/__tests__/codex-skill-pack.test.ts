@@ -23,6 +23,7 @@ test("codex managed skill pack is self-contained", async () => {
     "coortex-review",
     "coortex-review-lane",
     "fixer-orchestrator",
+    "implementation-coordinator",
     "review-baseline",
     "review-fixer",
     "review-orchestrator",
@@ -82,6 +83,8 @@ test("managed workflow skills require conversation-visible progress guidance", a
     "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
@@ -108,6 +111,8 @@ test("managed workflow skills treat progress updates as non-blocking", async () 
     "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
@@ -134,6 +139,8 @@ test("managed workflow skills explicitly mention update_plan usage", async () =>
     "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
@@ -275,6 +282,8 @@ test("managed skills explain installed script path resolution", async () => {
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/trace-artifact.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/agents/openai.yaml",
@@ -301,6 +310,8 @@ test("script-using managed skills treat helper steps as canonical protocol", asy
     "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/SKILL.md",
     "src/hosts/codex/profile/skill-pack/seam-walkback-review/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
@@ -665,6 +676,26 @@ test("review skills delegate current-work packet mechanics to the helper", async
   );
   assert.match(helper, /validate-current-work-packet/);
   assert.match(helper, /validate-current-work-review-output/);
+});
+
+test("implementation coordinator turns ordinary intent into reviewed current-work flow", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /ordinary|normal implementation request|normal prompt|user-facing/i, path);
+    assert.match(content, /current-work|mini-surface|validate-current-work-packet/i, path);
+    assert.match(content, /spec review[\s\S]*before implementation|before implementation[\s\S]*spec review/i, path);
+    assert.match(content, /implementation handoff|handoff present|review_return_handoff/i, path);
+    assert.match(content, /return review|surface_checked|matrix_not_applicable/i, path);
+    assert.match(content, /same implementation lane|same implementer/i, path);
+    assert.match(content, /do not spawn subagents unless|delegation follows host policy/i, path);
+    assert.match(content, /Do not commit unless|commit only when allowed/i, path);
+    assert.match(content, /fixer-orchestrator|review_handoff/i, path);
+  }
 });
 
 test("fixer skills preserve current-work packets through review gates", async () => {

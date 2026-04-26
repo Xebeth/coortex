@@ -1405,6 +1405,7 @@ test("ctx init, status, resume, run, inspect, and doctor work against persisted 
     "coortex-review",
     "coortex-review-lane",
     "fixer-orchestrator",
+    "implementation-coordinator",
     "review-baseline",
     "review-fixer",
     "review-orchestrator",

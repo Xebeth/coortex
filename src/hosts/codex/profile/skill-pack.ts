@@ -12,6 +12,7 @@ const MANAGED_SKILLS = [
   "coortex-review",
   "coortex-review-lane",
   "fixer-orchestrator",
+  "implementation-coordinator",
   "review-baseline",
   "review-fixer",
   "review-orchestrator",

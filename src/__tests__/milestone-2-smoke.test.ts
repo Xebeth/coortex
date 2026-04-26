@@ -149,6 +149,7 @@ test("milestone-2 smoke: init installs the managed Codex review skill pack", asy
     "coortex-review",
     "coortex-review-lane",
     "fixer-orchestrator",
+    "implementation-coordinator",
     "review-baseline",
     "review-fixer",
     "review-orchestrator",
