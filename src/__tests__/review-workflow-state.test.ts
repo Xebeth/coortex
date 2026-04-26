@@ -2074,6 +2074,228 @@ test("coortex review helper blocks standalone review while a fixer campaign is a
   assert.equal(blockedJson.active_campaign.owner_started_from_cwd, tempDir);
 });
 
+test("coortex review helper validates current-work packets mechanically", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-current-work-packet-"));
+  const packetPath = join(tempDir, "packet.json");
+
+  const packet = {
+    mini_surface_review_packet: {
+      packet_version: 1,
+      packet_id: "current-work-runtime",
+      status: "handoff",
+      source: "current_implementation",
+      intent: "Review runtime attachment lifecycle changes.",
+      baseline_surface_refs: ["runtime-recovery"],
+      surface: {
+        id: "current-work-runtime-recovery",
+        name: "Runtime recovery current work",
+        purpose: "Bounded current implementation review.",
+        primary_anchors: ["src/recovery/**"],
+        supporting_anchors: ["src/__tests__/recovery.test.ts"],
+        contract_docs: ["docs/runtime-state-model.md"],
+        review_focus_areas: ["provenance must track launch vs resume correctly"]
+      },
+      review_boundary: {
+        in_scope_paths: ["src/recovery/claim.ts"],
+        expected_write_set: ["src/recovery/claim.ts"],
+        out_of_scope: []
+      },
+      seams: [{ path: "src/recovery/claim.ts", role: "owner" }],
+      invariants: ["claim authority and attachment authority mutate together"],
+      coverage_matrix: {
+        rows: [
+          {
+            row_id: "entry-main",
+            category: "entry_path",
+            paths: ["src/recovery/claim.ts"],
+            expected_behavior: "main claim path preserves attachment authority",
+            tests: ["recovery claim test"],
+            status: "tested",
+            notes: "covered by targeted regression"
+          }
+        ]
+      },
+      reviewer_focus: ["authority coupling"],
+      known_uncertainties: []
+    }
+  };
+  await writeFile(packetPath, JSON.stringify(packet, null, 2), "utf8");
+
+  const valid = await runPythonJson(coortexReviewStateScript, [
+    "validate-current-work-packet",
+    "--packet-file",
+    packetPath
+  ]);
+  assert.equal(valid.exitCode, 0);
+  const validJson = valid.json as {
+    valid: boolean;
+    packet_id: string;
+    row_count: number;
+    row_ids: string[];
+    surface_id: string;
+  };
+  assert.equal(validJson.valid, true);
+  assert.equal(validJson.packet_id, "current-work-runtime");
+  assert.equal(validJson.surface_id, "current-work-runtime-recovery");
+  assert.equal(validJson.row_count, 1);
+  assert.deepEqual(validJson.row_ids, ["entry-main"]);
+
+  const invalid = await runPythonJson(coortexReviewStateScript, [
+    "validate-current-work-packet",
+    "--packet-json",
+    JSON.stringify({
+      mini_surface_review_packet: {
+        ...packet.mini_surface_review_packet,
+        baseline_surface_refs: ["runtime-recovery", "codex-adapter"],
+        coverage_matrix: {
+          rows: [
+            {
+              ...packet.mini_surface_review_packet.coverage_matrix.rows[0],
+              status: "done"
+            }
+          ]
+        }
+      }
+    })
+  ]);
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as { valid: boolean; errors: string[] };
+  assert.equal(invalidJson.valid, false);
+  assert.match(invalidJson.errors.join("\n"), /cross_surface_reason/);
+  assert.match(invalidJson.errors.join("\n"), /status must be one of/);
+});
+
+test("coortex review helper validates current-work reviewer output against packet rows", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-current-work-output-"));
+  const packetPath = join(tempDir, "packet.json");
+  const packet = {
+    mini_surface_review_packet: {
+      packet_version: 1,
+      packet_id: "current-work-runtime",
+      status: "handoff",
+      source: "current_implementation",
+      intent: "Review runtime lifecycle changes.",
+      surface: {
+        id: "current-work-runtime",
+        name: "Runtime current work",
+        purpose: "Bounded current implementation review.",
+        primary_anchors: ["src/recovery/**"]
+      },
+      review_boundary: {
+        in_scope_paths: ["src/recovery/claim.ts"],
+        expected_write_set: ["src/recovery/claim.ts"],
+        out_of_scope: []
+      },
+      seams: [{ path: "src/recovery/claim.ts", role: "owner" }],
+      invariants: ["runtime truth stays durable"],
+      coverage_matrix: {
+        rows: [
+          {
+            row_id: "entry-main",
+            category: "entry_path",
+            paths: ["src/recovery/claim.ts"],
+            expected_behavior: "main entry path works",
+            tests: ["targeted test"],
+            status: "tested",
+            notes: "covered"
+          },
+          {
+            row_id: "failure-cleanup",
+            category: "failure_path",
+            paths: ["src/recovery/claim.ts"],
+            expected_behavior: "cleanup failure is surfaced truthfully",
+            tests: [],
+            status: "checked",
+            notes: "manual inspection"
+          }
+        ]
+      }
+    }
+  };
+  await writeFile(packetPath, JSON.stringify(packet, null, 2), "utf8");
+
+  const validOutput = {
+    surface_checked: {
+      packet_id: "current-work-runtime",
+      review_boundary_respected: true,
+      packet_rows_accounted_for: ["entry-main", "failure-cleanup"],
+      sibling_scope_checked: ["src/recovery/cleanup.ts"],
+      matrix_checked: {
+        rows_checked: ["entry-main", "failure-cleanup"],
+        rows_closed: ["entry-main", "failure-cleanup"],
+        rows_open: [],
+        rows_deferred: [],
+        rows_uncertain: [],
+        test_coverage_gaps: []
+      },
+      verdict: "approve"
+    }
+  };
+
+  const valid = await runPythonJson(coortexReviewStateScript, [
+    "validate-current-work-review-output",
+    "--packet-file",
+    packetPath,
+    "--review-output-json",
+    JSON.stringify(validOutput)
+  ]);
+  assert.equal(valid.exitCode, 0);
+  const validJson = valid.json as { valid: boolean; output_kind: string; accounted_row_count: number };
+  assert.equal(validJson.valid, true);
+  assert.equal(validJson.output_kind, "surface_checked");
+  assert.equal(validJson.accounted_row_count, 2);
+
+  const invalid = await runPythonJson(coortexReviewStateScript, [
+    "validate-current-work-review-output",
+    "--packet-file",
+    packetPath,
+    "--review-output-json",
+    JSON.stringify({
+      surface_checked: {
+        ...validOutput.surface_checked,
+        packet_rows_accounted_for: ["entry-main"],
+        matrix_checked: {
+          ...validOutput.surface_checked.matrix_checked,
+          rows_checked: ["entry-main", "unknown-row"],
+          rows_closed: ["entry-main", "failure-cleanup"],
+          rows_uncertain: ["failure-cleanup"]
+        }
+      }
+    })
+  ]);
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as { valid: boolean; errors: string[] };
+  assert.equal(invalidJson.valid, false);
+  assert.match(invalidJson.errors.join("\n"), /missing packet row ids/);
+  assert.match(invalidJson.errors.join("\n"), /unknown row id 'unknown-row'/);
+  assert.match(invalidJson.errors.join("\n"), /cannot appear in both rows_closed and rows_uncertain/);
+  assert.match(invalidJson.errors.join("\n"), /verdict approve cannot leave rows_uncertain/);
+
+  const checkedOnly = await runPythonJson(coortexReviewStateScript, [
+    "validate-current-work-review-output",
+    "--packet-file",
+    packetPath,
+    "--review-output-json",
+    JSON.stringify({
+      surface_checked: {
+        ...validOutput.surface_checked,
+        matrix_checked: {
+          ...validOutput.surface_checked.matrix_checked,
+          rows_checked: ["entry-main", "failure-cleanup"],
+          rows_closed: ["entry-main"],
+          rows_open: [],
+          rows_deferred: [],
+          rows_uncertain: []
+        }
+      }
+    })
+  ]);
+  assert.equal(checkedOnly.exitCode, 2);
+  const checkedOnlyJson = checkedOnly.json as { valid: boolean; errors: string[] };
+  assert.equal(checkedOnlyJson.valid, false);
+  assert.match(checkedOnlyJson.errors.join("\n"), /does not disposition accounted row ids.*failure-cleanup/);
+});
+
 test("orchestrator trace helper validates lane result records before appending", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");

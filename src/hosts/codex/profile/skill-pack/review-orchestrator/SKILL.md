@@ -128,6 +128,21 @@ When a mapped baseline surface includes `review_focus_areas`:
 - do not create extra lanes just because focus areas exist
 - do not treat them as automatic findings or as replacements for custom lenses
 
+## Current-work packets
+
+When the review input includes a current-work mini-surface packet:
+
+- validate it with the installed
+  `.codex/skills/coortex-review/scripts/review_state.py validate-current-work-packet`
+  helper before using it as lane context
+- pass the validated packet surface, boundary, and coverage rows to the
+  relevant review lanes
+- require lane output to include `surface_checked` or `matrix_not_applicable`
+  and validate that output with
+  `.codex/skills/coortex-review/scripts/review_state.py validate-current-work-review-output`
+- treat helper validation results as authoritative; do not reconstruct packet
+  or matrix validation in prose
+
 ## Conversation-visible plan
 
 Because orchestrated review can run for a while, keep a short

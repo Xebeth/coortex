@@ -61,9 +61,10 @@ existing baseline surfaces. If no baseline surface fits, omit the refs and keep
 the packet surface scoped to the current work.
 
 Multiple `baseline_surface_refs` are valid only when the current work
-intentionally crosses those surfaces. Otherwise, narrow the packet to one
-surface or escalate to `review-orchestrator` or a baseline refresh instead of
-letting the packet absorb broad review scope.
+intentionally crosses those surfaces. In that case, include a short
+`cross_surface_reason`. Otherwise, narrow the packet to one surface or escalate
+to `review-orchestrator` or a baseline refresh instead of letting the packet
+absorb broad review scope.
 
 When `baseline_surface_refs` are present, the packet surface may narrow anchors
 or add current-work focus, but it should not contradict the referenced baseline
@@ -138,6 +139,9 @@ implementation review and fixer return review.
 The packet should stay compact, but its `surface` block should remain
 baseline-compatible. Include only the surface fields needed to orient review
 for the current work; do not copy a full baseline surface just to fill fields.
+At minimum, the packet surface should include `id`, `name`, `purpose`, and
+`primary_anchors`; add `supporting_anchors`, `contract_docs`, and
+`review_focus_areas` when they materially help the review.
 
 Use `packet_version: 1` for this schema. Future incompatible packet-shape
 changes should increment that version rather than silently changing reviewer
@@ -201,6 +205,26 @@ mini_surface_review_packet:
 This is a schema sketch, not a committed wire format. Implementations should
 preserve the same meaning even if they serialize it as JSON or another
 structured format.
+
+## Deterministic validation
+
+Mechanical packet checks belong in the bundled review helper, not reviewer
+prose. The current helper validates a JSON serialization of this shape; the
+YAML snippets in this document are illustrative. The helper should validate:
+
+- packet version and required packet fields
+- baseline-compatible surface fields
+- multi-surface refs requiring `cross_surface_reason`
+- review boundary, seams, invariants, and row ids
+- row category and status values
+- reviewer output containing exactly one of `surface_checked` or
+  `matrix_not_applicable`
+- row ids being accounted for once and not assigned conflicting dispositions
+- approval output not leaving `open` or `uncertain` rows unresolved
+
+The helper should not decide which seams matter, whether a sibling path shares
+the same assumption, or whether a finding is real. Those remain reviewer
+judgment.
 
 ## Coverage matrix rows
 
@@ -314,6 +338,10 @@ surface_checked:
     test_coverage_gaps: []
   verdict: approve
 ```
+
+A row may appear in `rows_checked` and one disposition list, but it must not
+appear in more than one of `rows_closed`, `rows_open`, `rows_deferred`, or
+`rows_uncertain`.
 
 Reviewer approval should mean:
 

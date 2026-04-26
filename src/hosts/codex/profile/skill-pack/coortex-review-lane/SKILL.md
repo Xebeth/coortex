@@ -32,6 +32,10 @@ Do not use it as a general fix or implementation skill.
   failure checks for this lane. Use them to sharpen bounded inspection and
   sibling-path checks, but only emit findings when current evidence grounds
   them.
+- If the lane prompt provides a current-work mini-surface packet, validate the
+  packet and any `surface_checked` / `matrix_not_applicable` output with the
+  installed `.codex/skills/coortex-review/scripts/review_state.py` helper
+  rather than recreating packet or matrix checks by hand.
 - If the lane prompt also provides run-local focus emphasis, treat that as an
   extra bounded concern for this lane without mutating the configured lens
   bundle for the run. That emphasis may be either a baseline-configured built-in
@@ -79,7 +83,9 @@ They should match the built-in lens ids configured by `review-baseline`.
    cause still exists in the lane scope.
 7. Run available diagnostics or lightweight verification only when the
    environment supports them and they matter to correctness for this lane.
-8. Return severity-rated findings with concrete file evidence.
+8. If returning `surface_checked` or `matrix_not_applicable` for a current-work
+   packet, validate that output with the helper before reporting it.
+9. Return severity-rated findings with concrete file evidence.
 
 ## Lane types
 

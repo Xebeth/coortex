@@ -547,6 +547,36 @@ test("coortex review explicitly checks the shared campaign lock before standalon
   }
 });
 
+test("review skills delegate current-work packet mechanics to the helper", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/coortex-review-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-review-lane/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/execution-model.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /current-work|mini-surface/i, path);
+    assert.match(content, /validate-current-work-packet|review_state\.py/i, path);
+    assert.match(content, /validate-current-work-review-output|surface_checked|matrix_not_applicable/i, path);
+    assert.match(content, /do not reconstruct|instead of recreating|authoritative/i, path);
+  }
+
+  const helper = await readFile(
+    resolve(
+      process.cwd(),
+      "src/hosts/codex/profile/skill-pack/coortex-review/scripts/review_state.py"
+    ),
+    "utf8"
+  );
+  assert.match(helper, /validate-current-work-packet/);
+  assert.match(helper, /validate-current-work-review-output/);
+});
+
 async function walk(
   dir: string,
   visitFile: (path: string) => Promise<void>

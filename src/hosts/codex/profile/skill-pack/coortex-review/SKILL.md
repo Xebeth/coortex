@@ -75,11 +75,14 @@ Resolve bundled script paths relative to this installed skill directory under
 `.codex/skills/coortex-review/`, not relative to the repository root.
 
 `scripts/review_state.py check-active-campaign` is the canonical standalone
-review safety check. Run that exact helper command before starting standalone
-review, treat its lock metadata as authoritative, and do not reconstruct
-`active-review-campaign.json` state by hand. If the helper cannot complete,
-stop and surface that protocol failure instead of guessing whether standalone
-review is safe.
+review safety check. `scripts/review_state.py validate-current-work-packet` and
+`scripts/review_state.py validate-current-work-review-output` are the canonical
+mechanical checks for current-work mini-surface packets and their compact
+reviewer output. Run those exact helper commands when a current-work packet is
+provided, treat their validation results as authoritative, and do not
+reconstruct packet or matrix validation by hand. If a required helper step
+cannot complete, stop and surface that protocol failure instead of guessing.
+Do not reconstruct helper-owned packet or matrix checks by hand.
 
 ```bash
 python scripts/review_state.py check-active-campaign --project-root .
@@ -96,24 +99,31 @@ recorded `owner_host_session_id`, fallback `owner_host_thread_id`, and
 1. Use the helper to check for an active top-level review/fix campaign lock in
    the same worktree before starting standalone review.
 2. Confirm that the requested review scope is bounded enough for one agent.
-3. Read the scoped files, diff, and any supplied contract docs, closure gate,
+3. If a current-work mini-surface packet is supplied, validate it with
+   `scripts/review_state.py validate-current-work-packet` before using it as
+   review context.
+4. Read the scoped files, diff, and any supplied contract docs, closure gate,
    or review handoff.
-4. If the scope is too broad or would require multiple independent review
+5. If the scope is too broad or would require multiple independent review
    passes, stop and direct the user to `$review-orchestrator`.
-5. If a top-level fixer/review campaign is already active in this worktree,
+6. If a top-level fixer/review campaign is already active in this worktree,
    stop and refuse standalone `$coortex-review`. Wait for the active fixer to
    reach a review handoff, or use the linked orchestrated review path instead
    of reviewing a mutating worktree.
-6. Apply the configured lenses inside the bounded scope. If none are provided,
+7. Apply the configured lenses inside the bounded scope. If none are provided,
    default to `goal-fidelity`, `quality`, and `context-history`.
-7. If `review_focus_areas` are provided, check them as recurring failure themes
+8. If `review_focus_areas` are provided, check them as recurring failure themes
    after honoring the configured lenses. Treat them as review guidance, not as
    automatic findings or replacement custom lenses.
-8. Inspect the sibling paths needed to judge whether the same root cause still
+9. Inspect the sibling paths needed to judge whether the same root cause still
    exists inside the bounded review scope.
-9. Run lightweight diagnostics or execution evidence only when the environment
+10. Run lightweight diagnostics or execution evidence only when the environment
    supports them and they materially affect correctness for this review.
-10. Return severity-rated findings with concrete file evidence.
+11. If returning `surface_checked` or `matrix_not_applicable` for a
+    current-work packet, validate that output with
+    `scripts/review_state.py validate-current-work-review-output` before
+    reporting it.
+12. Return severity-rated findings with concrete file evidence.
 
 ## Conversation-visible progress
 

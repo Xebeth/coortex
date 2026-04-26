@@ -41,6 +41,11 @@ If the mapped surface includes baseline `review_focus_areas`, pass them through
 unchanged as recurring failure checks for that lane. They sharpen bounded
 inspection and sibling-path checks, but they do not create extra lanes, mutate
 the lens bundle, or become automatic findings on their own.
+If the input includes a current-work mini-surface packet, validate it with the
+installed `.codex/skills/coortex-review/scripts/review_state.py` helper before
+lane spawning, pass the validated packet surface and coverage rows into the lane
+prompt, and validate returned `surface_checked` or `matrix_not_applicable`
+objects with the same helper before synthesis.
 
 Scheduling:
 - if coverage lanes exceed current subagent capacity, run them in bounded waves
