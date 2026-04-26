@@ -1615,6 +1615,202 @@ surfaces:
   assert.match(primaryJson.errors.join("\n"), /alternative_baselines\[0\]\.path .*derived_from/);
 });
 
+test("review baseline validator accepts coherent repo quality gates", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-gates-"));
+  await mkdir(join(tempDir, "src", "recovery"), { recursive: true });
+  await mkdir(join(tempDir, "docs"), { recursive: true });
+
+  await writeFile(join(tempDir, "src", "recovery", "state.ts"), "export {};\n", "utf8");
+  await writeFile(join(tempDir, "docs", "runtime-state-model.md"), "# Runtime\n", "utf8");
+  await writeFile(
+    join(tempDir, "docs", "review-baseline.yaml"),
+    `baseline_version: 1
+updated_at: "2026-04-27"
+baseline_kind: "primary"
+repo_quality_gates:
+  - id: "build-touched-project"
+    command_template: "build command for the resolved touched project"
+    phase: "pre_handoff"
+    applies_to: "both"
+    owner: "lane"
+    mutability: "non_mutating"
+    scope_awareness: "scope_aware"
+    kind: "enforced_gate"
+    handoff_blocking: true
+    blocking_stages:
+      - "review_return_handoff"
+      - "family_closure"
+      - "commit_ready"
+    source_type: "manual"
+    confidence: "high"
+    probe_file_scanned: "yes"
+    allowed_in_bounded_runs: true
+    allowed_in_repo_wide_runs: true
+    requires_isolated_execution: false
+    requires_user_confirmation: false
+    resolution: "coordinator_prep"
+    required_inputs:
+      - "touched_project"
+    applicability: "applies when the surface maps to a buildable project"
+    evidence_expectation: "exit status and captured build output"
+    failure_policy: "block listed stages when red, blocked, or hanging"
+  - id: "format-check"
+    command: "npm run format:check"
+    phase: "final_integration"
+    applies_to: "both"
+    owner: "coordinator"
+    mutability: "non_mutating"
+    scope_awareness: "repo_global"
+    kind: "guidance"
+    handoff_blocking: false
+    blocking_stages: []
+    source_type: "imported"
+    confidence: "medium"
+    probe_file_scanned: "uncertain"
+    allowed_in_bounded_runs: true
+    allowed_in_repo_wide_runs: true
+    requires_isolated_execution: false
+    requires_user_confirmation: false
+    resolution: "baseline"
+    applicability: "advisory final integration format check"
+    evidence_expectation: "exit status and captured output"
+    failure_policy: "surface non-attributable failures separately"
+surfaces:
+  - id: "runtime-recovery"
+    name: "Runtime Recovery"
+    purpose: "Recovery correctness"
+    primary_anchors:
+      - "src/recovery/**"
+    supporting_anchors: []
+    contract_docs:
+      - "docs/runtime-state-model.md"
+    finish_gate_refs:
+      - "build-touched-project"
+    configured_builtin_lenses:
+      - lens_id: "goal-fidelity"
+        priority: "high"
+    configured_custom_lenses: []
+`,
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-review-baseline",
+    "--project-root",
+    tempDir,
+    "--baseline",
+    "docs/review-baseline.yaml",
+    "--expect-kind",
+    "primary"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  const json = result.json as {
+    baseline_valid: boolean;
+    repo_quality_gate_count: number;
+    surface_ids: string[];
+  };
+  assert.equal(json.baseline_valid, true);
+  assert.equal(json.repo_quality_gate_count, 2);
+  assert.deepEqual(json.surface_ids, ["runtime-recovery"]);
+});
+
+test("review baseline validator rejects unresolved quality gate surprises", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-bad-gates-"));
+  await mkdir(join(tempDir, "src", "recovery"), { recursive: true });
+  await mkdir(join(tempDir, "docs"), { recursive: true });
+
+  await writeFile(join(tempDir, "src", "recovery", "state.ts"), "export {};\n", "utf8");
+  await writeFile(join(tempDir, "docs", "runtime-state-model.md"), "# Runtime\n", "utf8");
+  await writeFile(
+    join(tempDir, "docs", "review-baseline.yaml"),
+    `baseline_version: 1
+updated_at: "2026-04-27"
+baseline_kind: "primary"
+repo_quality_gates:
+  - id: "build-touched-project"
+    phase: "pre_handoff"
+    applies_to: "both"
+    owner: "lane"
+    mutability: "non_mutating"
+    scope_awareness: "scope_aware"
+    kind: "enforced_gate"
+    handoff_blocking: true
+    blocking_stages:
+      - "commit_ready"
+    source_type: "manual"
+    confidence: "high"
+    probe_file_scanned: "yes"
+    allowed_in_bounded_runs: true
+    allowed_in_repo_wide_runs: true
+    requires_isolated_execution: false
+    requires_user_confirmation: false
+    resolution: "coordinator_prep"
+    required_inputs: []
+    applicability: "applies when the surface maps to a buildable project"
+    evidence_expectation: "exit status and captured build output"
+    failure_policy: "block listed stages when red, blocked, or hanging"
+  - id: "build-touched-project"
+    command: "npm run build"
+    phase: "final_integration"
+    applies_to: "both"
+    owner: "coordinator"
+    mutability: "non_mutating"
+    scope_awareness: "repo_global"
+    kind: "guidance"
+    handoff_blocking: false
+    blocking_stages: []
+    source_type: "guessed"
+    confidence: "low"
+    probe_file_scanned: "uncertain"
+    allowed_in_bounded_runs: true
+    allowed_in_repo_wide_runs: true
+    requires_isolated_execution: false
+    requires_user_confirmation: true
+    resolution: "baseline"
+    applicability: "advisory build check"
+    evidence_expectation: "exit status and captured output"
+    failure_policy: "ask before enforcement"
+surfaces:
+  - id: "runtime-recovery"
+    name: "Runtime Recovery"
+    purpose: "Recovery correctness"
+    primary_anchors:
+      - "src/recovery/**"
+    supporting_anchors: []
+    contract_docs:
+      - "docs/runtime-state-model.md"
+    finish_gate_refs:
+      - "missing-gate"
+      - "build-touched-project"
+    configured_builtin_lenses:
+      - lens_id: "goal-fidelity"
+        priority: "high"
+    configured_custom_lenses: []
+`,
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-review-baseline",
+    "--project-root",
+    tempDir,
+    "--baseline",
+    "docs/review-baseline.yaml",
+    "--expect-kind",
+    "primary"
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  const json = result.json as { baseline_valid: boolean; errors: string[] };
+  assert.equal(json.baseline_valid, false);
+  assert.match(json.errors.join("\n"), /duplicates another repo_quality_gates id/);
+  assert.match(json.errors.join("\n"), /command_template/);
+  assert.match(json.errors.join("\n"), /required_inputs/);
+  assert.match(json.errors.join("\n"), /handoff_blocking true requires/);
+  assert.match(json.errors.join("\n"), /unknown repo_quality_gates id 'missing-gate'/);
+});
+
 test("full-review narrowing helper resolves one inferred surface/path subset and normalizes run-local focus", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
   const baselinePath = join(tempDir, "baseline.json");

@@ -17,6 +17,14 @@ python ../review-orchestrator/scripts/return_review_state.py validate-review-bas
 This is the same baseline validation used by `review-orchestrator`; helper
 failure is a gate failure.
 
+When `repo_quality_gates` are present, the helper validates gate ids, required
+classification fields, resolution hints, blocking-stage consistency, and
+surface `finish_gate_refs`. Existing baselines without `repo_quality_gates`
+remain valid, but any gate metadata that is present must be coherent enough for
+coordinator prep and lanes to consume without guessing. Use
+`resolution: coordinator_prep` for gates that require prep-time inputs before
+they become concrete commands.
+
 ## Surface failures
 
 - No surfaces are defined.
@@ -40,6 +48,10 @@ failure is a gate failure.
 ## Contract failures
 
 - Relevant contract docs are discoverable but omitted from the surface.
+- A surface `finish_gate_refs` entry references a missing or advisory-only gate.
+- A `repo_quality_gates` entry leaves a baseline-resolved gate without a
+  concrete command or a prep-resolved gate without `command_template` and
+  `required_inputs`.
 - `review_focus_areas` are really custom lenses in disguise or are just docs,
   tests, or matrix refs that belong in `supporting_anchors` or `contract_docs`.
 - The baseline is too underspecified for another skill to map changed files into surfaces without rediscovery.

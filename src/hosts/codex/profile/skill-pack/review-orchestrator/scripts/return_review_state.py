@@ -115,6 +115,28 @@ KNOWN_RUNTIME_FOCUS_TOKENS = {
 KNOWN_BASELINE_KINDS = {"primary", "variant"}
 KNOWN_VARIANT_STRATEGIES = {"derived", "fresh"}
 BASELINE_EXPECT_KINDS = {"any", "primary", "variant"}
+KNOWN_QUALITY_GATE_PHASES = {"precheck", "deslop", "pre_handoff", "final_integration"}
+KNOWN_QUALITY_GATE_APPLIES_TO = {"reviewer", "fixer", "both"}
+KNOWN_QUALITY_GATE_OWNERS = {"lane", "coordinator", "both"}
+KNOWN_QUALITY_GATE_MUTABILITY = {"non_mutating", "scope_mutating", "repo_mutating", "uncertain"}
+KNOWN_QUALITY_GATE_SCOPE_AWARENESS = {"scope_aware", "repo_global", "uncertain"}
+KNOWN_QUALITY_GATE_KINDS = {"guidance", "enforced_gate"}
+KNOWN_QUALITY_GATE_SOURCE_TYPES = {"manual", "guessed", "imported"}
+KNOWN_QUALITY_GATE_CONFIDENCE = {"high", "medium", "low"}
+KNOWN_QUALITY_GATE_PROBE_SCANNED = {"yes", "no", "uncertain"}
+KNOWN_QUALITY_GATE_RESOLUTIONS = {"baseline", "coordinator_prep"}
+KNOWN_QUALITY_GATE_BLOCKING_STAGES = {
+    "return_review_approval",
+    "review_return_handoff",
+    "family_closure",
+    "commit_ready",
+}
+QUALITY_GATE_POLICY_BOOL_FIELDS = {
+    "allowed_in_bounded_runs",
+    "allowed_in_repo_wide_runs",
+    "requires_isolated_execution",
+    "requires_user_confirmation",
+}
 
 FOCUS_ALIASES = {
     "separation-of-concerns": "soc",
@@ -2646,6 +2668,188 @@ def validate_reviewer_model_recommendation(
         errors.append(f"{prefix}.reason must be a non-empty string when present")
 
 
+def require_baseline_enum(
+    mapping: dict[str, Any],
+    field: str,
+    allowed: set[str],
+    errors: list[str],
+    prefix: str,
+) -> str | None:
+    value = require_baseline_string(mapping, field, errors, prefix)
+    if value and value not in allowed:
+        errors.append(f"{prefix}.{field} must be one of {', '.join(sorted(allowed))}")
+    return value
+
+
+def require_baseline_bool(
+    mapping: dict[str, Any],
+    field: str,
+    errors: list[str],
+    prefix: str,
+) -> bool | None:
+    value = mapping.get(field)
+    if not isinstance(value, bool):
+        errors.append(f"{prefix}.{field} must be a boolean")
+        return None
+    return value
+
+
+def require_baseline_enum_list(
+    mapping: dict[str, Any],
+    field: str,
+    allowed: set[str],
+    errors: list[str],
+    prefix: str,
+    *,
+    require_non_empty: bool,
+) -> list[str]:
+    values = require_baseline_string_list(
+        mapping,
+        field,
+        errors,
+        prefix,
+        require_non_empty=require_non_empty,
+    )
+    for index, value in enumerate(values):
+        if value not in allowed:
+            errors.append(
+                f"{prefix}.{field}[{index}] must be one of {', '.join(sorted(allowed))}"
+            )
+    return values
+
+
+def validate_repo_quality_gates(
+    data: dict[str, Any],
+    errors: list[str],
+) -> dict[str, dict[str, Any]]:
+    raw_gates = data.get("repo_quality_gates")
+    if raw_gates is None:
+        return {}
+    if not isinstance(raw_gates, list):
+        errors.append("repo_quality_gates must be a list when present")
+        return {}
+
+    gates_by_id: dict[str, dict[str, Any]] = {}
+    seen_ids: set[str] = set()
+    for index, gate in enumerate(raw_gates):
+        prefix = f"repo_quality_gates[{index}]"
+        if not isinstance(gate, dict):
+            errors.append(f"{prefix} must be a mapping")
+            continue
+
+        gate_id = require_baseline_string(gate, "id", errors, prefix)
+        if gate_id:
+            normalized_id = normalize_focus_token(gate_id)
+            if normalized_id in seen_ids:
+                errors.append(f"{prefix}.id {gate_id!r} duplicates another repo_quality_gates id")
+            seen_ids.add(normalized_id)
+            gates_by_id[gate_id] = gate
+
+        phase = require_baseline_enum(gate, "phase", KNOWN_QUALITY_GATE_PHASES, errors, prefix)
+        applies_to = require_baseline_enum(
+            gate,
+            "applies_to",
+            KNOWN_QUALITY_GATE_APPLIES_TO,
+            errors,
+            prefix,
+        )
+        owner = require_baseline_enum(gate, "owner", KNOWN_QUALITY_GATE_OWNERS, errors, prefix)
+        require_baseline_enum(gate, "mutability", KNOWN_QUALITY_GATE_MUTABILITY, errors, prefix)
+        require_baseline_enum(
+            gate,
+            "scope_awareness",
+            KNOWN_QUALITY_GATE_SCOPE_AWARENESS,
+            errors,
+            prefix,
+        )
+        kind = require_baseline_enum(gate, "kind", KNOWN_QUALITY_GATE_KINDS, errors, prefix)
+        require_baseline_enum(gate, "source_type", KNOWN_QUALITY_GATE_SOURCE_TYPES, errors, prefix)
+        require_baseline_enum(gate, "confidence", KNOWN_QUALITY_GATE_CONFIDENCE, errors, prefix)
+        require_baseline_enum(
+            gate,
+            "probe_file_scanned",
+            KNOWN_QUALITY_GATE_PROBE_SCANNED,
+            errors,
+            prefix,
+        )
+        resolution = require_baseline_enum(
+            gate,
+            "resolution",
+            KNOWN_QUALITY_GATE_RESOLUTIONS,
+            errors,
+            prefix,
+        )
+
+        for field in QUALITY_GATE_POLICY_BOOL_FIELDS:
+            require_baseline_bool(gate, field, errors, prefix)
+
+        handoff_blocking = require_baseline_bool(gate, "handoff_blocking", errors, prefix)
+        blocking_stages = require_baseline_enum_list(
+            gate,
+            "blocking_stages",
+            KNOWN_QUALITY_GATE_BLOCKING_STAGES,
+            errors,
+            prefix,
+            require_non_empty=kind == "enforced_gate",
+        )
+
+        require_baseline_string(gate, "applicability", errors, prefix)
+        require_baseline_string(gate, "evidence_expectation", errors, prefix)
+        require_baseline_string(gate, "failure_policy", errors, prefix)
+
+        if resolution == "baseline":
+            require_baseline_string(gate, "command", errors, prefix)
+        elif resolution == "coordinator_prep":
+            require_baseline_string(gate, "command_template", errors, prefix)
+            require_baseline_string_list(
+                gate,
+                "required_inputs",
+                errors,
+                prefix,
+                require_non_empty=True,
+            )
+
+        if handoff_blocking is True and not (
+            {"review_return_handoff", "return_review_approval"} & set(blocking_stages)
+        ):
+            errors.append(
+                f"{prefix}.handoff_blocking true requires review_return_handoff or "
+                "return_review_approval in blocking_stages"
+            )
+
+        stage_owners = gate.get("stage_owners")
+        if owner == "both":
+            if not isinstance(stage_owners, dict):
+                errors.append(f"{prefix}.stage_owners must be a mapping when owner is both")
+                stage_owners = {}
+            for stage in blocking_stages:
+                value = stage_owners.get(stage) if isinstance(stage_owners, dict) else None
+                if value not in {"lane", "coordinator"}:
+                    errors.append(
+                        f"{prefix}.stage_owners.{stage} must be lane or coordinator"
+                    )
+        elif stage_owners is not None:
+            if not isinstance(stage_owners, dict):
+                errors.append(f"{prefix}.stage_owners must be a mapping when present")
+            else:
+                for stage, value in stage_owners.items():
+                    if stage not in KNOWN_QUALITY_GATE_BLOCKING_STAGES:
+                        errors.append(f"{prefix}.stage_owners contains unknown stage {stage!r}")
+                    if value not in {"lane", "coordinator"}:
+                        errors.append(
+                            f"{prefix}.stage_owners.{stage} must be lane or coordinator"
+                        )
+
+        if phase == "pre_handoff" and owner == "coordinator":
+            errors.append(f"{prefix}.owner cannot be coordinator-only for a pre_handoff gate")
+        if applies_to == "reviewer" and "review_return_handoff" in blocking_stages:
+            errors.append(
+                f"{prefix}.applies_to reviewer cannot block review_return_handoff directly"
+            )
+
+    return gates_by_id
+
+
 def validate_alternative_entry(
     entry: Any,
     index: int,
@@ -2713,6 +2917,7 @@ def validate_alternative_entry(
 def validate_baseline_surfaces(
     data: dict[str, Any],
     project_root: pathlib.Path | None,
+    quality_gates_by_id: dict[str, dict[str, Any]],
     errors: list[str],
 ) -> list[str]:
     surfaces = data.get("surfaces")
@@ -2793,6 +2998,31 @@ def validate_baseline_surfaces(
                     if not non_empty_string(focus_area):
                         errors.append(
                             f"{prefix}.review_focus_areas[{focus_index}] must be a non-empty string"
+                        )
+
+        if "finish_gate_refs" in surface:
+            finish_gate_refs = surface.get("finish_gate_refs")
+            if not isinstance(finish_gate_refs, list):
+                errors.append(f"{prefix}.finish_gate_refs must be a list when present")
+            else:
+                seen_gate_refs: set[str] = set()
+                for gate_index, gate_ref in enumerate(finish_gate_refs):
+                    gate_prefix = f"{prefix}.finish_gate_refs[{gate_index}]"
+                    if not non_empty_string(gate_ref):
+                        errors.append(f"{gate_prefix} must be a non-empty string")
+                        continue
+                    gate_ref = str(gate_ref)
+                    if gate_ref in seen_gate_refs:
+                        errors.append(f"{gate_prefix} duplicates another finish_gate_refs entry")
+                    seen_gate_refs.add(gate_ref)
+                    gate = quality_gates_by_id.get(gate_ref)
+                    if gate is None:
+                        errors.append(
+                            f"{gate_prefix} references unknown repo_quality_gates id {gate_ref!r}"
+                        )
+                    elif gate.get("kind") != "enforced_gate":
+                        errors.append(
+                            f"{gate_prefix} references {gate_ref!r}, which is not an enforced_gate"
                         )
 
         validate_baseline_lenses(surface, errors, prefix)
@@ -2927,12 +3157,14 @@ def validate_review_baseline_data(
             for index, entry in enumerate(alternative_baselines):
                 validate_alternative_entry(entry, index, baseline_path, project_root, errors)
 
-    surface_ids = validate_baseline_surfaces(data, project_root, errors)
+    quality_gates_by_id = validate_repo_quality_gates(data, errors)
+    surface_ids = validate_baseline_surfaces(data, project_root, quality_gates_by_id, errors)
     return {
         "baseline_kind": effective_kind,
         "declared_baseline_kind": declared_kind,
         "surface_ids": surface_ids,
         "surface_count": len(surface_ids),
+        "repo_quality_gate_count": len(quality_gates_by_id),
         "alternative_count": alternative_count,
         "variant_id": data.get("variant_id") if effective_kind == "variant" else None,
     }

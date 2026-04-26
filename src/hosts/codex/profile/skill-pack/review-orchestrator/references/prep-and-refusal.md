@@ -45,6 +45,12 @@ baseline. For explicitly requested alternative baselines, use
 `--expect-kind variant` and pass the primary baseline path when it is available
 so pointer and `derived_from` consistency are checked. Refuse on helper failure;
 do not repair or reinterpret a failed baseline in coordinator prep.
+When the baseline declares `repo_quality_gates`, this validation also checks
+gate classification, resolution hints, and surface `finish_gate_refs`. If a
+required finish gate is unresolved, ambiguous, or points to a missing gate id,
+block before spawning lanes instead of letting lanes guess commands.
+`resolution: coordinator_prep` gates must already name the prep-time inputs
+needed to produce concrete commands.
 4. When the user asks for a run-local narrowing inside that baseline, start with the bundled helper:
 
 ```bash

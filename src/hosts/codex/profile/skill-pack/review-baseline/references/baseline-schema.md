@@ -42,6 +42,35 @@ alternative_baselines:
       - "reviews limited to runtime/recovery seams"
       - "targeted invariant checks"
 
+# Optional. Use when repo-local finish gates are stable enough to classify.
+repo_quality_gates:
+  - id: "build-touched-project"
+    command_template: "build command for the resolved touched project"
+    phase: "pre_handoff"
+    applies_to: "both"
+    owner: "lane"
+    mutability: "non_mutating"
+    scope_awareness: "scope_aware"
+    kind: "enforced_gate"
+    handoff_blocking: true
+    blocking_stages:
+      - "review_return_handoff"
+      - "family_closure"
+      - "commit_ready"
+    source_type: "manual"
+    confidence: "high"
+    probe_file_scanned: "yes"
+    allowed_in_bounded_runs: true
+    allowed_in_repo_wide_runs: true
+    requires_isolated_execution: false
+    requires_user_confirmation: false
+    resolution: "coordinator_prep"
+    required_inputs:
+      - "touched_project"
+    applicability: "applies when the surface maps to a buildable project"
+    evidence_expectation: "exit status and captured build output"
+    failure_policy: "block listed stages when red, blocked, or hanging"
+
 surfaces:
   - id: "runtime-recovery"
     name: "Runtime Recovery"
@@ -58,6 +87,8 @@ surfaces:
     review_focus_areas:
       - "provisional authority must not be treated as resumable truth until promoted"
       - "provenance must track launch vs resume vs recovery correctly"
+    finish_gate_refs:
+      - "build-touched-project"
     configured_builtin_lenses:
       - lens_id: "goal-fidelity"
         priority: "high"
@@ -129,6 +160,7 @@ Optional top-level fields:
 - `baseline_kind`
 - `reviewer_model_recommendation`
 - `alternative_baselines`
+- `repo_quality_gates`
 - `derived_from`
 
 Required per-surface fields:
@@ -143,6 +175,44 @@ Required per-surface fields:
 
 Optional per-surface fields:
 - `review_focus_areas` (list of short strings)
+- `finish_gate_refs` (list of ids from top-level `repo_quality_gates`)
+
+Optional `repo_quality_gates` fields are validated when present. Each gate must
+have:
+
+- `id`
+- `phase`: `precheck`, `deslop`, `pre_handoff`, or `final_integration`
+- `applies_to`: `reviewer`, `fixer`, or `both`
+- `owner`: `lane`, `coordinator`, or `both`
+- `mutability`: `non_mutating`, `scope_mutating`, `repo_mutating`, or
+  `uncertain`
+- `scope_awareness`: `scope_aware`, `repo_global`, or `uncertain`
+- `kind`: `guidance` or `enforced_gate`
+- `handoff_blocking` boolean
+- `blocking_stages`: zero or more of `return_review_approval`,
+  `review_return_handoff`, `family_closure`, `commit_ready`; `enforced_gate`
+  entries must include at least one
+- `source_type`: `manual`, `guessed`, or `imported`
+- `confidence`: `high`, `medium`, or `low`
+- `probe_file_scanned`: `yes`, `no`, or `uncertain`
+- Coortex policy booleans: `allowed_in_bounded_runs`,
+  `allowed_in_repo_wide_runs`, `requires_isolated_execution`,
+  `requires_user_confirmation`
+- `resolution`: `baseline` or `coordinator_prep`
+- `applicability`
+- `evidence_expectation`
+- `failure_policy`
+
+Resolution rules:
+
+- `resolution: baseline` requires a concrete `command`.
+- `resolution: coordinator_prep` requires `command_template` and non-empty
+  `required_inputs`.
+- `owner: both` requires `stage_owners` for every blocking stage.
+- `handoff_blocking: true` requires `review_return_handoff` or
+  `return_review_approval` in `blocking_stages`.
+- Surface `finish_gate_refs` must reference known `repo_quality_gates` ids whose
+  `kind` is `enforced_gate`.
 
 Required built-in lens fields:
 - `lens_id`

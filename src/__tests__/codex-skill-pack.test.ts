@@ -210,6 +210,32 @@ test("review baseline supports optional surface focus areas without extra matrix
   assert.match(schema, /review_focus_areas.*list of short strings|list of short strings.*review_focus_areas/i);
 });
 
+test("review baseline supports validated repo quality gates", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-baseline/references/baseline-schema.md",
+    "src/hosts/codex/profile/skill-pack/review-baseline/references/quality-gate.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/prep-and-refusal.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /repo_quality_gates/i, path);
+    assert.match(content, /finish_gate_refs/i, path);
+    assert.match(content, /coordinator_prep|prep-time/i, path);
+  }
+
+  const schema = await readFile(
+    resolve(
+      process.cwd(),
+      "src/hosts/codex/profile/skill-pack/review-baseline/references/baseline-schema.md"
+    ),
+    "utf8"
+  );
+  assert.match(schema, /resolution: baseline[\s\S]*command/i);
+  assert.match(schema, /resolution: coordinator_prep[\s\S]*command_template[\s\S]*required_inputs/i);
+});
+
 test("review baseline and orchestrator share deterministic baseline validation", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",

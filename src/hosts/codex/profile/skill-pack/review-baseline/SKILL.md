@@ -86,6 +86,10 @@ runs so the user can see which phase is in flight.
 - `review-baseline` and `review-orchestrator` must use the same deterministic
   baseline validation helper. Do not rely on prose self-review alone for schema,
   variant, pointer, anchor, or lens validity.
+- When repo-local quality gates are known, record them as top-level
+  `repo_quality_gates` and reference required finish gates from surfaces with
+  `finish_gate_refs`. Concrete gates belong in the baseline when static;
+  templated gates must name the prep-time inputs needed before lanes start.
 - When writing alternative baseline files, default them under `docs/review-baselines/` or `doc/review-baselines/` when those directories exist.
 - When writing non-committed working alternative baselines, default them under `.coortex/review-baselines/`.
 
