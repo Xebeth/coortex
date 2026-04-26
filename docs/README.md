@@ -17,6 +17,8 @@ and implementation state:
 - `codex-profile-integration.md`
 - `codex-run-recovery-mapping.md`
 - `current-work-review-packets.md`
+- `review-process-intent.md`
+- `review-process-skill-audit.md`
 - `repo-local-quality-gates.md`
 
 ## Completed milestone docs
