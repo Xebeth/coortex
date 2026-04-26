@@ -55,6 +55,8 @@ Do not use this skill when:
 
 - `references/implementation-handoff.md` — read before asking an implementation
   lane to claim completion or before running coordinator intake.
+- `references/closeout-report.md` — read before reporting completion for a
+  non-trivial current-work run.
 
 ## Helper use
 
@@ -160,7 +162,13 @@ implementation workflow over a live mutating orchestrator campaign.
     - If the gate finds work, route it back to the same implementation lane.
       Stop only after a full deslop/review/gate pass produces no findings and no
       edits.
-11. **Commit only when allowed**
+11. **Closeout accounting**
+    - Use `references/closeout-report.md` before reporting completion.
+    - Report produced artifacts, explicit claims, evidence, continuation rounds,
+      earliest ready point, residual risks, and commit/install disposition.
+    - If a commit or install happens after a closeout draft, update the closeout
+      before the final response.
+12. **Commit only when allowed**
     - If the user asked for commits, make one atomic commit per approved slice.
     - Do not batch unrelated slices.
     - Do not include generated lane, wave, or temporary packet ids in the commit
@@ -205,6 +213,14 @@ Unless the prompt overrides it, report:
 - local quality gates
 - targeted tests
 - broader tests, if required
+
+## Closeout
+
+- produced artifacts
+- explicit claims and evidence
+- continuation rounds
+- first ready point
+- commit/install disposition
 
 ## Residual Risks
 

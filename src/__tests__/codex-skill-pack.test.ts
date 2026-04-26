@@ -684,6 +684,10 @@ test("implementation coordinator turns ordinary intent into reviewed current-wor
     "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
     "src/hosts/codex/profile/skill-pack/implementation-coordinator/references/implementation-handoff.md"
   ].map((path) => resolve(process.cwd(), path));
+  const closeoutRef = resolve(
+    process.cwd(),
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/references/closeout-report.md"
+  );
 
   for (const path of expectedFiles) {
     const content = await readFile(path, "utf8");
@@ -702,7 +706,15 @@ test("implementation coordinator turns ordinary intent into reviewed current-wor
   assert.match(coordinator, /Do not commit unless|commit only when allowed/i);
   assert.match(coordinator, /fixer-orchestrator|review_handoff/i);
   assert.match(coordinator, /references\/implementation-handoff\.md/i);
+  assert.match(coordinator, /references\/closeout-report\.md/i);
   assert.match(prompt, /references\/implementation-handoff\.md/i);
+  assert.match(prompt, /references\/closeout-report\.md/i);
+
+  const closeout = await readFile(closeoutRef, "utf8");
+  assert.match(closeout, /Closeout Report|closeout/i);
+  assert.match(closeout, /produced_artifacts|explicit_claims|continuation_rounds/i);
+  assert.match(closeout, /commit_or_install_disposition|not requested|not allowed/i);
+  assert.match(closeout, /residual_risks|first_ready_point/i);
 
   const currentWorkDocs = await readFile(
     resolve(process.cwd(), "docs/current-work-review-packets.md"),
