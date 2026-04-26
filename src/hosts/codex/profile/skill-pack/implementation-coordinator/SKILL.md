@@ -33,6 +33,13 @@ Do not use this skill when:
 
 - User-facing entrypoint: ordinary intent is enough to start; do not require the
   user to know the packet/spec prompt shape.
+- This is the user-facing entrypoint for the shared implementation protocol:
+  packet, spec review, implementation lane, implementation handoff, intake
+  gate, return review, continuation loop, closing gate, closeout, and optional
+  atomic commit.
+- Fixer workflows use the same protocol shape as repair-specialized
+  implementations, but they do not call this skill as a nested coordinator.
+  Structured `review_handoff` repair still belongs to `$fixer-orchestrator`.
 - For non-trivial work, draft or validate a current-work mini-surface packet
   before implementation edits begin.
 - Run read-only spec review before implementation. Fix the packet/spec first;
@@ -129,8 +136,8 @@ implementation workflow over a live mutating orchestrator campaign.
      handoff, closeout, and gate artifact paths for the run.
    - Include surface, review boundary, seams, invariants, coverage rows,
      reviewer focus, and known uncertainties.
-   - Use baseline-compatible surface vocabulary from
-     `docs/current-work-review-packets.md` when available.
+   - Use baseline-compatible surface vocabulary from the supplied packet,
+     baseline, or current-work review context when available.
    - Resolve finish gates as early as possible. If a required gate cannot be
      resolved from the baseline, repo docs, or prep context, block for baseline
      refresh or operator decision before implementation.

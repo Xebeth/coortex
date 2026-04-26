@@ -10,10 +10,22 @@ families at the owning seam rather than patching the nearest manifestation.
 
 ## Transitional orchestrated fixer
 
-This skill is the current workflow-level approximation of the post-M3 fixer
+This skill is a workflow-level approximation of the intended fixer
 specialization model.
 
-It is **not** the final runtime lane system. In the current repo state:
+`fixer-orchestrator` is a repair-specialized implementation coordinator. It
+uses the shared implementation protocol vocabulary — implementation lane,
+handoff, intake gate, return review, continuation loop, closing gate, closeout,
+and atomic commit — but replaces ordinary idea intake with structured
+`review_handoff` family normalization.
+
+Do not invoke `$implementation-coordinator` as a nested workflow. The shared
+protocol is a contract layer, not a parent skill call. The fixer specialization
+adds repair-family obligations: family ledger updates, fixer trace records,
+active-campaign locks, same-worker continuation, `$review-orchestrator`
+targeted return review, and one atomic commit per approved repair slice.
+
+It is **not** the final runtime lane system. In this skill pack:
 
 - `review_handoff` families are transformed into bounded repair lanes/slices
 - likely owning seam and write overlap drive batching

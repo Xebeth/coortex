@@ -8,6 +8,7 @@ const skillRefPattern = /\$([A-Za-z0-9_-]+)/g;
 const forbiddenFragments = [
   "/home/ngi/.codex",
   "~/.codex",
+  "docs/implementation-process-intent.md",
   "quick_validate.py",
   "skill-creator",
   "PyYAML"
