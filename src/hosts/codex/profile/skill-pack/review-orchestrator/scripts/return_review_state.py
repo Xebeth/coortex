@@ -5,6 +5,7 @@ import argparse
 import copy
 from datetime import datetime, timezone
 import fnmatch
+import glob
 import json
 import os
 import pathlib
@@ -111,6 +112,10 @@ KNOWN_RUNTIME_FOCUS_TOKENS = {
     "soc",
 }
 
+KNOWN_BASELINE_KINDS = {"primary", "variant"}
+KNOWN_VARIANT_STRATEGIES = {"derived", "fresh"}
+BASELINE_EXPECT_KINDS = {"any", "primary", "variant"}
+
 FOCUS_ALIASES = {
     "separation-of-concerns": "soc",
     "separation_of_concerns": "soc",
@@ -155,6 +160,220 @@ def load_json_object(path: pathlib.Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise SystemExit(f"{path} did not parse to a mapping")
     return data
+
+
+def load_structured_mapping(path: pathlib.Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        data = parse_simple_yaml_mapping(text, path)
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} did not parse to a mapping")
+    return data
+
+
+def strip_yaml_comment(line: str) -> str:
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index].rstrip()
+    return line.rstrip()
+
+
+def parse_yaml_scalar(raw: str) -> Any:
+    value = raw.strip()
+    if value == "":
+        return ""
+    if value == "[]":
+        return []
+    if value == "{}":
+        return {}
+    if value in {"null", "Null", "NULL", "~"}:
+        return None
+    if value in {"true", "True", "TRUE"}:
+        return True
+    if value in {"false", "False", "FALSE"}:
+        return False
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [parse_yaml_scalar(part) for part in split_inline_yaml_list(inner)]
+    if re.fullmatch(r"-?\d+", value):
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    return value
+
+
+def split_inline_yaml_list(value: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char == ",":
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    return parts
+
+
+def split_yaml_mapping_entry(content: str) -> tuple[str, str | None]:
+    match = re.match(r"^([A-Za-z0-9_-]+):(.*)$", content)
+    if not match:
+        raise ValueError(f"expected mapping entry, got {content!r}")
+    key = match.group(1)
+    rest = match.group(2).strip()
+    return key, rest if rest != "" else None
+
+
+def tokenize_simple_yaml(text: str) -> list[tuple[int, str]]:
+    tokens: list[tuple[int, str]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        if raw_line.strip() == "":
+            continue
+        if raw_line.strip() in {"---", "..."}:
+            continue
+        uncommented = strip_yaml_comment(raw_line)
+        if uncommented.strip() == "":
+            continue
+        if "\t" in uncommented[: len(uncommented) - len(uncommented.lstrip(" \t"))]:
+            raise ValueError(f"line {line_number}: tabs are not supported in indentation")
+        indent = len(uncommented) - len(uncommented.lstrip(" "))
+        tokens.append((indent, uncommented.strip()))
+    return tokens
+
+
+def parse_simple_yaml_mapping(text: str, path: pathlib.Path) -> dict[str, Any]:
+    try:
+        tokens = tokenize_simple_yaml(text)
+        if not tokens:
+            return {}
+        data, index = parse_yaml_block(tokens, 0, tokens[0][0])
+        if index != len(tokens):
+            raise ValueError(f"unexpected content at line token {index + 1}")
+        if not isinstance(data, dict):
+            raise ValueError("top-level YAML document must be a mapping")
+        return data
+    except ValueError as exc:
+        raise SystemExit(f"{path} could not be parsed as supported baseline YAML: {exc}") from exc
+
+
+def parse_yaml_block(
+    tokens: list[tuple[int, str]],
+    index: int,
+    indent: int,
+) -> tuple[Any, int]:
+    if index >= len(tokens):
+        return {}, index
+    current_indent, content = tokens[index]
+    if current_indent < indent:
+        return {}, index
+    if current_indent != indent:
+        raise ValueError(f"expected indentation {indent}, got {current_indent} near {content!r}")
+    if content.startswith("- "):
+        return parse_yaml_list(tokens, index, indent)
+    return parse_yaml_mapping(tokens, index, indent)
+
+
+def parse_yaml_mapping(
+    tokens: list[tuple[int, str]],
+    index: int,
+    indent: int,
+) -> tuple[dict[str, Any], int]:
+    result: dict[str, Any] = {}
+    while index < len(tokens):
+        current_indent, content = tokens[index]
+        if current_indent < indent:
+            break
+        if current_indent > indent:
+            raise ValueError(f"unexpected nested mapping content {content!r}")
+        if content.startswith("- "):
+            break
+        key, rest = split_yaml_mapping_entry(content)
+        index += 1
+        if rest is not None:
+            result[key] = parse_yaml_scalar(rest)
+            continue
+        if index < len(tokens) and tokens[index][0] > indent:
+            value, index = parse_yaml_block(tokens, index, tokens[index][0])
+            result[key] = value
+        else:
+            result[key] = {}
+    return result, index
+
+
+def parse_yaml_list(
+    tokens: list[tuple[int, str]],
+    index: int,
+    indent: int,
+) -> tuple[list[Any], int]:
+    result: list[Any] = []
+    while index < len(tokens):
+        current_indent, content = tokens[index]
+        if current_indent < indent:
+            break
+        if current_indent > indent:
+            raise ValueError(f"unexpected nested list content {content!r}")
+        if not content.startswith("- "):
+            break
+
+        rest = content[2:].strip()
+        index += 1
+        if rest == "":
+            if index < len(tokens) and tokens[index][0] > indent:
+                value, index = parse_yaml_block(tokens, index, tokens[index][0])
+            else:
+                value = None
+            result.append(value)
+            continue
+
+        if re.match(r"^[A-Za-z0-9_-]+:", rest):
+            item: dict[str, Any] = {}
+            key, item_rest = split_yaml_mapping_entry(rest)
+            item[key] = parse_yaml_scalar(item_rest) if item_rest is not None else {}
+            if index < len(tokens) and tokens[index][0] > indent:
+                nested, index = parse_yaml_block(tokens, index, tokens[index][0])
+                if not isinstance(nested, dict):
+                    raise ValueError(f"list item mapping for {key!r} cannot merge non-mapping content")
+                item.update(nested)
+            result.append(item)
+            continue
+
+        result.append(parse_yaml_scalar(rest))
+    return result, index
 
 
 def unwrap_root(data: dict[str, Any], root_key: str) -> dict[str, Any]:
@@ -1642,6 +1861,554 @@ def normalize_carried_open_reason(
     return "family-local-gap-remaining"
 
 
+def non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def require_baseline_string(
+    mapping: dict[str, Any],
+    field: str,
+    errors: list[str],
+    prefix: str,
+) -> str | None:
+    value = mapping.get(field)
+    if not non_empty_string(value):
+        errors.append(f"{prefix} missing or invalid {field}")
+        return None
+    return str(value)
+
+
+def require_baseline_string_list(
+    mapping: dict[str, Any],
+    field: str,
+    errors: list[str],
+    prefix: str,
+    *,
+    require_non_empty: bool = False,
+) -> list[str]:
+    value = mapping.get(field)
+    if not isinstance(value, list):
+        errors.append(f"{prefix} field {field} must be a list")
+        return []
+    result: list[str] = []
+    for index, item in enumerate(value):
+        if not non_empty_string(item):
+            errors.append(f"{prefix}.{field}[{index}] must be a non-empty string")
+            continue
+        result.append(str(item))
+    if require_non_empty and not result:
+        errors.append(f"{prefix} field {field} must contain at least one entry")
+    return result
+
+
+def require_baseline_string_or_list(
+    mapping: dict[str, Any],
+    field: str,
+    errors: list[str],
+    prefix: str,
+) -> list[str]:
+    value = mapping.get(field)
+    if isinstance(value, list):
+        result = [str(item) for item in value if non_empty_string(item)]
+        if not result:
+            errors.append(f"{prefix}.{field} must contain at least one non-empty entry")
+        return result
+    if non_empty_string(value):
+        return [str(value)]
+    errors.append(f"{prefix}.{field} must be a non-empty string or list")
+    return []
+
+
+def validate_project_relative_pattern(value: str, errors: list[str], prefix: str) -> str:
+    normalized = normalize_project_path(value)
+    if not normalized:
+        errors.append(f"{prefix} must not be empty")
+        return normalized
+    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
+        errors.append(f"{prefix} must be project-relative, not absolute")
+    if normalized.startswith("~"):
+        errors.append(f"{prefix} must not use home-directory expansion")
+    if any(part == ".." for part in normalized.split("/")):
+        errors.append(f"{prefix} must not escape the project with '..'")
+    return normalized
+
+
+def project_pattern_exists(project_root: pathlib.Path, pattern: str) -> bool:
+    if any(char in pattern for char in "*?["):
+        matches = glob.glob(str(project_root / pattern), recursive=True)
+        return any(pathlib.Path(match).exists() for match in matches)
+    return (project_root / pattern).exists()
+
+
+def validate_existing_project_patterns(
+    patterns: list[str],
+    project_root: pathlib.Path | None,
+    errors: list[str],
+    prefix: str,
+    *,
+    require_match: bool,
+) -> None:
+    for index, raw_pattern in enumerate(patterns):
+        pattern = validate_project_relative_pattern(raw_pattern, errors, f"{prefix}[{index}]")
+        if project_root is not None and require_match and pattern:
+            if not project_pattern_exists(project_root, pattern):
+                errors.append(f"{prefix}[{index}] {pattern!r} does not match any project path")
+
+
+def validate_baseline_lenses(surface: dict[str, Any], errors: list[str], prefix: str) -> None:
+    builtins = surface.get("configured_builtin_lenses")
+    customs = surface.get("configured_custom_lenses")
+
+    if not isinstance(builtins, list):
+        errors.append(f"{prefix}.configured_builtin_lenses must be a list")
+        builtins = []
+    if not isinstance(customs, list):
+        errors.append(f"{prefix}.configured_custom_lenses must be a list")
+        customs = []
+
+    usable_lens_count = 0
+    for index, lens in enumerate(builtins):
+        lens_prefix = f"{prefix}.configured_builtin_lenses[{index}]"
+        if not isinstance(lens, dict):
+            errors.append(f"{lens_prefix} must be a mapping")
+            continue
+        lens_id = require_baseline_string(lens, "lens_id", errors, lens_prefix)
+        require_baseline_string(lens, "priority", errors, lens_prefix)
+        if lens_id:
+            usable_lens_count += 1
+            if normalize_focus_token(lens_id) not in KNOWN_RUNTIME_FOCUS_TOKENS:
+                errors.append(f"{lens_prefix}.lens_id {lens_id!r} is not a known built-in lens id")
+
+    for index, lens in enumerate(customs):
+        lens_prefix = f"{prefix}.configured_custom_lenses[{index}]"
+        if not isinstance(lens, dict):
+            errors.append(f"{lens_prefix} must be a mapping")
+            continue
+        required_fields = [
+            "id",
+            "name",
+            "purpose",
+            "what_to_look_for",
+            "key_questions",
+            "evidence_expectations",
+            "priority",
+        ]
+        missing_required = False
+        for field in required_fields:
+            value = lens.get(field)
+            if field in {"key_questions", "evidence_expectations"}:
+                if not isinstance(value, list) or not any(non_empty_string(item) for item in value):
+                    errors.append(f"{lens_prefix}.{field} must be a non-empty list of strings")
+                    missing_required = True
+            elif not non_empty_string(value):
+                errors.append(f"{lens_prefix} missing or invalid {field}")
+                missing_required = True
+        if not missing_required:
+            usable_lens_count += 1
+
+    if usable_lens_count == 0:
+        errors.append(f"{prefix} must configure at least one usable built-in or custom lens")
+
+
+def validate_reviewer_model_recommendation(
+    value: Any,
+    errors: list[str],
+    prefix: str,
+) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        errors.append(f"{prefix} must be a mapping when present")
+        return
+    if "model" in value and not non_empty_string(value.get("model")):
+        errors.append(f"{prefix}.model must be a non-empty string when present")
+    if "reasoning_effort" in value and not non_empty_string(value.get("reasoning_effort")):
+        errors.append(f"{prefix}.reasoning_effort must be a non-empty string when present")
+    if "reason" in value and not non_empty_string(value.get("reason")):
+        errors.append(f"{prefix}.reason must be a non-empty string when present")
+
+
+def validate_alternative_entry(
+    entry: Any,
+    index: int,
+    baseline_path: pathlib.Path,
+    project_root: pathlib.Path | None,
+    errors: list[str],
+) -> None:
+    prefix = f"alternative_baselines[{index}]"
+    if not isinstance(entry, dict):
+        errors.append(f"{prefix} must be a mapping")
+        return
+
+    alt_id = require_baseline_string(entry, "id", errors, prefix)
+    alt_name = require_baseline_string(entry, "name", errors, prefix)
+    alt_purpose = require_baseline_string(entry, "purpose", errors, prefix)
+    raw_path = require_baseline_string(entry, "path", errors, prefix)
+    entry_when_to_use = require_baseline_string_or_list(entry, "when_to_use", errors, prefix)
+
+    if not raw_path:
+        return
+    normalized_path = validate_project_relative_pattern(raw_path, errors, f"{prefix}.path")
+    if project_root is None:
+        return
+
+    alt_path = (project_root / normalized_path).resolve()
+    if alt_path == baseline_path.resolve():
+        errors.append(f"{prefix}.path must not point back to the primary baseline itself")
+        return
+    if not alt_path.exists():
+        errors.append(f"{prefix}.path {normalized_path!r} does not exist")
+        return
+
+    try:
+        alt_data = load_structured_mapping(alt_path)
+    except SystemExit as exc:
+        errors.append(f"{prefix}.path {normalized_path!r} is not parseable: {exc}")
+        return
+
+    alt_errors: list[str] = []
+    validate_review_baseline_data(alt_data, alt_path, project_root, "variant", alt_errors)
+    errors.extend(f"{prefix}.path {normalized_path!r}: {error}" for error in alt_errors)
+    if alt_id and alt_data.get("variant_id") != alt_id:
+        errors.append(
+            f"{prefix}.id {alt_id!r} does not match variant_id {alt_data.get('variant_id')!r}"
+        )
+    if alt_name and alt_data.get("variant_name") != alt_name:
+        errors.append(
+            f"{prefix}.name {alt_name!r} does not match variant_name {alt_data.get('variant_name')!r}"
+        )
+    if alt_purpose and alt_data.get("variant_purpose") != alt_purpose:
+        errors.append(
+            f"{prefix}.purpose {alt_purpose!r} does not match variant_purpose {alt_data.get('variant_purpose')!r}"
+        )
+    alt_when_to_use = normalize_string_list(alt_data.get("variant_when_to_use"))
+    if entry_when_to_use and alt_when_to_use and entry_when_to_use != alt_when_to_use:
+        errors.append(f"{prefix}.when_to_use does not match variant_when_to_use")
+    if alt_data.get("variant_strategy") == "derived":
+        derived_from = alt_data.get("derived_from")
+        if non_empty_string(derived_from):
+            derived_path = (project_root / normalize_project_path(str(derived_from))).resolve()
+            if derived_path != baseline_path.resolve():
+                errors.append(f"{prefix}.derived_from does not resolve to this primary baseline")
+
+
+def validate_baseline_surfaces(
+    data: dict[str, Any],
+    project_root: pathlib.Path | None,
+    errors: list[str],
+) -> list[str]:
+    surfaces = data.get("surfaces")
+    if not isinstance(surfaces, list) or not surfaces:
+        errors.append("surfaces must be a non-empty list")
+        return []
+
+    surface_ids: list[str] = []
+    seen_ids: set[str] = set()
+    seen_names: set[str] = set()
+    seen_primary_anchors: dict[str, str] = {}
+
+    for index, surface in enumerate(surfaces):
+        prefix = f"surfaces[{index}]"
+        if not isinstance(surface, dict):
+            errors.append(f"{prefix} must be a mapping")
+            continue
+
+        surface_id = require_baseline_string(surface, "id", errors, prefix)
+        surface_name = require_baseline_string(surface, "name", errors, prefix)
+        require_baseline_string(surface, "purpose", errors, prefix)
+
+        if surface_id:
+            normalized_id = normalize_focus_token(surface_id)
+            surface_ids.append(surface_id)
+            if normalized_id in seen_ids:
+                errors.append(f"{prefix}.id {surface_id!r} duplicates another surface id")
+            seen_ids.add(normalized_id)
+        if surface_name:
+            normalized_name = normalize_focus_token(surface_name)
+            if normalized_name in seen_names:
+                errors.append(f"{prefix}.name {surface_name!r} duplicates another surface name")
+            seen_names.add(normalized_name)
+
+        primary_anchors = require_baseline_string_list(
+            surface, "primary_anchors", errors, prefix, require_non_empty=True
+        )
+        supporting_anchors = require_baseline_string_list(surface, "supporting_anchors", errors, prefix)
+        contract_docs = require_baseline_string_list(surface, "contract_docs", errors, prefix)
+
+        validate_existing_project_patterns(
+            primary_anchors,
+            project_root,
+            errors,
+            f"{prefix}.primary_anchors",
+            require_match=True,
+        )
+        validate_existing_project_patterns(
+            supporting_anchors,
+            project_root,
+            errors,
+            f"{prefix}.supporting_anchors",
+            require_match=True,
+        )
+        validate_existing_project_patterns(
+            contract_docs,
+            project_root,
+            errors,
+            f"{prefix}.contract_docs",
+            require_match=True,
+        )
+
+        for anchor in primary_anchors:
+            normalized_anchor = normalize_project_path(anchor)
+            previous_surface = seen_primary_anchors.get(normalized_anchor)
+            if previous_surface and previous_surface != (surface_id or prefix):
+                errors.append(
+                    f"{prefix}.primary_anchors contains {normalized_anchor!r}, already used by {previous_surface}"
+                )
+            seen_primary_anchors[normalized_anchor] = surface_id or prefix
+
+        if "review_focus_areas" in surface:
+            focus_areas = surface.get("review_focus_areas")
+            if not isinstance(focus_areas, list):
+                errors.append(f"{prefix}.review_focus_areas must be a list when present")
+            else:
+                for focus_index, focus_area in enumerate(focus_areas):
+                    if not non_empty_string(focus_area):
+                        errors.append(
+                            f"{prefix}.review_focus_areas[{focus_index}] must be a non-empty string"
+                        )
+
+        validate_baseline_lenses(surface, errors, prefix)
+
+    return surface_ids
+
+
+def validate_primary_pointer_for_variant(
+    variant_data: dict[str, Any],
+    variant_path: pathlib.Path,
+    primary_data: dict[str, Any],
+    primary_path: pathlib.Path,
+    project_root: pathlib.Path,
+    errors: list[str],
+) -> bool:
+    alternatives = primary_data.get("alternative_baselines")
+    if not isinstance(alternatives, list) or not alternatives:
+        errors.append("primary_baseline has no alternative_baselines entry for this variant")
+        return False
+
+    variant_id = variant_data.get("variant_id")
+    matching_entries: list[dict[str, Any]] = []
+    for entry in alternatives:
+        if not isinstance(entry, dict):
+            continue
+        raw_path = entry.get("path")
+        path_matches = False
+        if non_empty_string(raw_path):
+            candidate = (project_root / normalize_project_path(str(raw_path))).resolve()
+            path_matches = candidate == variant_path.resolve()
+        id_matches = non_empty_string(variant_id) and entry.get("id") == variant_id
+        if path_matches or id_matches:
+            matching_entries.append(entry)
+
+    if not matching_entries:
+        errors.append("no primary alternative_baselines entry matches this variant path or variant_id")
+        return False
+
+    pointer_valid = True
+    for index, entry in enumerate(matching_entries):
+        prefix = f"primary_baseline.alternative_baselines match[{index}]"
+        raw_path = entry.get("path")
+        if non_empty_string(raw_path):
+            candidate = (project_root / normalize_project_path(str(raw_path))).resolve()
+            if candidate != variant_path.resolve():
+                errors.append(f"{prefix}.path does not resolve to the validated variant baseline")
+                pointer_valid = False
+        if entry.get("id") != variant_data.get("variant_id"):
+            errors.append(f"{prefix}.id does not match variant_id")
+            pointer_valid = False
+        if entry.get("name") != variant_data.get("variant_name"):
+            errors.append(f"{prefix}.name does not match variant_name")
+            pointer_valid = False
+        if entry.get("purpose") != variant_data.get("variant_purpose"):
+            errors.append(f"{prefix}.purpose does not match variant_purpose")
+            pointer_valid = False
+
+    if variant_data.get("variant_strategy") == "derived":
+        derived_from = variant_data.get("derived_from")
+        if non_empty_string(derived_from):
+            derived_path = (project_root / normalize_project_path(str(derived_from))).resolve()
+            if derived_path != primary_path.resolve():
+                errors.append("variant derived_from does not resolve to the supplied primary_baseline")
+                pointer_valid = False
+    return pointer_valid
+
+
+def validate_review_baseline_data(
+    data: dict[str, Any],
+    baseline_path: pathlib.Path,
+    project_root: pathlib.Path | None,
+    expect_kind: str,
+    errors: list[str],
+) -> dict[str, Any]:
+    baseline_version = data.get("baseline_version")
+    if baseline_version != 1:
+        errors.append("baseline_version must be 1")
+    require_baseline_string(data, "updated_at", errors, "baseline")
+
+    declared_kind = data.get("baseline_kind")
+    if declared_kind is None:
+        effective_kind = "primary"
+    elif non_empty_string(declared_kind):
+        effective_kind = str(declared_kind)
+        if effective_kind not in KNOWN_BASELINE_KINDS:
+            errors.append(f"baseline_kind {effective_kind!r} must be one of primary, variant")
+    else:
+        effective_kind = "primary"
+        errors.append("baseline_kind must be a non-empty string when present")
+
+    if expect_kind not in BASELINE_EXPECT_KINDS:
+        errors.append(f"expect_kind {expect_kind!r} is not supported")
+    elif expect_kind != "any" and effective_kind != expect_kind:
+        errors.append(f"expected baseline_kind {expect_kind!r}, got {effective_kind!r}")
+
+    variant_fields = [
+        "variant_id",
+        "variant_name",
+        "variant_purpose",
+        "variant_when_to_use",
+        "variant_strategy",
+    ]
+    if effective_kind == "variant":
+        for field in variant_fields:
+            if field == "variant_when_to_use":
+                require_baseline_string_or_list(data, field, errors, "variant")
+            else:
+                require_baseline_string(data, field, errors, "variant")
+        strategy = data.get("variant_strategy")
+        if non_empty_string(strategy) and strategy not in KNOWN_VARIANT_STRATEGIES:
+            errors.append("variant_strategy must be one of derived, fresh")
+        if strategy == "derived":
+            require_baseline_string(data, "derived_from", errors, "variant")
+    elif any(field in data for field in variant_fields):
+        errors.append("variant metadata is present but baseline_kind is not 'variant'")
+
+    validate_reviewer_model_recommendation(
+        data.get("reviewer_model_recommendation"),
+        errors,
+        "reviewer_model_recommendation",
+    )
+
+    alternative_baselines = data.get("alternative_baselines")
+    alternative_count = 0
+    if alternative_baselines is not None:
+        if effective_kind == "variant":
+            errors.append("variant baselines must be standalone and must not declare alternative_baselines")
+        elif not isinstance(alternative_baselines, list):
+            errors.append("alternative_baselines must be a list when present")
+        else:
+            alternative_count = len(alternative_baselines)
+            for index, entry in enumerate(alternative_baselines):
+                validate_alternative_entry(entry, index, baseline_path, project_root, errors)
+
+    surface_ids = validate_baseline_surfaces(data, project_root, errors)
+    return {
+        "baseline_kind": effective_kind,
+        "declared_baseline_kind": declared_kind,
+        "surface_ids": surface_ids,
+        "surface_count": len(surface_ids),
+        "alternative_count": alternative_count,
+        "variant_id": data.get("variant_id") if effective_kind == "variant" else None,
+    }
+
+
+def validate_review_baseline_command(args: argparse.Namespace) -> int:
+    project_root = pathlib.Path(args.project_root).resolve() if args.project_root else None
+    if project_root is not None:
+        baseline_path = resolve_user_path(project_root, args.baseline).resolve()
+    else:
+        baseline_path = pathlib.Path(args.baseline).resolve()
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    summary: dict[str, Any] = {
+        "mode": "review-baseline-validation",
+        "baseline_path": str(baseline_path),
+        "expect_kind": args.expect_kind,
+    }
+    if project_root is not None:
+        summary["project_root"] = str(project_root)
+
+    if not baseline_path.exists():
+        errors.append(f"baseline path {str(baseline_path)!r} does not exist")
+        summary["baseline_valid"] = False
+        summary["errors"] = errors
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 2
+
+    try:
+        data = load_structured_mapping(baseline_path)
+    except SystemExit as exc:
+        errors.append(str(exc))
+        data = {}
+
+    validation_summary: dict[str, Any] = {}
+    if data:
+        validation_summary = validate_review_baseline_data(
+            data,
+            baseline_path,
+            project_root,
+            args.expect_kind,
+            errors,
+        )
+        summary.update(validation_summary)
+
+    primary_pointer_valid: bool | None = None
+    if args.primary_baseline:
+        if project_root is None:
+            primary_path = pathlib.Path(args.primary_baseline).resolve()
+        else:
+            primary_path = resolve_user_path(project_root, args.primary_baseline).resolve()
+        summary["primary_baseline_path"] = str(primary_path)
+        if not primary_path.exists():
+            errors.append(f"primary_baseline path {str(primary_path)!r} does not exist")
+            primary_pointer_valid = False
+        else:
+            try:
+                primary_data = load_structured_mapping(primary_path)
+                primary_errors: list[str] = []
+                validate_review_baseline_data(
+                    primary_data,
+                    primary_path,
+                    project_root,
+                    "primary",
+                    primary_errors,
+                )
+                errors.extend(f"primary_baseline: {error}" for error in primary_errors)
+                if validation_summary.get("baseline_kind") == "variant":
+                    primary_pointer_valid = validate_primary_pointer_for_variant(
+                        data,
+                        baseline_path,
+                        primary_data,
+                        primary_path,
+                        project_root or primary_path.parent,
+                        errors,
+                    )
+            except SystemExit as exc:
+                errors.append(f"primary_baseline is not parseable: {exc}")
+                primary_pointer_valid = False
+    if primary_pointer_valid is not None:
+        summary["primary_pointer_valid"] = primary_pointer_valid and not errors
+
+    summary["baseline_valid"] = not errors
+    if warnings:
+        summary["warnings"] = warnings
+    if errors:
+        summary["errors"] = errors
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 2
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0
+
+
 def resolve_full_review_baseline(args: argparse.Namespace) -> int:
     project_root = pathlib.Path(args.project_root).resolve()
     if args.explicit_path:
@@ -2165,6 +2932,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional user-provided explicit baseline path, absolute or project-relative.",
     )
     baseline.set_defaults(func=resolve_full_review_baseline)
+
+    validate_baseline = subparsers.add_parser(
+        "validate-review-baseline",
+        help="Validate a primary or variant review baseline before review execution.",
+    )
+    validate_baseline.add_argument(
+        "--project-root",
+        default=".",
+        help="Project root used to resolve project-relative anchors and baseline pointers.",
+    )
+    validate_baseline.add_argument(
+        "--baseline",
+        required=True,
+        help="Path to the baseline YAML/JSON file, absolute or project-relative.",
+    )
+    validate_baseline.add_argument(
+        "--expect-kind",
+        choices=sorted(BASELINE_EXPECT_KINDS),
+        default="any",
+        help="Require a primary or variant baseline shape when the caller knows the mode.",
+    )
+    validate_baseline.add_argument(
+        "--primary-baseline",
+        help="Primary baseline path to check variant pointer and derived_from consistency.",
+    )
+    validate_baseline.set_defaults(func=validate_review_baseline_command)
 
     omissions = subparsers.add_parser(
         "summarize-lane-omissions",

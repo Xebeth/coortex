@@ -31,8 +31,8 @@ Resolve bundled script paths relative to this installed skill directory under
 `.codex/skills/review-orchestrator/`, not relative to the repository root.
 
 When this workflow names a `scripts/return_review_state.py` subcommand for
-trace init, packet validation, canonical handoff pathing/writing, omission
-summaries, ledger updates, or reopen reporting, run that exact helper command
+trace init, packet validation, baseline validation, canonical handoff
+pathing/writing, omission summaries, ledger updates, or reopen reporting, run that exact helper command
 instead of recreating those outputs by hand. Treat helper-produced paths,
 validation results, and ledger summaries as authoritative. If a required
 helper-owned artifact or trace step cannot be produced, stop and surface a
@@ -57,6 +57,9 @@ protocol error instead of prose-completing the review.
    - resolve the active baseline, preferring `.coortex/...` working baselines
      and falling back to durable docs/doc paths only when no local working
      baseline exists
+   - validate the selected baseline with
+     `scripts/return_review_state.py validate-review-baseline` before mapping
+     files or spawning lanes
    - run full prep
    - spawn coverage lanes, then mandatory family-exploration lanes
 5. If this is a packet-driven exploration review:
@@ -164,8 +167,9 @@ active.
 
 ## Hard rules
 
-- In full discovery review, refuse if the baseline is missing, unparseable,
-  stale, or too underspecified for grounded execution.
+- In full discovery review, refuse if the selected baseline fails the shared
+  `validate-review-baseline` helper, is stale, or is too underspecified for
+  grounded execution.
 - In packet-driven exploration mode, refuse if the packet fails validation or
   no longer matches the current worktree/head state.
 - A run with actionable families is not complete until `review-handoff.json`

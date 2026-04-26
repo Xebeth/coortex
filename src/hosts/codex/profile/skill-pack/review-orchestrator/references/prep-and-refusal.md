@@ -29,7 +29,23 @@ Treat `.coortex/review-baseline.yaml` as the repo-local working baseline. Use
 the docs/doc paths as durable committed fallbacks when no working baseline is
 present.
 2. Load the selected baseline.
-3. When the user asks for a run-local narrowing inside that baseline, start with the bundled helper:
+3. Validate the selected baseline with the bundled helper before mapping files
+   or spawning lanes:
+
+```bash
+python scripts/return_review_state.py validate-review-baseline \
+  --project-root <repo-root> \
+  --baseline <baseline-path> \
+  --expect-kind <primary|variant|any> \
+  [--primary-baseline <primary-baseline-path>]
+```
+
+Use the same helper that `review-baseline` uses after writing or refreshing a
+baseline. For explicitly requested alternative baselines, use
+`--expect-kind variant` and pass the primary baseline path when it is available
+so pointer and `derived_from` consistency are checked. Refuse on helper failure;
+do not repair or reinterpret a failed baseline in coordinator prep.
+4. When the user asks for a run-local narrowing inside that baseline, start with the bundled helper:
 
 ```bash
 # Serialize the selected baseline to JSON before invoking the helper.
@@ -44,24 +60,24 @@ Treat the helper output as the deterministic starting point for whether the
 requested narrowing is a legal reduction of the selected baseline. The reviewer
 still owns the natural-language inference from user wording to the candidate
 surface/path/focus tuple.
-4. Choose the review window:
+5. Choose the review window:
    - local changes
    - commit
    - commit range
    - branch
    - merge-base
-5. Gather changed files.
-6. Map changed files into baseline surfaces:
+6. Gather changed files.
+7. Map changed files into baseline surfaces:
    - use `primary_anchors` first
    - use `supporting_anchors` second
-7. Record:
+8. Record:
    - unmatched files
    - ambiguous matches
    - touched surfaces
-8. Assess boundedness of each touched surface slice.
-9. Keep the baseline-configured lenses unchanged and carry any validated
+9. Assess boundedness of each touched surface slice.
+10. Keep the baseline-configured lenses unchanged and carry any validated
    run-local focus override as separate emphasis metadata for this run; the override may be a built-in lens id used as extra runtime focus or a runtime-only emphasis token.
-10. When completed coverage or return-review lanes emit `omission_entries`,
+11. When completed coverage or return-review lanes emit `omission_entries`,
     run the bundled omission helper before synthesis:
 
 ```bash

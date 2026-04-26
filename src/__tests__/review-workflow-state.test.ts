@@ -1053,6 +1053,227 @@ test("full-review baseline helper reports missing candidates when no baseline is
   });
 });
 
+test("review baseline validator accepts a standalone variant with a primary pointer", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-"));
+  await mkdir(join(tempDir, "docs", "review-baselines"), { recursive: true });
+  await mkdir(join(tempDir, "src", "recovery"), { recursive: true });
+  await mkdir(join(tempDir, "src", "__tests__"), { recursive: true });
+
+  await writeFile(join(tempDir, "src", "recovery", "state.ts"), "export {};\n", "utf8");
+  await writeFile(join(tempDir, "src", "__tests__", "recovery.test.ts"), "test.todo('x');\n", "utf8");
+  await writeFile(join(tempDir, "docs", "runtime-state-model.md"), "# Runtime\n", "utf8");
+
+  const primaryBaseline = join(tempDir, "docs", "review-baseline.yaml");
+  const variantBaseline = join(tempDir, "docs", "review-baselines", "runtime-targeted.yaml");
+
+  await writeFile(
+    primaryBaseline,
+    `baseline_version: 1
+updated_at: "2026-04-26"
+baseline_kind: "primary"
+alternative_baselines:
+  - id: "runtime-targeted"
+    name: "Runtime Targeted"
+    purpose: "Finer runtime/recovery review with fewer lenses"
+    path: "docs/review-baselines/runtime-targeted.yaml"
+    when_to_use:
+      - "reviews limited to runtime/recovery seams"
+surfaces:
+  - id: "runtime-recovery"
+    name: "Runtime Recovery"
+    purpose: "Recovery correctness"
+    primary_anchors:
+      - "src/recovery/**"
+    supporting_anchors:
+      - "src/__tests__/recovery.test.ts"
+    contract_docs:
+      - "docs/runtime-state-model.md"
+    configured_builtin_lenses:
+      - lens_id: "goal-fidelity"
+        priority: "high"
+    configured_custom_lenses: []
+`,
+    "utf8"
+  );
+
+  await writeFile(
+    variantBaseline,
+    `baseline_version: 1
+updated_at: "2026-04-26"
+baseline_kind: "variant"
+variant_strategy: "derived"
+variant_id: "runtime-targeted"
+variant_name: "Runtime Targeted"
+variant_purpose: "Finer runtime/recovery review with fewer lenses"
+variant_when_to_use:
+  - "reviews limited to runtime/recovery seams"
+derived_from: "docs/review-baseline.yaml"
+surfaces:
+  - id: "runtime-projection"
+    name: "Runtime Projection"
+    purpose: "Projection truth"
+    primary_anchors:
+      - "src/recovery/**"
+    supporting_anchors:
+      - "src/__tests__/recovery.test.ts"
+    contract_docs:
+      - "docs/runtime-state-model.md"
+    review_focus_areas:
+      - "provenance must track launch vs resume vs recovery correctly"
+    configured_builtin_lenses:
+      - lens_id: "goal-fidelity"
+        priority: "high"
+    configured_custom_lenses: []
+`,
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-review-baseline",
+    "--project-root",
+    tempDir,
+    "--baseline",
+    "docs/review-baselines/runtime-targeted.yaml",
+    "--expect-kind",
+    "variant",
+    "--primary-baseline",
+    "docs/review-baseline.yaml"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  const json = result.json as {
+    baseline_valid: boolean;
+    baseline_kind: string;
+    primary_pointer_valid: boolean;
+    surface_ids: string[];
+  };
+  assert.equal(json.baseline_valid, true);
+  assert.equal(json.baseline_kind, "variant");
+  assert.equal(json.primary_pointer_valid, true);
+  assert.deepEqual(json.surface_ids, ["runtime-projection"]);
+});
+
+test("review baseline validator rejects non-standalone or unregistered variants", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-baseline-"));
+  await mkdir(join(tempDir, "docs", "review-baselines"), { recursive: true });
+  await mkdir(join(tempDir, "src", "recovery"), { recursive: true });
+
+  await writeFile(join(tempDir, "src", "recovery", "state.ts"), "export {};\n", "utf8");
+  await writeFile(join(tempDir, "docs", "runtime-state-model.md"), "# Runtime\n", "utf8");
+
+  await writeFile(
+    join(tempDir, "docs", "review-baseline.yaml"),
+    `baseline_version: 1
+updated_at: "2026-04-26"
+baseline_kind: "primary"
+surfaces:
+  - id: "runtime-recovery"
+    name: "Runtime Recovery"
+    purpose: "Recovery correctness"
+    primary_anchors:
+      - "src/recovery/**"
+    supporting_anchors: []
+    contract_docs:
+      - "docs/runtime-state-model.md"
+    configured_builtin_lenses:
+      - lens_id: "goal-fidelity"
+        priority: "high"
+    configured_custom_lenses: []
+`,
+    "utf8"
+  );
+
+  await writeFile(
+    join(tempDir, "docs", "review-baselines", "runtime-targeted.yaml"),
+    `baseline_version: 1
+updated_at: "2026-04-26"
+baseline_kind: "variant"
+variant_strategy: "derived"
+variant_id: "runtime-targeted"
+variant_name: "Runtime Targeted"
+variant_purpose: "Finer runtime/recovery review with fewer lenses"
+surfaces:
+  - id: "runtime-projection"
+    name: "Runtime Projection"
+    purpose: "Projection truth"
+    primary_anchors:
+      - "src/recovery/**"
+    supporting_anchors: []
+    contract_docs:
+      - "docs/runtime-state-model.md"
+    configured_builtin_lenses:
+      - lens_id: "goal-fidelity"
+        priority: "high"
+    configured_custom_lenses: []
+`,
+    "utf8"
+  );
+
+  const result = await runPythonJson(returnReviewStateScript, [
+    "validate-review-baseline",
+    "--project-root",
+    tempDir,
+    "--baseline",
+    "docs/review-baselines/runtime-targeted.yaml",
+    "--expect-kind",
+    "variant",
+    "--primary-baseline",
+    "docs/review-baseline.yaml"
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  const json = result.json as { baseline_valid: boolean; errors: string[] };
+  assert.equal(json.baseline_valid, false);
+  assert.match(json.errors.join("\n"), /variant_when_to_use/);
+  assert.match(json.errors.join("\n"), /derived_from/);
+  assert.match(json.errors.join("\n"), /primary_baseline has no alternative_baselines entry/);
+
+  await writeFile(
+    join(tempDir, "docs", "review-baseline.yaml"),
+    `baseline_version: 1
+updated_at: "2026-04-26"
+baseline_kind: "primary"
+alternative_baselines:
+  - id: "runtime-targeted"
+    name: "Runtime Targeted"
+    purpose: "Finer runtime/recovery review with fewer lenses"
+    path: "docs/review-baselines/runtime-targeted.yaml"
+    when_to_use:
+      - "reviews limited to runtime/recovery seams"
+surfaces:
+  - id: "runtime-recovery"
+    name: "Runtime Recovery"
+    purpose: "Recovery correctness"
+    primary_anchors:
+      - "src/recovery/**"
+    supporting_anchors: []
+    contract_docs:
+      - "docs/runtime-state-model.md"
+    configured_builtin_lenses:
+      - lens_id: "goal-fidelity"
+        priority: "high"
+    configured_custom_lenses: []
+`,
+    "utf8"
+  );
+
+  const primaryResult = await runPythonJson(returnReviewStateScript, [
+    "validate-review-baseline",
+    "--project-root",
+    tempDir,
+    "--baseline",
+    "docs/review-baseline.yaml",
+    "--expect-kind",
+    "primary"
+  ]);
+
+  assert.equal(primaryResult.exitCode, 2);
+  const primaryJson = primaryResult.json as { baseline_valid: boolean; errors: string[] };
+  assert.equal(primaryJson.baseline_valid, false);
+  assert.match(primaryJson.errors.join("\n"), /alternative_baselines\[0\]\.path .*variant_when_to_use/);
+  assert.match(primaryJson.errors.join("\n"), /alternative_baselines\[0\]\.path .*derived_from/);
+});
+
 test("full-review narrowing helper resolves one inferred surface/path subset and normalizes run-local focus", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-narrowing-"));
   const baselinePath = join(tempDir, "baseline.json");

@@ -4,6 +4,19 @@ Reject the baseline if any of these conditions are true.
 
 Run these checks on the drafted baseline before it is written. If any check fails, repair the draft and rerun the gate.
 
+Run the shared deterministic helper as part of the gate:
+
+```bash
+python ../review-orchestrator/scripts/return_review_state.py validate-review-baseline \
+  --project-root <repo-root> \
+  --baseline <baseline-path> \
+  --expect-kind <primary|variant|any> \
+  [--primary-baseline <primary-baseline-path>]
+```
+
+This is the same baseline validation used by `review-orchestrator`; helper
+failure is a gate failure.
+
 ## Surface failures
 
 - No surfaces are defined.

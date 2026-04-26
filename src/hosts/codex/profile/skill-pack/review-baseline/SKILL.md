@@ -45,6 +45,8 @@ runs so the user can see which phase is in flight.
    - `references/lens-catalog.md`
    - `references/baseline-schema.md`
    - `references/quality-gate.md`
+   - sibling helper
+     `../review-orchestrator/scripts/return_review_state.py`
 6. Propose the baseline shape to the user when this run includes primary-baseline work.
 7. If this run includes primary-baseline work, ask exactly:
    `Would you like to refine these broad surfaces through an interview process?`
@@ -57,9 +59,15 @@ runs so the user can see which phase is in flight.
    - derive from the existing primary baseline
    - or start fresh from a new targeted discovery pass
 11. Draft any alternative baseline files needed for those targeted review modes using the chosen approach.
-12. Run the quality gate and a self-review pass against the actual repo mapping and surface/lens semantics before writing anything.
-13. If the self-review finds unmapped files, multiply-mapped files, over-broad anchors, surface-boundary ambiguity, weak custom-lens distinctions, or variant files that only work as delta-overrides, fix the draft and rerun the gate.
-14. Write or refresh the persistent baseline documents only after the repaired drafts pass.
+12. Run the quality gate, deterministic baseline helper validation, and a
+    self-review pass against the actual repo mapping and surface/lens semantics
+    before reporting success.
+13. If the helper, gate, or self-review finds unmapped files, multiply-mapped
+    files, over-broad anchors, surface-boundary ambiguity, weak custom-lens
+    distinctions, or variant files that only work as delta-overrides, fix the
+    draft and rerun all failed checks.
+14. Write or refresh the persistent baseline documents only after the repaired
+    drafts pass, then rerun helper validation on the final path.
 
 ## Baseline Rules
 
@@ -75,6 +83,9 @@ runs so the user can see which phase is in flight.
 - Keep the primary baseline broad and reusable by default.
 - Only create alternative baseline files when the project has a stable repeated need for narrower review passes, such as finer surface breakdown or fewer lenses for a targeted check.
 - Alternative baseline files must be standalone consumable baselines, not patch files or partial overrides that require another skill to merge them with the primary baseline.
+- `review-baseline` and `review-orchestrator` must use the same deterministic
+  baseline validation helper. Do not rely on prose self-review alone for schema,
+  variant, pointer, anchor, or lens validity.
 - When writing alternative baseline files, default them under `docs/review-baselines/` or `doc/review-baselines/` when those directories exist.
 - When writing non-committed working alternative baselines, default them under `.coortex/review-baselines/`.
 
@@ -129,6 +140,21 @@ runs so the user can see which phase is in flight.
 ## Quality Gate
 
 - Apply the checks in `references/quality-gate.md`.
+- Run the shared helper before accepting a baseline:
+
+```bash
+# Resolve this path relative to .codex/skills/review-baseline/ first.
+python ../review-orchestrator/scripts/return_review_state.py validate-review-baseline \
+  --project-root <repo-root> \
+  --baseline <baseline-path> \
+  --expect-kind <primary|variant|any> \
+  [--primary-baseline <primary-baseline-path>]
+```
+
+- For a primary baseline, use `--expect-kind primary`.
+- For an alternative baseline, use `--expect-kind variant` and pass
+  `--primary-baseline` when a primary baseline exists or is being updated.
+- Treat helper output as authoritative for machine-checkable baseline validity.
 - Reject the baseline if it is too vague, too overlapping, missing lens configuration, missing contract structure, or does not survive a self-review pass against the actual repo mapping and lens/surface semantics.
 - If the gate or self-review finds issues, fix the draft and rerun both before writing.
 

@@ -202,6 +202,32 @@ test("review baseline supports optional surface focus areas without extra matrix
   assert.match(schema, /review_focus_areas.*list of short strings|list of short strings.*review_focus_areas/i);
 });
 
+test("review baseline and orchestrator share deterministic baseline validation", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/review-baseline/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-baseline/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-orchestrator/references/prep-and-refusal.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /validate-review-baseline/i, path);
+    assert.match(content, /shared|same|helper validation|deterministic/i, path);
+  }
+
+  const script = await readFile(
+    resolve(
+      process.cwd(),
+      "src/hosts/codex/profile/skill-pack/review-orchestrator/scripts/return_review_state.py"
+    ),
+    "utf8"
+  );
+  assert.match(script, /validate-review-baseline/i);
+  assert.match(script, /baseline_kind|variant_strategy|alternative_baselines/i);
+});
+
 test("review skills consume baseline focus areas as recurring failure checks", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/coortex-review/SKILL.md",
