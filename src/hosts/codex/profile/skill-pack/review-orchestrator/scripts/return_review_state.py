@@ -148,6 +148,83 @@ KNOWN_FOLLOWUP_DECISIONS = {
     "declined-follow-up",
 }
 
+KNOWN_COVERAGE_CONFIDENCE = {"high", "medium", "low"}
+KNOWN_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
+KNOWN_COVERAGE_FAMILY_STATUSES = {
+    "isolated",
+    "local-family",
+    "likely-cross-surface-family",
+}
+KNOWN_EXPLORATION_CLOSURE_STATUSES = {
+    "isolated",
+    "local-family",
+    "cross-surface-family",
+    "family-closed",
+    "family-still-open",
+}
+KNOWN_CLOSURE_CLAIM_VERDICTS = {
+    "confirmed",
+    "rejected",
+    "partially-confirmed",
+}
+KNOWN_CLAIMED_CLOSURE_STATUSES = {
+    "symptom-fixed-only",
+    "family-partially-closed",
+    "verification-blocked",
+    "family-closed",
+}
+KNOWN_CLOSURE_GATE_ITEM_VERDICTS = {
+    "satisfied",
+    "unsatisfied",
+    "inconclusive",
+}
+KNOWN_VERIFICATION_BLOCKER_VERDICTS = {
+    "separate-blocker-confirmed",
+    "same-family-blocker",
+    "inconclusive",
+}
+KNOWN_CLOSED_FAMILY_STATUSES = {
+    "family-closed",
+    "closure-confirmed",
+    "closed",
+}
+KNOWN_HANDOFF_CLOSURE_STATUSES = KNOWN_CLOSED_FAMILY_STATUSES | {
+    "family-still-open",
+    "symptom-fixed-only",
+    "family-partially-closed",
+    "verification-blocked",
+    "verification-blocked-separate-blocker",
+    "unverified",
+}
+KNOWN_HANDOFF_OPEN_REASON_KINDS = {
+    "family-local-gap-remaining",
+    "unfinished-family-work",
+    "broader-cross-family-contract",
+    "verification-separate-blocker",
+}
+KNOWN_HANDOFF_LINEAGE_STATUSES = {
+    "new",
+    "continued",
+    "reopened",
+    "merged",
+    "split",
+}
+KNOWN_CARRY_FORWARD_REASON_KINDS = {
+    "sequenced-after-overlapping-family",
+    "separate-family-later-slice",
+    "blocked-by-broader-contract-change",
+    "blocked-by-prerequisite-contract-change",
+    "blocked-by-external-environment",
+    "stale-or-ambiguous-input",
+    "user-scope-excluded",
+    "insufficient-grounded-evidence",
+}
+KNOWN_CARRY_FORWARD_TOUCH_STATES = {
+    "not-started",
+    "adjacent-file-overlap-no-owning-fix",
+    "broader-cross-family-overlap",
+}
+
 SEVERITY_RANK = {
     "CRITICAL": 4,
     "HIGH": 3,
@@ -549,6 +626,414 @@ def validate_final_review_record(record: dict[str, Any], prefix: str) -> list[st
             elif any(not isinstance(item, str) or not item.strip() for item in actionable_family_ids):
                 errors.append(f"{prefix} actionable_family_ids entries must be non-empty strings")
     return errors
+
+
+def is_non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def require_mapping(value: Any, field: str, errors: list[str], prefix: str) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        errors.append(f"{prefix} {field} must be a mapping")
+        return None
+    return value
+
+
+def require_non_empty_string(value: Any, field: str, errors: list[str], prefix: str) -> str | None:
+    if not is_non_empty_string(value):
+        errors.append(f"{prefix} {field} must be a non-empty string")
+        return None
+    return str(value)
+
+
+def require_bool_value(value: Any, field: str, errors: list[str], prefix: str) -> bool | None:
+    if not isinstance(value, bool):
+        errors.append(f"{prefix} {field} must be a boolean")
+        return None
+    return value
+
+
+def require_list_value(value: Any, field: str, errors: list[str], prefix: str) -> list[Any] | None:
+    if not isinstance(value, list):
+        errors.append(f"{prefix} {field} must be a list")
+        return None
+    return value
+
+
+def require_non_empty_list(value: Any, field: str, errors: list[str], prefix: str) -> list[Any] | None:
+    items = require_list_value(value, field, errors, prefix)
+    if isinstance(items, list) and not items:
+        errors.append(f"{prefix} {field} must not be empty")
+    return items
+
+
+def require_string_list(
+    value: Any,
+    field: str,
+    errors: list[str],
+    prefix: str,
+    *,
+    allow_none_string: bool = False,
+    non_empty: bool = False,
+) -> list[str] | None:
+    if allow_none_string and isinstance(value, str) and value.strip().lower() in {"none", "none found"}:
+        return []
+    items = require_non_empty_list(value, field, errors, prefix) if non_empty else require_list_value(value, field, errors, prefix)
+    if not isinstance(items, list):
+        return None
+    normalized: list[str] = []
+    for index, item in enumerate(items):
+        if not is_non_empty_string(item):
+            errors.append(f"{prefix} {field}[{index}] must be a non-empty string")
+            continue
+        normalized.append(str(item))
+    return normalized
+
+
+def require_value_in(value: Any, field: str, allowed: set[str], errors: list[str], prefix: str) -> str | None:
+    if not is_non_empty_string(value):
+        errors.append(f"{prefix} {field} must be one of {sorted(allowed)}")
+        return None
+    normalized = str(value)
+    if normalized not in allowed:
+        errors.append(f"{prefix} {field} must be one of {sorted(allowed)}")
+        return None
+    return normalized
+
+
+def require_mapping_list(value: Any, field: str, errors: list[str], prefix: str) -> list[dict[str, Any]] | None:
+    items = require_list_value(value, field, errors, prefix)
+    if not isinstance(items, list):
+        return None
+    mappings: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            errors.append(f"{prefix} {field}[{index}] must be a mapping")
+            continue
+        mappings.append(item)
+    return mappings
+
+
+def normalize_lane_type(value: Any) -> str | None:
+    if not is_non_empty_string(value):
+        return None
+    raw = str(value).strip()
+    aliases = {
+        "coverage": "coverage",
+        "coverage-lane": "coverage",
+        "family-exploration": "family-exploration",
+        "family-exploration-lane": "family-exploration",
+        "exploration": "family-exploration",
+        "return-review": "return-review",
+        "return-review-lane": "return-review",
+        "deferred-thread-exploration": "deferred-thread-exploration",
+        "deferred-thread-exploration-lane": "deferred-thread-exploration",
+    }
+    return aliases.get(raw)
+
+
+def validate_common_lane_result_fields(result: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    for field in ("lane_id", "lane_type", "target", "scope_summary", "rationale_summary", "stop_reason"):
+        require_non_empty_string(result.get(field), field, errors, prefix)
+    require_string_list(result.get("material_evidence_actions"), "material_evidence_actions", errors, prefix, non_empty=True)
+    for field in ("skipped_areas", "skip_reasons", "thin_areas"):
+        require_string_list(result.get(field), field, errors, prefix, allow_none_string=True)
+    require_value_in(result.get("coverage_confidence"), "coverage_confidence", KNOWN_COVERAGE_CONFIDENCE, errors, prefix)
+    errors.extend(validate_omission_entries(result.get("omission_entries"), prefix))
+    return errors
+
+
+def validate_candidate_family_entry(entry: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    require_non_empty_string(entry.get("family_id"), "family_id", errors, prefix)
+    require_non_empty_string(entry.get("candidate_root_cause"), "candidate_root_cause", errors, prefix)
+    require_string_list(entry.get("manifestations"), "manifestations", errors, prefix, non_empty=True)
+    require_value_in(entry.get("family_status"), "family_status", KNOWN_COVERAGE_FAMILY_STATUSES, errors, prefix)
+    if "likely_owning_seam" in entry:
+        require_non_empty_string(entry.get("likely_owning_seam"), "likely_owning_seam", errors, prefix)
+    if "secondary_seams" in entry:
+        require_string_list(entry.get("secondary_seams"), "secondary_seams", errors, prefix, allow_none_string=True)
+    return errors
+
+
+def validate_coverage_lane_result(result: dict[str, Any], prefix: str) -> list[str]:
+    errors = validate_common_lane_result_fields(result, prefix)
+    families = require_mapping_list(result.get("candidate_families"), "candidate_families", errors, prefix)
+    if families:
+        for index, family in enumerate(families):
+            errors.extend(validate_candidate_family_entry(family, f"{prefix} candidate_families[{index}]"))
+    return errors
+
+
+def validate_exploration_lane_result(result: dict[str, Any], prefix: str) -> list[str]:
+    errors = validate_common_lane_result_fields(result, prefix)
+    require_non_empty_string(result.get("family_id"), "family_id", errors, prefix)
+    require_string_list(result.get("source_surfaces"), "source_surfaces", errors, prefix, non_empty=True)
+    require_non_empty_string(result.get("highest_confidence_root_cause"), "highest_confidence_root_cause", errors, prefix)
+    require_non_empty_string(result.get("likely_owning_seam"), "likely_owning_seam", errors, prefix)
+    require_string_list(result.get("secondary_seams"), "secondary_seams", errors, prefix, allow_none_string=True)
+    require_string_list(result.get("manifestations_confirmed"), "manifestations_confirmed", errors, prefix, allow_none_string=True)
+    require_string_list(result.get("manifestations_rejected"), "manifestations_rejected", errors, prefix, allow_none_string=True)
+    require_string_list(result.get("side_paths_checked"), "side_paths_checked", errors, prefix, non_empty=True)
+    require_string_list(result.get("sibling_bugs_found"), "sibling_bugs_found", errors, prefix, allow_none_string=True)
+    require_string_list(result.get("sibling_search_scope"), "sibling_search_scope", errors, prefix, non_empty=True)
+    require_value_in(result.get("severity_rollup"), "severity_rollup", KNOWN_SEVERITIES, errors, prefix)
+    require_value_in(result.get("closure_status"), "closure_status", KNOWN_EXPLORATION_CLOSURE_STATUSES, errors, prefix)
+    return errors
+
+
+def validate_closure_gate_checked_entry(entry: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    require_non_empty_string(entry.get("gate_item"), "gate_item", errors, prefix)
+    require_value_in(entry.get("item_verdict"), "item_verdict", KNOWN_CLOSURE_GATE_ITEM_VERDICTS, errors, prefix)
+    require_string_list(entry.get("evidence"), "evidence", errors, prefix, non_empty=True)
+    return errors
+
+
+def validate_verification_blocker_verdict(value: Any, prefix: str) -> list[str]:
+    errors: list[str] = []
+    block = require_mapping(value, "verification_blocker_verdict", errors, prefix)
+    if block is None:
+        return errors
+    require_value_in(block.get("blocker_verdict"), "blocker_verdict", KNOWN_VERIFICATION_BLOCKER_VERDICTS, errors, f"{prefix} verification_blocker_verdict")
+    require_string_list(block.get("evidence"), "evidence", errors, f"{prefix} verification_blocker_verdict", non_empty=True)
+    return errors
+
+
+def validate_return_review_lane_result(result: dict[str, Any], prefix: str) -> list[str]:
+    errors = validate_common_lane_result_fields(result, prefix)
+    require_value_in(result.get("claimed_closure_status"), "claimed_closure_status", KNOWN_CLAIMED_CLOSURE_STATUSES, errors, prefix)
+    require_value_in(result.get("closure_claim_verdict"), "closure_claim_verdict", KNOWN_CLOSURE_CLAIM_VERDICTS, errors, prefix)
+    checked = require_mapping_list(result.get("closure_gate_checked"), "closure_gate_checked", errors, prefix)
+    if isinstance(checked, list) and not checked:
+        errors.append(f"{prefix} closure_gate_checked must not be empty")
+    if checked:
+        for index, entry in enumerate(checked):
+            errors.extend(validate_closure_gate_checked_entry(entry, f"{prefix} closure_gate_checked[{index}]"))
+    require_string_list(result.get("evidence"), "evidence", errors, prefix, non_empty=True)
+    require_string_list(result.get("new_findings"), "new_findings", errors, prefix, allow_none_string=True)
+    if str(result.get("claimed_closure_status") or "") == "verification-blocked":
+        errors.extend(validate_verification_blocker_verdict(result.get("verification_blocker_verdict"), prefix))
+    elif "verification_blocker_verdict" in result:
+        errors.extend(validate_verification_blocker_verdict(result.get("verification_blocker_verdict"), prefix))
+    return errors
+
+
+def validate_lane_result_data(result: dict[str, Any], lane_type_hint: str | None = None) -> tuple[list[str], dict[str, Any]]:
+    errors: list[str] = []
+    hinted_lane_type = normalize_lane_type(lane_type_hint) if lane_type_hint else None
+    raw_embedded_lane_type = result.get("lane_type")
+    embedded_lane_type = normalize_lane_type(raw_embedded_lane_type)
+    has_embedded_lane_type = is_non_empty_string(raw_embedded_lane_type)
+    if hinted_lane_type and has_embedded_lane_type and hinted_lane_type != embedded_lane_type:
+        errors.append(
+            f"lane_result lane_type {result.get('lane_type')!r} conflicts with --lane-type {lane_type_hint!r}"
+        )
+        return errors, {
+            "lane_id": str(result.get("lane_id") or ""),
+            "lane_type": embedded_lane_type or str(raw_embedded_lane_type),
+            "requested_lane_type": hinted_lane_type,
+            "target": str(result.get("target") or ""),
+        }
+    lane_type = hinted_lane_type or embedded_lane_type
+    if lane_type is None:
+        errors.append("lane_result lane_type must be one of coverage, family-exploration, return-review, or deferred-thread-exploration")
+        return errors, {"lane_type": str(lane_type_hint or result.get("lane_type") or "")}
+    if hinted_lane_type and not embedded_lane_type:
+        result = {**result, "lane_type": lane_type_hint}
+    prefix = f"lane_result[{lane_type}]"
+    if lane_type == "coverage":
+        errors.extend(validate_coverage_lane_result(result, prefix))
+    elif lane_type == "family-exploration":
+        errors.extend(validate_exploration_lane_result(result, prefix))
+    elif lane_type == "return-review":
+        errors.extend(validate_return_review_lane_result(result, prefix))
+    else:
+        errors.extend(validate_common_lane_result_fields(result, prefix))
+        require_non_empty_string(result.get("thread_summary"), "thread_summary", errors, prefix)
+        require_non_empty_string(result.get("probable_seam"), "probable_seam", errors, prefix)
+        require_non_empty_string(result.get("thread_verdict"), "thread_verdict", errors, prefix)
+        require_string_list(result.get("evidence"), "evidence", errors, prefix, non_empty=True)
+    return errors, {
+        "lane_id": str(result.get("lane_id") or ""),
+        "lane_type": lane_type,
+        "target": str(result.get("target") or ""),
+    }
+
+
+def validate_review_hints(value: Any, prefix: str) -> list[str]:
+    errors: list[str] = []
+    hints = require_mapping(value, "review_hints", errors, prefix)
+    if hints is None:
+        return errors
+    require_non_empty_string(hints.get("likely_owning_seam"), "likely_owning_seam", errors, f"{prefix} review_hints")
+    if "secondary_seams" in hints:
+        require_string_list(hints.get("secondary_seams"), "secondary_seams", errors, f"{prefix} review_hints", allow_none_string=True)
+    require_string_list(hints.get("candidate_write_set"), "candidate_write_set", errors, f"{prefix} review_hints", non_empty=True)
+    for field in ("candidate_test_set", "candidate_doc_set"):
+        require_string_list(hints.get(field), field, errors, f"{prefix} review_hints", allow_none_string=True)
+    require_bool_value(hints.get("parallelizable"), "parallelizable", errors, f"{prefix} review_hints")
+    return errors
+
+
+def validate_closure_gate(value: Any, prefix: str) -> list[str]:
+    errors: list[str] = []
+    gate = require_mapping(value, "closure_gate", errors, prefix)
+    if gate is None:
+        return errors
+    require_non_empty_string(gate.get("remediation_item"), "remediation_item", errors, f"{prefix} closure_gate")
+    require_string_list(gate.get("closure_checklist"), "closure_checklist", errors, f"{prefix} closure_gate", non_empty=True)
+    for field in ("required_sibling_tests", "doc_closure"):
+        require_string_list(gate.get(field), field, errors, f"{prefix} closure_gate", allow_none_string=True)
+    require_string_list(gate.get("reviewer_stop_conditions"), "reviewer_stop_conditions", errors, f"{prefix} closure_gate", non_empty=True)
+    return errors
+
+
+def validate_next_step(value: Any, prefix: str) -> list[str]:
+    errors: list[str] = []
+    step = require_mapping(value, "next_step", errors, prefix)
+    if step is None:
+        return errors
+    for field in ("kind", "action", "required_environment"):
+        require_non_empty_string(step.get(field), field, errors, f"{prefix} next_step")
+    require_string_list(step.get("expected_evidence"), "expected_evidence", errors, f"{prefix} next_step", non_empty=True)
+    require_string_list(step.get("reevaluate_when"), "reevaluate_when", errors, f"{prefix} next_step", non_empty=True)
+    return errors
+
+
+def validate_discovery_lineage(value: Any, prefix: str) -> list[str]:
+    errors: list[str] = []
+    lineage = require_mapping(value, "discovery_lineage", errors, prefix)
+    if lineage is None:
+        return errors
+    require_non_empty_string(lineage.get("campaign_id"), "campaign_id", errors, f"{prefix} discovery_lineage")
+    for field in ("resolved_from_candidate_family_ids", "source_group_ids", "review_grounded_signal_ids", "deslop_advisory_signal_ids"):
+        require_string_list(lineage.get(field), field, errors, f"{prefix} discovery_lineage", allow_none_string=True)
+    require_value_in(lineage.get("ledger_status"), "ledger_status", KNOWN_HANDOFF_LINEAGE_STATUSES, errors, f"{prefix} discovery_lineage")
+    return errors
+
+
+def validate_carry_forward_context(value: Any, prefix: str) -> list[str]:
+    errors: list[str] = []
+    context = require_mapping(value, "carry_forward_context", errors, prefix)
+    if context is None:
+        return errors
+    require_value_in(context.get("reason_kind"), "reason_kind", KNOWN_CARRY_FORWARD_REASON_KINDS, errors, f"{prefix} carry_forward_context")
+    require_value_in(context.get("touch_state"), "touch_state", KNOWN_CARRY_FORWARD_TOUCH_STATES, errors, f"{prefix} carry_forward_context")
+    for field in ("reason", "actionable_when"):
+        require_non_empty_string(context.get(field), field, errors, f"{prefix} carry_forward_context")
+    if "blocking_family_ids" in context:
+        require_string_list(context.get("blocking_family_ids"), "blocking_family_ids", errors, f"{prefix} carry_forward_context", allow_none_string=True)
+    return errors
+
+
+def validate_handoff_family_entry(entry: dict[str, Any], prefix: str) -> list[str]:
+    errors: list[str] = []
+    require_non_empty_string(entry.get("family_id"), "family_id", errors, prefix)
+    require_value_in(entry.get("severity"), "severity", KNOWN_SEVERITIES, errors, prefix)
+    require_non_empty_string(entry.get("title"), "title", errors, prefix)
+    require_non_empty_string(entry.get("highest_confidence_root_cause"), "highest_confidence_root_cause", errors, prefix)
+    require_string_list(entry.get("source_surfaces"), "source_surfaces", errors, prefix, non_empty=True)
+    require_string_list(entry.get("manifestations"), "manifestations", errors, prefix, non_empty=True)
+    require_string_list(entry.get("immediate_implications"), "immediate_implications", errors, prefix, non_empty=True)
+    require_string_list(entry.get("broader_implications"), "broader_implications", errors, prefix, non_empty=True)
+    require_string_list(entry.get("sibling_bugs"), "sibling_bugs", errors, prefix, allow_none_string=True)
+    require_string_list(entry.get("sibling_search_scope"), "sibling_search_scope", errors, prefix, non_empty=True)
+    closure_status = require_value_in(entry.get("closure_status"), "closure_status", KNOWN_HANDOFF_CLOSURE_STATUSES, errors, prefix)
+    if closure_status and closure_status not in KNOWN_CLOSED_FAMILY_STATUSES:
+        require_value_in(entry.get("open_reason_kind"), "open_reason_kind", KNOWN_HANDOFF_OPEN_REASON_KINDS, errors, prefix)
+    elif "open_reason_kind" in entry:
+        require_value_in(entry.get("open_reason_kind"), "open_reason_kind", KNOWN_HANDOFF_OPEN_REASON_KINDS, errors, prefix)
+    require_string_list(entry.get("thin_areas"), "thin_areas", errors, prefix, allow_none_string=True)
+    errors.extend(validate_review_hints(entry.get("review_hints"), prefix))
+    errors.extend(validate_closure_gate(entry.get("closure_gate"), prefix))
+    if "next_step" in entry:
+        errors.extend(validate_next_step(entry.get("next_step"), prefix))
+    if "discovery_lineage" in entry:
+        errors.extend(validate_discovery_lineage(entry.get("discovery_lineage"), prefix))
+    if "carry_forward_context" in entry:
+        errors.extend(validate_carry_forward_context(entry.get("carry_forward_context"), prefix))
+    return errors
+
+
+def validate_seam_summary(value: Any, family_ids: set[str], prefix: str) -> list[str]:
+    errors: list[str] = []
+    summary = require_mapping(value, "seam_summary", errors, prefix)
+    if summary is None:
+        return errors
+    for field in ("hot_seams", "all_seams", "families_without_owning_seam"):
+        require_list_value(summary.get(field), field, errors, f"{prefix} seam_summary")
+    for list_field in ("hot_seams", "all_seams"):
+        entries = summary.get(list_field)
+        if not isinstance(entries, list):
+            continue
+        for index, item in enumerate(entries):
+            entry_prefix = f"{prefix} seam_summary {list_field}[{index}]"
+            seam = require_mapping(item, list_field, errors, entry_prefix)
+            if seam is None:
+                continue
+            require_non_empty_string(seam.get("seam"), "seam", errors, entry_prefix)
+            seam_family_ids = require_string_list(seam.get("family_ids"), "family_ids", errors, entry_prefix, allow_none_string=True)
+            if seam_family_ids is not None:
+                unknown = sorted(set(seam_family_ids) - family_ids)
+                if unknown:
+                    errors.append(f"{entry_prefix} family_ids reference unknown families {unknown}")
+            if "family_count" in seam:
+                family_count = seam.get("family_count")
+                if not isinstance(family_count, int) or isinstance(family_count, bool):
+                    errors.append(f"{entry_prefix} family_count must be an integer")
+                elif seam_family_ids is not None and family_count != len(seam_family_ids):
+                    errors.append(f"{entry_prefix} family_count must match family_ids length")
+            if "highest_severity" in seam:
+                require_value_in(seam.get("highest_severity"), "highest_severity", KNOWN_SEVERITIES, errors, entry_prefix)
+            if "hot" in seam:
+                require_bool_value(seam.get("hot"), "hot", errors, entry_prefix)
+            if "hot_reason" in seam:
+                require_non_empty_string(seam.get("hot_reason"), "hot_reason", errors, entry_prefix)
+    without = summary.get("families_without_owning_seam")
+    if isinstance(without, list):
+        for index, family_id in enumerate(without):
+            if not is_non_empty_string(family_id):
+                errors.append(f"{prefix} seam_summary families_without_owning_seam[{index}] must be a non-empty string")
+            elif str(family_id) not in family_ids:
+                errors.append(f"{prefix} seam_summary families_without_owning_seam[{index}] references unknown family {family_id!r}")
+    return errors
+
+
+def validate_review_handoff_data(payload: dict[str, Any], *, allow_empty: bool = False) -> tuple[list[str], dict[str, Any]]:
+    errors: list[str] = []
+    prefix = "review_handoff"
+    if "review_handoff" in payload:
+        root_value = payload.get("review_handoff")
+        if not isinstance(root_value, dict):
+            return [f"{prefix} must be a mapping"], {"family_ids": [], "family_count": 0}
+        root = root_value
+    else:
+        root = payload
+    if not isinstance(root, dict):
+        return [f"{prefix} must be a mapping"], {"family_ids": [], "family_count": 0}
+    if "review_target" not in root:
+        errors.append(f"{prefix} missing review_target")
+    elif not isinstance(root.get("review_target"), (dict, str)):
+        errors.append(f"{prefix} review_target must be a mapping or string")
+    families = require_mapping_list(root.get("families"), "families", errors, prefix)
+    family_ids: list[str] = []
+    if isinstance(families, list):
+        if not families and not allow_empty:
+            errors.append(f"{prefix} families must not be empty")
+        seen: set[str] = set()
+        for index, family in enumerate(families):
+            family_id = family.get("family_id") if isinstance(family, dict) else None
+            if is_non_empty_string(family_id):
+                if str(family_id) in seen:
+                    errors.append(f"{prefix} families[{index}] duplicate family_id {family_id!r}")
+                seen.add(str(family_id))
+                family_ids.append(str(family_id))
+            errors.extend(validate_handoff_family_entry(family, f"{prefix} families[{index}]"))
+    if "seam_summary" in root:
+        errors.extend(validate_seam_summary(root.get("seam_summary"), set(family_ids), prefix))
+    return errors, {"family_ids": family_ids, "family_count": len(family_ids)}
 
 
 def validate_omission_entries(value: Any, prefix: str) -> list[str]:
@@ -1234,17 +1719,53 @@ def handoff_path_cmd(args: argparse.Namespace) -> int:
 def load_review_handoff_payload(input_json: str) -> dict[str, Any]:
     data = parse_json_record(input_json)
     if "review_handoff" in data:
-        root = data.get("review_handoff")
-        if not isinstance(root, dict):
-            raise SystemExit("review_handoff must be a mapping")
-        payload = data
+        return data
+    return {"review_handoff": data}
+
+
+def print_validation_result(
+    *,
+    mode: str,
+    errors: list[str],
+    summary: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> int:
+    output: dict[str, Any] = {
+        "mode": mode,
+        "valid": not errors,
+        "errors": errors,
+        **summary,
+    }
+    if extra:
+        output.update(extra)
+    print(json.dumps(output, indent=2, sort_keys=True))
+    return 0 if not errors else 2
+
+
+def validate_review_handoff_command(args: argparse.Namespace) -> int:
+    if args.input_file:
+        payload = load_review_handoff_payload(pathlib.Path(args.input_file).read_text(encoding="utf-8"))
     else:
-        payload = {"review_handoff": data}
-        root = data
-    families = root.get("families")
-    if not isinstance(families, list):
-        raise SystemExit("review_handoff.families must be a list")
-    return payload
+        payload = load_review_handoff_payload(args.input_json)
+    errors, summary = validate_review_handoff_data(payload, allow_empty=args.allow_empty)
+    return print_validation_result(
+        mode="review-handoff-validation",
+        errors=errors,
+        summary=summary,
+    )
+
+
+def validate_lane_result_command(args: argparse.Namespace) -> int:
+    if args.input_file:
+        result = parse_json_record(pathlib.Path(args.input_file).read_text(encoding="utf-8"))
+    else:
+        result = parse_json_record(args.input_json)
+    errors, summary = validate_lane_result_data(result, args.lane_type)
+    return print_validation_result(
+        mode="lane-result-validation",
+        errors=errors,
+        summary=summary,
+    )
 
 
 def write_review_handoff(args: argparse.Namespace) -> int:
@@ -1254,6 +1775,17 @@ def write_review_handoff(args: argparse.Namespace) -> int:
         payload = load_review_handoff_payload(pathlib.Path(args.input_file).read_text(encoding="utf-8"))
     else:
         payload = load_review_handoff_payload(args.input_json)
+    errors, summary = validate_review_handoff_data(payload, allow_empty=False)
+    if errors:
+        return print_validation_result(
+            mode="review-handoff-write",
+            errors=errors,
+            summary=summary,
+            extra={
+                "review_handoff_path": str(review_handoff_path(trace_dir)),
+                "written": False,
+            },
+        )
     handoff_path = review_handoff_path(trace_dir)
     handoff_path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
     review_handoff = payload["review_handoff"]
@@ -1273,6 +1805,25 @@ def write_review_handoff(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def validate_review_handoff_file(path: pathlib.Path) -> tuple[list[str], list[str]]:
+    if not path.exists():
+        return [], ["review_handoff_path does not exist on disk"]
+    try:
+        raw_payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], [f"review_handoff_path could not be read as JSON: {exc}"]
+    if not isinstance(raw_payload, dict):
+        return [], ["review_handoff_path must contain a JSON object"]
+    payload = raw_payload if "review_handoff" in raw_payload else {"review_handoff": raw_payload}
+    errors, summary = validate_review_handoff_data(payload, allow_empty=False)
+    family_ids = [str(item) for item in summary.get("family_ids") or []]
+    return family_ids, errors
+
+
+def family_id_multiset_matches(left: list[str], right: list[str]) -> bool:
+    return sorted(left) == sorted(right)
 
 
 def latest_review_handoff_emission(records: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1313,7 +1864,43 @@ def append_trace(args: argparse.Namespace) -> int:
         )
         return 2
     existing_records = read_jsonl(trace_file)
+    trace_root = trace_file.parent.parent
     phase = str(record.get("phase") or "")
+    if phase == "review_handoff_emitted":
+        emitted_path = resolve_handoff_artifact_path(str(record.get("path") or ""), trace_root)
+        record_family_ids = [str(item) for item in record.get("family_ids") or []]
+        handoff_family_ids, handoff_errors = validate_review_handoff_file(emitted_path)
+        if handoff_errors:
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": False,
+                        "status": "error",
+                        "errors": [
+                            f"trace record phase 'review_handoff_emitted' {error}"
+                            for error in handoff_errors
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        if not family_id_multiset_matches(handoff_family_ids, record_family_ids):
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": False,
+                        "status": "error",
+                        "errors": ["trace record phase 'review_handoff_emitted' family_ids must match the persisted review_handoff file"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
     if phase == "final_review" and str(record.get("final_verdict") or "") in ACTIONABLE_FINAL_VERDICTS:
         review_handoff_path_value = str(record.get("review_handoff_path") or "")
         handoff_emission = latest_review_handoff_emission(existing_records)
@@ -1332,7 +1919,6 @@ def append_trace(args: argparse.Namespace) -> int:
                 )
             )
             return 2
-        trace_root = trace_file.parent.parent
         handoff_path = resolve_handoff_artifact_path(review_handoff_path_value, trace_root)
         if not handoff_path.exists():
             print(
@@ -1342,6 +1928,38 @@ def append_trace(args: argparse.Namespace) -> int:
                         "appended": False,
                         "status": "error",
                         "errors": ["trace record phase 'final_review' review_handoff_path does not exist on disk"],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        handoff_family_ids, handoff_errors = validate_review_handoff_file(handoff_path)
+        if handoff_errors:
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": False,
+                        "status": "error",
+                        "errors": [
+                            f"trace record phase 'final_review' review_handoff_path {error}"
+                            for error in handoff_errors
+                        ],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        if not family_id_multiset_matches(handoff_family_ids, actionable_family_ids):
+            print(
+                json.dumps(
+                    {
+                        "trace_file": str(trace_file),
+                        "appended": False,
+                        "status": "error",
+                        "errors": ["trace record phase 'final_review' review_handoff_path family_ids must match actionable_family_ids"],
                     },
                     indent=2,
                     sort_keys=True,
@@ -1366,7 +1984,7 @@ def append_trace(args: argparse.Namespace) -> int:
                     )
                 )
                 return 2
-        if emitted_family_ids != actionable_family_ids:
+        if not family_id_multiset_matches(emitted_family_ids, actionable_family_ids):
             print(
                 json.dumps(
                     {
@@ -2810,6 +3428,43 @@ def build_parser() -> argparse.ArgumentParser:
     write_handoff_group.add_argument("--input-json")
     write_handoff_group.add_argument("--input-file")
     write_handoff.set_defaults(func=write_review_handoff)
+
+    validate_handoff = subparsers.add_parser(
+        "validate-review-handoff",
+        help="Validate a review_handoff family-entry artifact before persisting or reporting it.",
+    )
+    validate_handoff_group = validate_handoff.add_mutually_exclusive_group(required=True)
+    validate_handoff_group.add_argument("--input-json")
+    validate_handoff_group.add_argument("--input-file")
+    validate_handoff.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Allow an empty families list for intermediate skeleton validation.",
+    )
+    validate_handoff.set_defaults(func=validate_review_handoff_command)
+
+    validate_lane_result = subparsers.add_parser(
+        "validate-lane-result",
+        help="Validate a structured coverage, exploration, return-review, or deferred-thread lane result.",
+    )
+    validate_lane_result_group = validate_lane_result.add_mutually_exclusive_group(required=True)
+    validate_lane_result_group.add_argument("--input-json")
+    validate_lane_result_group.add_argument("--input-file")
+    validate_lane_result.add_argument(
+        "--lane-type",
+        choices=[
+            "coverage",
+            "coverage-lane",
+            "family-exploration",
+            "family-exploration-lane",
+            "return-review",
+            "return-review-lane",
+            "deferred-thread-exploration",
+            "deferred-thread-exploration-lane",
+        ],
+        help="Optional lane type override when the artifact does not carry lane_type.",
+    )
+    validate_lane_result.set_defaults(func=validate_lane_result_command)
 
     append = subparsers.add_parser(
         "append-trace",

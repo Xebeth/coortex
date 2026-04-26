@@ -67,9 +67,15 @@ Also include:
   - `local-family`
   - `likely-cross-surface-family`
 
+The structured lane artifact must use JSON-friendly field names. Validate it
+with `scripts/return_review_state.py validate-lane-result --lane-type
+coverage` before synthesis.
+
 Rules:
 - `rationale_summary` should be a short evidence-based explanation of how the reviewer got from the observed code to the reported root cause. Do not dump hidden chain-of-thought.
-- `material_evidence_actions` should record observable review work only: key files or docs read, searches run, diagnostics/commands used, and major family-candidate decisions. Do not turn it into hidden reasoning.
+- `material_evidence_actions` must be a non-empty list of observable review
+  work only: key files or docs read, searches run, diagnostics/commands used,
+  and major family-candidate decisions. Do not turn it into hidden reasoning.
 - `skipped_areas` must be explicit. Use `none` when nothing material was skipped.
 - `skip_reasons` must explain why each skipped area was left out: out of lane scope, insufficient evidence, boundedness limit, or deferred to family exploration.
 - `stop_reason` must say why the lane stopped when it did.
@@ -111,16 +117,16 @@ Use these `family_status` tokens for coverage lanes:
 Required fields:
 - `family_id`
 - `source_surfaces`
-- `highest-confidence root cause`
-- `likely owning seam`
-- `secondary seams`
-- `manifestations confirmed`
-- `manifestations rejected`
-- `side paths checked`
-- `sibling bugs found`
+- `highest_confidence_root_cause`
+- `likely_owning_seam`
+- `secondary_seams`
+- `manifestations_confirmed`
+- `manifestations_rejected`
+- `side_paths_checked`
+- `sibling_bugs_found`
 - `sibling_search_scope`
-- `severity rollup`
-- `closure status`
+- `severity_rollup`
+- `closure_status`
 - `material_evidence_actions`
 - `rationale_summary`
 - `skipped_areas`
@@ -139,12 +145,17 @@ Closure status values:
 
 Rules:
 - Use the same self-check discipline as coverage lanes.
-- `likely owning seam` should name the most plausible owning module or boundary
+- Validate the structured artifact with
+  `scripts/return_review_state.py validate-lane-result --lane-type
+  family-exploration` before synthesis.
+- `likely_owning_seam` should name the most plausible owning module or boundary
   for the family, not merely the nearest changed file.
-- `secondary seams` should list materially involved adjacent seams when the
+- `secondary_seams` should list materially involved adjacent seams when the
   family clearly crosses more than one owning boundary. Use `none` when no
   grounded secondary seam was found.
-- `material_evidence_actions` should make the exploration lane's search behavior inspectable: key files/docs read, search pivots used, candidate manifestations rejected, and sibling paths checked.
+- `material_evidence_actions` must be a non-empty list that makes the
+  exploration lane's search behavior inspectable: key files/docs read, search
+  pivots used, candidate manifestations rejected, and sibling paths checked.
 - `thin_areas` must be explicit for exploration lanes too. Use `none` when nothing material was left unexplored inside the family lane.
 - `omission_entries` must be explicit for exploration lanes too. Use `[]` when nothing material remains actionable from skipped/thin coverage inside the family lane.
 - `sibling_search_scope` must state where sibling exploration was attempted, even when no sibling bugs were found.

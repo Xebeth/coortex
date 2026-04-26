@@ -32,11 +32,12 @@ Resolve bundled script paths relative to this installed skill directory under
 
 When this workflow names a `scripts/return_review_state.py` subcommand for
 trace init, packet validation, baseline validation, canonical handoff
-pathing/writing, omission summaries, ledger updates, or reopen reporting, run that exact helper command
-instead of recreating those outputs by hand. Treat helper-produced paths,
-validation results, and ledger summaries as authoritative. If a required
-helper-owned artifact or trace step cannot be produced, stop and surface a
-protocol error instead of prose-completing the review.
+pathing/writing, lane-result validation, handoff validation, omission summaries,
+ledger updates, or reopen reporting, run that exact helper command instead of
+recreating those outputs by hand. Treat helper-produced paths, validation
+results, and ledger summaries as authoritative. If a required helper-owned
+artifact or trace step cannot be produced, stop and surface a protocol error
+instead of prose-completing the review.
 
 1. Load these references as needed:
    - `references/prep-and-refusal.md`
@@ -78,8 +79,11 @@ protocol error instead of prose-completing the review.
 7. Synthesize the final review result.
 8. Emit **and persist** a fixer-ready downstream `review_handoff` at the
    canonical trace path when actionable families remain.
-9. Append final trace records and normalized family-ledger outcomes.
-10. Surface families reopened in the current run using the helper's ledger
+9. Validate every structured lane result and the final `review_handoff` with
+   `scripts/return_review_state.py` before trusting it for synthesis or
+   terminal output.
+10. Append final trace records and normalized family-ledger outcomes.
+11. Surface families reopened in the current run using the helper's ledger
     summary rather than prose reconstruction.
 
 ## Packet-driven exploration specifics
@@ -176,6 +180,11 @@ active.
   has been written to the canonical trace path, traced via
   `review_handoff_emitted`, and referenced by the terminal `final_review`
   record.
+- Do not accept a structured coverage, exploration, return-review, or deferred
+  thread lane result until `validate-lane-result` passes for that lane artifact.
+- Do not emit, persist, or report a downstream `review_handoff` until
+  `validate-review-handoff` or `write-review-handoff` has accepted the full
+  family-entry shape.
 - Standalone top-level orchestrator campaigns must not run concurrently with an
   active seam-walk or fixer-orchestrator campaign in the same worktree.
 - Packet-driven orchestrator exploration is allowed during an active seam-walk

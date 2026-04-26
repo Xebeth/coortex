@@ -9,6 +9,11 @@ In targeted return-review mode, a refreshed downstream `review_handoff` uses
 the same contract shape, but it should contain only the still-actionable
 families and should absorb the return-review findings for those families.
 
+Validate the structured artifact with
+`scripts/return_review_state.py validate-review-handoff` before reporting it.
+Persist it with `write-review-handoff`, which runs the same validation before
+writing the canonical trace artifact.
+
 ## Top-level shape
 
 ```yaml
@@ -185,6 +190,23 @@ Per optional `carry_forward_context` block:
 - `reason`
 - `actionable_when`
 - `blocking_family_ids` when another family must land first
+
+Allowed `closure_status` values:
+- `family-still-open`
+- `symptom-fixed-only`
+- `family-partially-closed`
+- `verification-blocked`
+- `verification-blocked-separate-blocker`
+- `unverified`
+- `family-closed`
+- `closure-confirmed`
+- `closed`
+
+Allowed `open_reason_kind` values:
+- `family-local-gap-remaining`
+- `unfinished-family-work`
+- `broader-cross-family-contract`
+- `verification-separate-blocker`
 
 ## Rules
 

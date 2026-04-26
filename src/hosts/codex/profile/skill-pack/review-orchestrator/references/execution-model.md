@@ -66,7 +66,11 @@ If any split trigger fires but the surface is kept as one lane anyway:
 - surface that exception in the final review output
 
 Every coverage lane must emit the coverage-lane contract from
-`references/report-contract.md`.
+`references/report-contract.md`. Before synthesis, serialize the lane's
+structured result to JSON and validate it with
+`scripts/return_review_state.py validate-lane-result --lane-type coverage`.
+If validation fails, treat the lane return as a protocol error and get a
+corrected lane artifact instead of reconstructing missing fields locally.
 
 When completed coverage or return-review lanes report machine-readable
 `omission_entries`, run the bundled omission helper before synthesis:
@@ -119,7 +123,11 @@ Scheduling:
 - do not spawn a lane for a deferred family unless prep classified it as `requires-family-local-check` or `requires-broader-cross-family-review`
 
 Each return-review lane must emit the family-local return-review contract from
-`references/return-review.md`.
+`references/return-review.md`. Before synthesis, serialize the lane's
+structured result to JSON and validate it with
+`scripts/return_review_state.py validate-lane-result --lane-type return-review`.
+If validation fails, treat the lane return as a protocol error and get a
+corrected lane artifact instead of accepting prose closure claims.
 
 If a return-review lane shows the family still remains open and actionable, the
 lane evidence should be rich enough for synthesis to rebuild a refreshed
@@ -153,7 +161,9 @@ Rules:
 - if deferred-thread exploration lanes exceed current subagent capacity, run them in bounded waves rather than substituting coordinator-local exploration
 
 Each deferred-thread exploration lane must emit the deferred-thread output
-contract from `references/return-review.md`.
+contract from `references/return-review.md`. Validate the structured result
+with `scripts/return_review_state.py validate-lane-result --lane-type
+deferred-thread-exploration` before using it in return-review synthesis.
 
 ## Family exploration lanes
 
@@ -177,7 +187,11 @@ Rules:
   a merged generic focus list
 
 Each family-exploration lane must emit the exploration-lane contract from
-`references/report-contract.md`.
+`references/report-contract.md`. Before synthesis, serialize the lane's
+structured result to JSON and validate it with
+`scripts/return_review_state.py validate-lane-result --lane-type
+family-exploration`. If validation fails, do not let the coordinator fill in
+the missing root-cause, sibling-search, or thin-area fields from memory.
 
 ## Coordinator
 
@@ -211,6 +225,9 @@ The coordinator must:
   a refreshed open-families-only downstream `review_handoff`, persist it to the
   canonical `review-handoff.json` path, and trace that emission before
   `final_review`
+- validate any downstream `review_handoff` with the helper before emitting or
+  writing it; `write-review-handoff` performs the same validation and must fail
+  the run if the family-entry shape is incomplete
 - rebuild each carried-forward family entry from the original family plus the independent lane findings
 - do not use the `review_handoff` key for a verdict ledger or unchanged copy of the original handoff
 - roll lane self-check signals up into the final report so skipped areas, stop reasons, confidence limits, remaining coverage risks, and boundedness exceptions are visible to the user

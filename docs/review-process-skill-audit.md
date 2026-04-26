@@ -28,9 +28,9 @@ It intentionally does not audit the host repository architecture.
 
 The prose contracts are richer than the helper enforcement.
 
-Current helper commands validate baselines, discovery packets, current-work
-narrowing, omissions, basic trace records, ledger appends, and canonical handoff
-pathing. They do not expose dedicated validators for:
+At audit time, helper commands validated baselines, discovery packets,
+current-work narrowing, omissions, basic trace records, ledger appends, and
+canonical handoff pathing. They did not expose dedicated validators for:
 
 - coverage lane output shape
 - family exploration output shape
@@ -45,6 +45,12 @@ or emitting an under-specified handoff.
 
 Needed change: add helper commands that validate each structured artifact used
 for orchestration, synthesis, handoff, and completion.
+
+Implementation status: the first validator slice adds helper validation for
+coverage lane output, family-exploration output, return-review output,
+deferred-thread lane output, and full `review_handoff` family-entry shape.
+Remaining work is still needed for the coverage-to-family packet, final summary
+alignment, and final synthesized family set versus ledger entries.
 
 ### 2. Coverage-to-family handoff is too implicit
 
@@ -125,8 +131,9 @@ The current skills already align with several core intents:
 
 ## Next implementation targets
 
-1. Add deterministic validators for lane outputs, candidate-family packets,
-   handoff shape, final synthesis, and ledger completion.
+1. Finish deterministic validators for candidate-family packets, final
+   synthesis, and ledger completion. Lane-output and handoff-shape validators
+   now exist.
 2. Add a canonical coverage-to-family exploration packet to the orchestrator
    trace model.
 3. Tighten thin-area materiality and follow-up states.

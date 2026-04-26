@@ -8,6 +8,8 @@ Use the bundled helper for deterministic path/file management:
 python scripts/return_review_state.py init-trace --project-root . --mode <mode>
 python scripts/return_review_state.py lane-trace-file --trace-dir <dir> --lane-type <type> --session-id <id> --family-id <family_id> --family-name "<family name>"
 python scripts/return_review_state.py handoff-path --trace-dir <dir>
+python scripts/return_review_state.py validate-lane-result --lane-type <type> --input-file <lane-json>
+python scripts/return_review_state.py validate-review-handoff --input-file <handoff-json>
 python scripts/return_review_state.py write-review-handoff --trace-dir <dir> --input-file <handoff-json>
 python scripts/return_review_state.py append-trace --trace-file <path> --record-file <json-file>
 python scripts/return_review_state.py summarize-lane-omissions --lane-result-file <lane-json> [--lane-result-file <lane-json> ...]
@@ -26,6 +28,9 @@ The helper owns:
 - lane filename construction
 - JSONL append mechanics
 - trace-record validation for known phase-boundary record types
+- structured lane-result validation for coverage, exploration, return-review,
+  and deferred-thread lanes
+- structured `review_handoff` family-entry validation before persistence
 - structured omission-entry validation and omission-summary bucketing
 - repository family-ledger append/summary mechanics
 - current-run reopened-family summary mechanics
@@ -165,6 +170,16 @@ on, not every incidental read.
 dispositions so later coordinator decisions are traceable on disk even when
 normal output only surfaces the high-level confidence summary.
 
+Before using a lane result for synthesis or appending its phase-boundary trace,
+validate the lane artifact with:
+
+```bash
+python scripts/return_review_state.py validate-lane-result --lane-type <type> --input-file <lane-json>
+```
+
+If validation fails, the lane result is a protocol error. Do not infer missing
+fields from prose or silently continue synthesis.
+
 ## Omission-followup record
 
 Include:
@@ -207,9 +222,15 @@ Rules:
   `review_handoff` to the canonical run-local file:
   `.coortex/review-trace/<run_id>/review-handoff.json`
 - `review_handoff_emitted` records the persisted artifact path and the exact
-  actionable family ids included in that file.
+  actionable family-id set included in that file.
 - Do not treat prose describing the handoff as a substitute for the persisted
   file and trace record.
+- `write-review-handoff` validates the full `review_handoff` family-entry
+  contract before writing. A failed validation is a protocol error, not an
+  invitation to fall back to prose.
+- `append-trace` validates `review_handoff_emitted` against the persisted
+  file. The trace `family_ids` must match the family-id set inside
+  `review-handoff.json`; ordering is not significant.
 
 ## Final-review record
 
@@ -246,3 +267,6 @@ that list from `current-run-reopens`.
 - `append-trace` should reject actionable `final_review` records when the
   canonical handoff file is missing or the prior `review_handoff_emitted`
   record does not match the final actionable family set.
+- `append-trace` should also reject actionable `final_review` records when the
+  canonical handoff file's family-id set does not match
+  `actionable_family_ids`; ordering is not significant.

@@ -66,6 +66,80 @@ async function runPythonJson(
   }
 }
 
+function validReviewHandoff(familyId: string | string[] = "F-OP-001"): Record<string, unknown> {
+  const familyIds = Array.isArray(familyId) ? familyId : [familyId];
+  return {
+    review_handoff: {
+      review_target: { mode: "branch", scope_summary: "test" },
+      families: familyIds.map((id) => ({
+        family_id: id,
+        severity: "MEDIUM",
+        title: "Example family",
+        highest_confidence_root_cause: "example root cause",
+        source_surfaces: ["runtime-recovery"],
+        manifestations: ["src/example.ts:10"],
+        immediate_implications: ["example immediate implication"],
+        broader_implications: ["example broader implication"],
+        sibling_bugs: "none found",
+        sibling_search_scope: ["example sibling path"],
+        closure_status: "family-still-open",
+        open_reason_kind: "family-local-gap-remaining",
+        thin_areas: "none",
+        review_hints: {
+          likely_owning_seam: "src/example.ts",
+          secondary_seams: "none",
+          candidate_write_set: ["src/example.ts"],
+          candidate_test_set: ["src/__tests__/example.test.ts"],
+          candidate_doc_set: "none",
+          parallelizable: false
+        },
+        closure_gate: {
+          remediation_item: "repair the example root cause",
+          closure_checklist: ["root cause is repaired"],
+          required_sibling_tests: ["sibling path remains covered"],
+          doc_closure: "none",
+          reviewer_stop_conditions: ["reject symptom-only repair"]
+        },
+        next_step: {
+          kind: "follow-up-fix",
+          action: "repair the example root cause",
+          required_environment: "none",
+          expected_evidence: ["updated implementation and tests"],
+          reevaluate_when: ["the fixer slice returns"]
+        }
+      }))
+    }
+  };
+}
+
+function validReturnReviewLane(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    lane_id: "return-F-COV-001",
+    target: "F-COV-001",
+    scope_summary: "returned family",
+    claimed_closure_status: "family-closed",
+    closure_claim_verdict: "confirmed",
+    closure_gate_checked: [
+      {
+        gate_item: "root cause repaired",
+        item_verdict: "satisfied",
+        evidence: ["src/runtime.ts:12"]
+      }
+    ],
+    evidence: ["src/runtime.ts:12"],
+    new_findings: "none found",
+    material_evidence_actions: ["read returned diff"],
+    rationale_summary: "closure gate evidence matched the returned diff",
+    skipped_areas: "none",
+    skip_reasons: "none",
+    stop_reason: "family-local return review completed",
+    coverage_confidence: "high",
+    thin_areas: "none",
+    omission_entries: [],
+    ...overrides
+  };
+}
+
 
 async function runGit(cwd: string, args: string[]): Promise<void> {
   await execFileAsync("git", args, { cwd });
@@ -2128,20 +2202,7 @@ test("orchestrator packet mode validates discovery packets and respects the acti
   const reviewHandoffSourcePath = join(tempDir, "packet-review-handoff-source.json");
   await writeFile(
     reviewHandoffSourcePath,
-    JSON.stringify(
-      {
-        review_handoff: {
-          families: [
-            {
-              family_id: "F-OP-001",
-              title: "Example family"
-            }
-          ]
-        }
-      },
-      null,
-      2
-    ),
+    JSON.stringify(validReviewHandoff("F-OP-001"), null, 2),
     "utf8"
   );
   const writeReviewHandoff = await runPythonJson(returnReviewStateScript, [
@@ -2155,6 +2216,44 @@ test("orchestrator packet mode validates discovery packets and respects the acti
   assert.deepEqual(writeReviewHandoff.json, {
     family_ids: ["F-OP-001"],
     review_handoff_path: handoffPath
+  });
+
+  const mismatchedHandoffTraceRecordPath = join(tempDir, "packet-review-handoff-emitted-mismatch.json");
+  await writeFile(
+    mismatchedHandoffTraceRecordPath,
+    JSON.stringify(
+      {
+        run_id: packetModeJson.run_id,
+        campaign_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-20T12:26:30Z",
+        skill: "review-orchestrator",
+        mode: "packet-exploration",
+        phase: "review_handoff_emitted",
+        review_target: { mode: "branch", scope_summary: "test" },
+        path: handoffPath,
+        family_ids: ["F-OTHER"],
+        kind: "initial"
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const mismatchedHandoffTraceRecord = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    mismatchedHandoffTraceRecordPath
+  ]);
+  assert.equal(mismatchedHandoffTraceRecord.exitCode, 2);
+  assert.deepEqual(mismatchedHandoffTraceRecord.json, {
+    appended: false,
+    errors: [
+      "trace record phase 'review_handoff_emitted' family_ids must match the persisted review_handoff file"
+    ],
+    status: "error",
+    trace_file: join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl")
   });
 
   const handoffTraceRecordPath = join(tempDir, "packet-review-handoff-emitted.json");
@@ -2186,6 +2285,49 @@ test("orchestrator packet mode validates discovery packets and respects the acti
     handoffTraceRecordPath
   ]);
   assert.equal(handoffTraceRecord.exitCode, 0);
+
+  await writeFile(handoffPath, JSON.stringify(validReviewHandoff("F-OTHER"), null, 2), "utf8");
+  const mutatedFinalReviewPath = join(tempDir, "packet-final-review-mutated-handoff.json");
+  await writeFile(
+    mutatedFinalReviewPath,
+    JSON.stringify(
+      {
+        run_id: packetModeJson.run_id,
+        campaign_id: seamInitJson.run_id,
+        timestamp_utc: "2026-04-20T12:27:30Z",
+        skill: "review-orchestrator",
+        mode: "packet-exploration",
+        phase: "final_review",
+        review_target: { mode: "branch", scope_summary: "test" },
+        final_verdict: "REQUEST_CHANGES",
+        actionable_family_ids: ["F-OP-001"],
+        review_handoff_path: handoffPath,
+        review_shape_trace_summary: { mode: "packet-exploration" },
+        unexplored_area_ledger_summary: { areas: [] },
+        boundedness_exceptions_summary: { exceptions: [] }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const mutatedFinalReview = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl"),
+    "--record-file",
+    mutatedFinalReviewPath
+  ]);
+  assert.equal(mutatedFinalReview.exitCode, 2);
+  assert.deepEqual(mutatedFinalReview.json, {
+    appended: false,
+    errors: [
+      "trace record phase 'final_review' review_handoff_path family_ids must match actionable_family_ids"
+    ],
+    status: "error",
+    trace_file: join(tempDir, traceRoot, packetModeJson.run_id, "coordinator.jsonl")
+  });
+  await writeFile(handoffPath, JSON.stringify(validReviewHandoff("F-OP-001"), null, 2), "utf8");
 
   await writeFile(
     finalReviewPath,
@@ -2881,6 +3023,425 @@ test("orchestrator trace helper validates lane result records before appending",
   assert.ok(
     invalidJson.errors.some((error) =>
       error.includes("missing omission_entries")
+    )
+  );
+});
+
+test("orchestrator helper validates structured review handoffs before writing", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-handoff-validation-"));
+  const validPath = join(tempDir, "handoff.json");
+  await writeFile(validPath, JSON.stringify(validReviewHandoff("F-VAL-001"), null, 2), "utf8");
+
+  const valid = await runPythonJson(returnReviewStateScript, [
+    "validate-review-handoff",
+    "--input-file",
+    validPath
+  ]);
+
+  assert.equal(valid.exitCode, 0);
+  assert.deepEqual(valid.json, {
+    errors: [],
+    family_count: 1,
+    family_ids: ["F-VAL-001"],
+    mode: "review-handoff-validation",
+    valid: true
+  });
+
+  const invalid = await runPythonJson(returnReviewStateScript, [
+    "validate-review-handoff",
+    "--input-json",
+    JSON.stringify({
+      review_handoff: {
+        review_target: { mode: "branch", scope_summary: "test" },
+        families: [
+          {
+            family_id: "F-BAD-001",
+            title: "Underspecified family"
+          }
+        ]
+      }
+    })
+  ]);
+
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as { errors: string[]; valid: boolean };
+  assert.equal(invalidJson.valid, false);
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("families[0] severity must be one of")
+    )
+  );
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("families[0] closure_gate must be a mapping")
+    )
+  );
+
+  const invalidStatusHandoff = validReviewHandoff("F-BAD-STATUS") as {
+    review_handoff: { families: Record<string, unknown>[] };
+  };
+  invalidStatusHandoff.review_handoff.families[0]!.closure_status = "looks-good";
+  const invalidStatus = await runPythonJson(returnReviewStateScript, [
+    "validate-review-handoff",
+    "--input-json",
+    JSON.stringify(invalidStatusHandoff)
+  ]);
+
+  assert.equal(invalidStatus.exitCode, 2);
+  const invalidStatusJson = invalidStatus.json as { errors: string[]; valid: boolean };
+  assert.equal(invalidStatusJson.valid, false);
+  assert.ok(
+    invalidStatusJson.errors.some((error) =>
+      error.includes("families[0] closure_status must be one of")
+    )
+  );
+
+  const invalidOpenReasonHandoff = validReviewHandoff("F-BAD-REASON") as {
+    review_handoff: { families: Record<string, unknown>[] };
+  };
+  invalidOpenReasonHandoff.review_handoff.families[0]!.open_reason_kind = "mystery";
+  const invalidOpenReason = await runPythonJson(returnReviewStateScript, [
+    "validate-review-handoff",
+    "--input-json",
+    JSON.stringify(invalidOpenReasonHandoff)
+  ]);
+
+  assert.equal(invalidOpenReason.exitCode, 2);
+  const invalidOpenReasonJson = invalidOpenReason.json as {
+    errors: string[];
+    valid: boolean;
+  };
+  assert.equal(invalidOpenReasonJson.valid, false);
+  assert.ok(
+    invalidOpenReasonJson.errors.some((error) =>
+      error.includes("families[0] open_reason_kind must be one of")
+    )
+  );
+
+  const invalidSeamSummaryHandoff = validReviewHandoff("F-BAD-SEAM") as {
+    review_handoff: Record<string, unknown> & { families: Record<string, unknown>[] };
+  };
+  invalidSeamSummaryHandoff.review_handoff.seam_summary = {
+    hot_seams: [
+      {
+        seam: "src/example.ts",
+        family_ids: ["F-BAD-SEAM"],
+        family_count: 99,
+        highest_severity: "MEDIUM",
+        hot: true,
+        hot_reason: "same owning seam"
+      }
+    ],
+    all_seams: [],
+    families_without_owning_seam: []
+  };
+  const invalidSeamSummary = await runPythonJson(returnReviewStateScript, [
+    "validate-review-handoff",
+    "--input-json",
+    JSON.stringify(invalidSeamSummaryHandoff)
+  ]);
+
+  assert.equal(invalidSeamSummary.exitCode, 2);
+  const invalidSeamSummaryJson = invalidSeamSummary.json as {
+    errors: string[];
+    valid: boolean;
+  };
+  assert.equal(invalidSeamSummaryJson.valid, false);
+  assert.ok(
+    invalidSeamSummaryJson.errors.some((error) =>
+      error.includes("seam_summary hot_seams[0] family_count must match family_ids length")
+    )
+  );
+});
+
+test("orchestrator trace family-id checks are order-insensitive", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-handoff-family-order-"));
+  const traceDir = join(tempDir, ".coortex", "review-trace", "run-order");
+  await mkdir(traceDir, { recursive: true });
+  const traceFile = join(traceDir, "coordinator.jsonl");
+  const handoffPath = join(traceDir, "review-handoff.json");
+  await writeFile(
+    handoffPath,
+    JSON.stringify(validReviewHandoff(["F-ORDER-A", "F-ORDER-B"]), null, 2),
+    "utf8"
+  );
+
+  const emitted = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "run-order",
+      timestamp_utc: "2026-04-20T12:26:30Z",
+      skill: "review-orchestrator",
+      mode: "packet-exploration",
+      phase: "review_handoff_emitted",
+      review_target: { mode: "branch", scope_summary: "test" },
+      path: handoffPath,
+      family_ids: ["F-ORDER-B", "F-ORDER-A"],
+      kind: "initial"
+    })
+  ]);
+  assert.equal(emitted.exitCode, 0);
+
+  const finalReview = await runPythonJson(returnReviewStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "run-order",
+      timestamp_utc: "2026-04-20T12:27:30Z",
+      skill: "review-orchestrator",
+      mode: "packet-exploration",
+      phase: "final_review",
+      review_target: { mode: "branch", scope_summary: "test" },
+      final_verdict: "REQUEST_CHANGES",
+      actionable_family_ids: ["F-ORDER-A", "F-ORDER-B"],
+      review_handoff_path: handoffPath,
+      review_shape_trace_summary: { mode: "packet-exploration" },
+      unexplored_area_ledger_summary: { areas: [] },
+      boundedness_exceptions_summary: { exceptions: [] }
+    })
+  ]);
+  assert.equal(finalReview.exitCode, 0);
+});
+
+test("write-review-handoff rejects underspecified family artifacts", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-handoff-write-"));
+  const result = await runPythonJson(returnReviewStateScript, [
+    "write-review-handoff",
+    "--trace-dir",
+    tempDir,
+    "--input-json",
+    JSON.stringify({
+      review_handoff: {
+        review_target: { mode: "branch", scope_summary: "test" },
+        families: [{ family_id: "F-BAD-001", title: "Underspecified family" }]
+      }
+    })
+  ]);
+
+  assert.equal(result.exitCode, 2);
+  const json = result.json as { errors: string[]; written: boolean; valid: boolean };
+  assert.equal(json.valid, false);
+  assert.equal(json.written, false);
+  assert.ok(json.errors.some((error) => error.includes("review_hints must be a mapping")));
+});
+
+test("orchestrator helper validates structured coverage exploration and return lanes", async () => {
+  const coverage = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--input-json",
+    JSON.stringify({
+      lane_id: "coverage-runtime-01",
+      lane_type: "coverage-lane",
+      target: "runtime",
+      scope_summary: "runtime surface",
+      material_evidence_actions: ["read src/runtime.ts"],
+      rationale_summary: "candidate family follows from the runtime contract",
+      skipped_areas: "none",
+      skip_reasons: "none",
+      stop_reason: "bounded surface completed",
+      coverage_confidence: "high",
+      thin_areas: "none",
+      omission_entries: [],
+      candidate_families: [
+        {
+          family_id: "F-COV-001",
+          candidate_root_cause: "runtime truth split across two owners",
+          manifestations: ["src/runtime.ts:10"],
+          family_status: "local-family",
+          likely_owning_seam: "src/runtime.ts",
+          secondary_seams: "none"
+        }
+      ]
+    })
+  ]);
+  assert.equal(coverage.exitCode, 0);
+
+  const exploration = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--input-json",
+    JSON.stringify({
+      lane_id: "family-F-COV-001",
+      lane_type: "family-exploration-lane",
+      target: "F-COV-001",
+      scope_summary: "runtime family",
+      family_id: "F-COV-001",
+      source_surfaces: ["runtime"],
+      highest_confidence_root_cause: "runtime truth split across two owners",
+      likely_owning_seam: "src/runtime.ts",
+      secondary_seams: "none",
+      manifestations_confirmed: ["src/runtime.ts:10"],
+      manifestations_rejected: "none",
+      side_paths_checked: ["src/runtime-resume.ts"],
+      sibling_bugs_found: "none found",
+      sibling_search_scope: ["resume path"],
+      severity_rollup: "MEDIUM",
+      closure_status: "family-still-open",
+      material_evidence_actions: ["read src/runtime.ts"],
+      rationale_summary: "root cause remained local to runtime truth ownership",
+      skipped_areas: "none",
+      skip_reasons: "none",
+      stop_reason: "family seam checked",
+      coverage_confidence: "medium",
+      thin_areas: "none",
+      omission_entries: []
+    })
+  ]);
+  assert.equal(exploration.exitCode, 0);
+
+  const returnReview = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--lane-type",
+    "return-review",
+    "--input-json",
+    JSON.stringify(validReturnReviewLane())
+  ]);
+  assert.equal(returnReview.exitCode, 0);
+
+  const invalidClaimStatus = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--lane-type",
+    "return-review",
+    "--input-json",
+    JSON.stringify(
+      validReturnReviewLane({
+        scope_summary: "returned family with invalid claim status",
+        claimed_closure_status: "looks-good"
+      })
+    )
+  ]);
+  assert.equal(invalidClaimStatus.exitCode, 2);
+  const invalidClaimStatusJson = invalidClaimStatus.json as {
+    errors: string[];
+    valid: boolean;
+  };
+  assert.equal(invalidClaimStatusJson.valid, false);
+  assert.ok(
+    invalidClaimStatusJson.errors.some((error) =>
+      error.includes("claimed_closure_status must be one of")
+    )
+  );
+
+  const coordinatorOnlyVerdict = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--lane-type",
+    "return-review",
+    "--input-json",
+    JSON.stringify(
+      validReturnReviewLane({
+        scope_summary: "returned family with coordinator-only verdict",
+        closure_claim_verdict: "unverified",
+        closure_gate_checked: [
+          {
+            gate_item: "root cause repaired",
+            item_verdict: "inconclusive",
+            evidence: ["src/runtime.ts:12"]
+          }
+        ],
+        coverage_confidence: "low"
+      })
+    )
+  ]);
+  assert.equal(coordinatorOnlyVerdict.exitCode, 2);
+  const coordinatorOnlyVerdictJson = coordinatorOnlyVerdict.json as {
+    errors: string[];
+    valid: boolean;
+  };
+  assert.equal(coordinatorOnlyVerdictJson.valid, false);
+  assert.ok(
+    coordinatorOnlyVerdictJson.errors.some((error) =>
+      error.includes("closure_claim_verdict must be one of")
+    )
+  );
+
+  const conflictingLaneType = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--lane-type",
+    "return-review",
+    "--input-json",
+    JSON.stringify(
+      validReturnReviewLane({
+        lane_type: "coverage-lane",
+        scope_summary: "returned family with conflicting metadata"
+      })
+    )
+  ]);
+  assert.equal(conflictingLaneType.exitCode, 2);
+  const conflictingLaneTypeJson = conflictingLaneType.json as {
+    errors: string[];
+    valid: boolean;
+  };
+  assert.equal(conflictingLaneTypeJson.valid, false);
+  assert.ok(
+    conflictingLaneTypeJson.errors.some((error) =>
+      error.includes("conflicts with --lane-type")
+    )
+  );
+
+  const invalidEmbeddedLaneType = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--lane-type",
+    "return-review",
+    "--input-json",
+    JSON.stringify(
+      validReturnReviewLane({
+        lane_type: "bogus-lane",
+        scope_summary: "returned family with invalid metadata"
+      })
+    )
+  ]);
+  assert.equal(invalidEmbeddedLaneType.exitCode, 2);
+  const invalidEmbeddedLaneTypeJson = invalidEmbeddedLaneType.json as {
+    errors: string[];
+    valid: boolean;
+  };
+  assert.equal(invalidEmbeddedLaneTypeJson.valid, false);
+  assert.ok(
+    invalidEmbeddedLaneTypeJson.errors.some((error) =>
+      error.includes("bogus-lane") && error.includes("conflicts with --lane-type")
+    )
+  );
+
+  const invalid = await runPythonJson(returnReviewStateScript, [
+    "validate-lane-result",
+    "--lane-type",
+    "family-exploration",
+    "--input-json",
+    JSON.stringify({
+      lane_id: "family-F-COV-002",
+      target: "F-COV-002",
+      scope_summary: "missing exploration fields",
+      material_evidence_actions: [],
+      rationale_summary: "",
+      skipped_areas: [],
+      skip_reasons: [],
+      stop_reason: "",
+      coverage_confidence: "maybe",
+      thin_areas: [],
+      omission_entries: []
+    })
+  ]);
+
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as { errors: string[]; valid: boolean };
+  assert.equal(invalidJson.valid, false);
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("highest_confidence_root_cause must be a non-empty string")
+    )
+  );
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("material_evidence_actions must not be empty")
+    )
+  );
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("coverage_confidence must be one of")
     )
   );
 });

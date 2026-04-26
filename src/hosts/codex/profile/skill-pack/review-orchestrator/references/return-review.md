@@ -58,6 +58,9 @@ When using `$coortex-review-lane` for a return-review lane:
 - omit redundant meta-role disclaimers; the scoped prompt plus `fork_context: false` should make the lane role clear
 - return the base family-local return-review schema below, not the generic review-summary format
 - show the gate check directly in the output instead of burying it inside a generic closure summary
+- serialize the structured lane result and validate it with
+  `scripts/return_review_state.py validate-lane-result --lane-type
+  return-review` before the coordinator uses it for synthesis
 
 For each deferred thread reported by the fixer:
 - if it names a plausible seam, boundary, or family-local side path, run targeted exploration on that thread
@@ -78,6 +81,10 @@ For deferred families:
 
 Each family-local return-review lane should report:
 - `claimed_closure_status`
+  - `symptom-fixed-only`
+  - `family-partially-closed`
+  - `verification-blocked`
+  - `family-closed`
 - `closure_claim_verdict`
   - `confirmed`
   - `rejected`
@@ -112,7 +119,9 @@ For `verification_blocker_verdict` include:
 
 Use the same self-check discipline as other lane types:
 - `rationale_summary` should be a short evidence-based explanation, not hidden chain-of-thought
-- `material_evidence_actions` should record observable review work only: key files/docs read, searches run, diagnostics/commands used, and major family-candidate decisions. Do not turn it into hidden reasoning.
+- `material_evidence_actions` must be a non-empty list of observable review
+  work only: key files/docs read, searches run, diagnostics/commands used, and
+  major family-candidate decisions. Do not turn it into hidden reasoning.
 - `skipped_areas` must be explicit; use `none` when nothing material was skipped
 - `skip_reasons` must explain why each skipped area was left out
 - `stop_reason` must say why the lane stopped when it did
@@ -156,6 +165,10 @@ For each `deferred_threads_still_open` entry include:
 - `probable_seam` or `unknown`
 - `reason`
 
+Before final synthesis, validate any deferred-thread exploration lane artifact
+with `scripts/return_review_state.py validate-lane-result --lane-type
+deferred-thread-exploration`.
+
 ## Refreshed downstream handoff
 
 When targeted return review leaves one or more families still open and
@@ -165,6 +178,11 @@ those families.
 Persist that refreshed handoff to the canonical run-local
 `.coortex/review-trace/<run_id>/review-handoff.json` path. Do not leave the
 next fixer slice with only prose or verdict rows.
+
+Validate the refreshed handoff with
+`scripts/return_review_state.py validate-review-handoff` before reporting it.
+`write-review-handoff` performs that same validation before writing the
+canonical artifact.
 
 Use the normal `review_handoff` contract shape from
 `references/review-handoff.md`, but rebuild each open family entry from:
@@ -229,8 +247,9 @@ Rules for the refreshed downstream handoff:
   manifestations, sibling paths, thin areas, or revised owning-seam hints
 - make the refreshed handoff absorb the subagent feedback so the next fixer run
   does not need to reverse-engineer the open seam from prose
-- trace the persisted handoff with `review_handoff_emitted` and keep its family
-  ids aligned with the final actionable-family set surfaced in `final_review`
+- trace the persisted handoff with `review_handoff_emitted` and keep its
+  family-id set aligned with the final actionable-family set surfaced in
+  `final_review`; ordering is not significant
 - do not drop a fixer-reported deferred family that still remains actionable; either carry it forward with structured context or explain why it was excluded
 - when a deferred family is carried forward without a new lane, let the helper
   normalize `closure_status`, `open_reason_kind`, and `carry_forward_context`
