@@ -16,6 +16,8 @@ and implementation state:
 - `host-adapters.md`
 - `codex-profile-integration.md`
 - `codex-run-recovery-mapping.md`
+- `current-work-review-packets.md`
+- `repo-local-quality-gates.md`
 
 ## Completed milestone docs
 
