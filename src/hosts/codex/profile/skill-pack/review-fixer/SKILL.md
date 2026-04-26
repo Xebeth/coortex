@@ -34,7 +34,9 @@ In those cases, use `$fixer-orchestrator`, `$coortex-review`, or
 - Stay inside one bounded repair unit.
 - Repair at the owning seam, not the nearest manifestation.
 - Prefer converging on an existing owner over adding new helper glue.
-- Lock behavior with targeted verification before and after repair.
+- Lock behavior with the touched project/package build, compile, or typecheck
+  gate and configured local quality gates first, then targeted verification
+  before and after repair.
 - When a current-work mini-surface packet is supplied, validate it and treat
   its review boundary and coverage rows as the shared implementer/reviewer
   contract for this repair.
@@ -65,15 +67,24 @@ python .codex/skills/coortex-review/scripts/review_state.py validate-current-wor
    If a current-work packet is present, keep the objective inside its review
    boundary unless the user explicitly expands scope.
 6. Implement the fix at the owning seam.
-7. Run targeted verification.
-8. Run bounded `$coortex-deslop` on the touched scope.
-9. Run bounded `$coortex-review` on the touched scope. If a current-work packet
+7. Identify and run the normal build/compile/typecheck command plus configured
+   local quality gates for the touched project, package, module, or equivalent
+   local unit before targeted tests.
+   Local quality gates include lint, format checks, static analysis, or IDE
+   inspection tools such as InspectCode when the repo uses them.
+   If that touched-unit build gate is red, hanging, or blocked, report
+   `verification-blocked` instead of claiming the slice is done.
+8. Run targeted verification only after the touched-unit build gate and local
+   quality gates are green or explicitly not applicable.
+9. Run bounded `$coortex-deslop` on the touched scope.
+10. Run bounded `$coortex-review` on the touched scope. If a current-work packet
    is in scope, pass it to `$coortex-review` and validate the returned
    `surface_checked` or `matrix_not_applicable` object with
    `.codex/skills/coortex-review/scripts/review_state.py
    validate-current-work-review-output`.
-10. Rerun targeted verification after any cleanup.
-11. Report the resulting state, residual risks, and any still-open adjacent
+11. Rerun the touched-unit build gate and configured local quality gates first,
+    then targeted verification, after any cleanup or review-driven edits.
+12. Report the resulting state, residual risks, and any still-open adjacent
     threads.
 
 ## Hard rules
@@ -87,6 +98,12 @@ python .codex/skills/coortex-review/scripts/review_state.py validate-current-wor
   surface and coverage rows the fixer used.
 - Do not treat a broad or ambiguous fix brief as if it were bounded enough; if
   the real work needs family synthesis or lane coordination, stop and redirect.
+- Do not treat targeted tests as sufficient closure evidence when the touched
+  project/package build, compile, or typecheck gate is red, hanging, skipped
+  without evidence, or not yet run.
+- Do not treat targeted tests as sufficient closure evidence when configured
+  local quality gates such as lint, static analysis, or InspectCode are red,
+  hanging, skipped without evidence, or not yet run.
 - Before adding a helper or new path, check whether the owning abstraction
   already exists.
 - Update tests and docs in the same slice when the repair changes an operator-

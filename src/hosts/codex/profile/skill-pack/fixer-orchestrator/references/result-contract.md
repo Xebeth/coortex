@@ -19,6 +19,8 @@ Required fields:
 - `tests_updated`
 - `docs_updated`
 - `verification`
+- `touched_build_gate`
+- `local_quality_gates`
 - `closure_status`
 - `open_reason_kind` when `closure_status` is not `family-closed`
 - `residual_risks`
@@ -53,7 +55,19 @@ Rules:
   - `grounding`
   - `defer_reason`
 - `verification` must include the concrete diagnostics/tests/build evidence that supports closure, and must distinguish targeted checks from broader suite checks.
+- `touched_build_gate` must identify the build, compile, typecheck, or
+  equivalent touched project/package gate that ran before targeted tests. Use a
+  structured status such as `green`, `red`, `blocked`, `hanging`, or
+  `skipped-not-applicable` with command, scope, and evidence.
+- `local_quality_gates` must identify configured local quality checks for the
+  touched unit, such as lint, format checks, static analysis, or InspectCode
+  when the repo uses them. When none exists, include a
+  `skipped-not-applicable` entry with concrete evidence.
 - `family-closed` is invalid if any executed verification is failing or hanging.
+- `family-closed` is invalid if `touched_build_gate.status` is `red`,
+  `blocked`, or `hanging`.
+- `family-closed` is invalid if any configured `local_quality_gates` entry is
+  `red`, `blocked`, or `hanging`.
 - `family-closed` requires the normal suite for the touched area to be green or explicitly proven not applicable.
 - If the current slice materially touched the family's owning seam or direct family paths, the family must remain in the handled-family results with an open `closure_status` when closure is incomplete. Do not move that family into `deferred_families`.
 - Use `unfinished-family-work` when the fixer started the family seam, improved one or more manifestations, but did not carry the family to its actual closure condition.
@@ -95,6 +109,8 @@ Per family:
 - `touched_write_set`
 - `touched_tests`
 - `touched_docs`
+- `touched_build_gate`
+- `local_quality_gates`
 - `closure_gate_checked`
 - `verification_blocker` when `claimed_closure_status` is `verification-blocked`
 - `reviewer_next_step` when the family remains actionable and a concrete reviewer-facing reevaluation or unblock step is known
@@ -113,6 +129,28 @@ Per `verification_blocker` block:
 - `blocking_failure_summary`
 - `probable_seam`
 - `reason_believed_separate`
+
+Per `touched_build_gate` block:
+- `command`
+- `scope`
+- `status`
+  - `green`
+  - `red`
+  - `blocked`
+  - `hanging`
+  - `skipped-not-applicable`
+- `evidence`
+
+Per `local_quality_gates` entry:
+- `name`
+- `command`
+- `status`
+  - `green`
+  - `red`
+  - `blocked`
+  - `hanging`
+  - `skipped-not-applicable`
+- `evidence`
 
 Per optional `reviewer_next_step` block:
 - `kind`
@@ -138,7 +176,21 @@ Rules:
 - `emergent_threads_followed` must reflect newly exposed threads that were actually incorporated into the fix slice using the structured entry shape above.
 - `emergent_threads_deferred` must reflect newly exposed threads that remain open for follow-up review or later fix work using the structured entry shape above.
 - `verification_run` must capture the concrete commands or checks used to justify the claim.
+- `verification_run` must show that the touched build/compile/typecheck gate
+  ran before targeted tests, or that no such gate is applicable.
+- `verification_run` must show configured local quality gates for the touched
+  unit, such as lint, static analysis, or InspectCode when present, ran before
+  targeted tests or were explicitly not applicable.
 - `verification_run` must make broader-suite status visible when `family-closed` or `verification-blocked` is claimed.
+- `family-closed` requires `touched_build_gate.status` to be `green` or
+  `skipped-not-applicable`; `skipped-not-applicable` requires concrete
+  evidence that the touched unit has no build/compile/typecheck gate.
+- If the touched-unit build gate is `red`, `blocked`, or `hanging`, use
+  `verification-blocked` or another open closure status rather than
+  `family-closed`.
+- If any configured local quality gate is `red`, `blocked`, or `hanging`, use
+  `verification-blocked` or another open closure status rather than
+  `family-closed`.
 - `residual_risks` must be explicit. Use `none` only when nothing material remains open.
 - When any input families were intentionally left for a later slice, also emit `deferred_families` using the deferred/refused-family contract below so targeted return review can preserve or reopen them structurally instead of rediscovering them from prose.
 - Emit this handoff for every claimed closure status, including `family-closed` and `verification-blocked`.

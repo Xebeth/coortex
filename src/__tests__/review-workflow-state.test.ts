@@ -710,6 +710,20 @@ test("build-carried-handoff normalizes broader cross-family defer context withou
               emergent_threads_followed: [],
               emergent_threads_deferred: [],
               residual_risks: [],
+              touched_build_gate: {
+                command: "npm run build",
+                scope: "touched package",
+                status: "green",
+                evidence: "ran before targeted tests"
+              },
+              local_quality_gates: [
+                {
+                  name: "static-analysis",
+                  command: "repo-configured static analysis",
+                  status: "green",
+                  evidence: "local quality gate ran before targeted tests"
+                }
+              ],
               verification_run: ["broader_suite_status: green"]
             }
           ],
@@ -2933,6 +2947,70 @@ test("fixer trace helper validates final-fix records before appending", async ()
   );
 });
 
+test("fixer trace helper blocks family-closed on red lane gates", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
+  const traceFile = join(tempDir, "coordinator.jsonl");
+
+  const invalid = await runPythonJson(fixResultStateScript, [
+    "append-trace",
+    "--trace-file",
+    traceFile,
+    "--record-json",
+    JSON.stringify({
+      run_id: "fixer-orchestrator-20260425T120000Z",
+      timestamp_utc: "2026-04-25T12:00:00Z",
+      skill: "fixer-orchestrator",
+      mode: "native-intake",
+      phase: "family_closeout",
+      review_target: { mode: "return-review", scope_summary: "test" },
+      family_id: "F-001",
+      write_set: ["src/a.ts"],
+      tests_updated: [],
+      docs_updated: [],
+      files_read: ["src/a.ts"],
+      docs_read: [],
+      searches_run: [],
+      commands_run: ["npm run build", "jb inspectcode"],
+      verification_run: [
+        "touched_build_gate: green before targeted tests",
+        "local_quality_gates: inspectcode red before targeted tests"
+      ],
+      touched_build_gate: {
+        command: "npm run build",
+        scope: "touched package",
+        status: "green",
+        evidence: "ran before targeted tests"
+      },
+      local_quality_gates: [
+        {
+          name: "inspectcode",
+          command: "jb inspectcode",
+          status: "red",
+          evidence: "static analysis found a compile/import error"
+        }
+      ],
+      emergent_threads_followed: [],
+      emergent_threads_deferred: [],
+      closure_status: "family-closed",
+      residual_risks: []
+    })
+  ]);
+
+  assert.equal(invalid.exitCode, 2);
+  const invalidJson = invalid.json as {
+    appended: boolean;
+    errors: string[];
+    status: string;
+  };
+  assert.equal(invalidJson.appended, false);
+  assert.equal(invalidJson.status, "error");
+  assert.ok(
+    invalidJson.errors.some((error) =>
+      error.includes("cannot claim family-closed") && error.includes("local_quality_gates")
+    )
+  );
+});
+
 test("fixer trace helper validates per-family return-review round counts", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-review-trace-"));
   const traceFile = join(tempDir, "coordinator.jsonl");
@@ -2998,6 +3076,20 @@ test("fixer trace helper validates per-family return-review round counts", async
       self_deslop_evidence: ["coortex-deslop completed"],
       lane_review_evidence: ["coortex-review-lane completed"],
       seam_residue_sweep_evidence: ["stale shim and removed-symbol sweep completed"],
+      final_touched_build_gate: {
+        command: "npm run build",
+        scope: "touched package",
+        status: "green",
+        evidence: "ran before targeted tests"
+      },
+      final_local_quality_gates: [
+        {
+          name: "static-analysis",
+          command: "repo-configured static analysis",
+          status: "green",
+          evidence: "local quality gate ran before targeted tests"
+        }
+      ],
       final_targeted_verification: ["node --test targeted"],
       excluded_unrelated_edits: []
     })
@@ -3189,7 +3281,154 @@ test("fixer trace helper rejects weak commit-ready evidence", async () => {
   assert.ok(errors.some((error) => error.includes("self_deslop_evidence") && error.includes("must not be empty")));
   assert.ok(errors.some((error) => error.includes("lane_review_evidence") && error.includes("must not be empty")));
   assert.ok(errors.some((error) => error.includes("seam_residue_sweep_evidence") && error.includes("must not be empty")));
+  assert.ok(errors.some((error) => error.includes("final_touched_build_gate") && error.includes("missing")));
+  assert.ok(errors.some((error) => error.includes("final_local_quality_gates") && error.includes("missing")));
   assert.ok(errors.some((error) => error.includes("final_targeted_verification") && error.includes("must not be empty")));
+});
+
+async function validateReviewReturnGateStatuses(options: {
+  tempPrefix: string;
+  touchedBuildGateStatus: string;
+  localQualityGateStatus: string;
+  localQualityGateName?: string;
+  localQualityGateCommand?: string;
+  localQualityGateEvidence?: string;
+  verificationRun: string[];
+}): Promise<{ exitCode: number; json: unknown; stdout: string; stderr: string }> {
+  const tempDir = await mkdtemp(join(tmpdir(), options.tempPrefix));
+  const reviewHandoffPath = join(tempDir, "review-handoff.json");
+  const reviewReturnHandoffPath = join(tempDir, "review-return-handoff.json");
+
+  await writeFile(
+    reviewHandoffPath,
+    JSON.stringify(
+      {
+        review_handoff: {
+          review_target: {
+            mode: "return-review",
+            scope_summary: "test"
+          },
+          families: [
+            {
+              family_id: "F-001",
+              title: "Gate evidence family",
+              review_hints: {
+                likely_owning_seam: "src/a.ts"
+              }
+            }
+          ]
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  await writeFile(
+    reviewReturnHandoffPath,
+    JSON.stringify(
+      {
+        review_return_handoff: {
+          original_review_target: {
+            mode: "return-review",
+            scope_summary: "test"
+          },
+          families: [
+            {
+              original_family_id: "F-001",
+              claimed_closure_status: "family-closed",
+              touched_write_set: ["src/a.ts"],
+              touched_tests: ["src/__tests__/a.test.ts"],
+              touched_docs: [],
+              closure_gate_checked: {
+                remediation_item: "fix owning seam",
+                satisfied_items: ["targeted symptom fixed"],
+                unsatisfied_items: "none"
+              },
+              emergent_threads_followed: [],
+              emergent_threads_deferred: [],
+              residual_risks: [],
+              touched_build_gate: {
+                command: "npm run build",
+                scope: "touched package",
+                status: options.touchedBuildGateStatus,
+                evidence: `build ${options.touchedBuildGateStatus} before targeted tests`
+              },
+              local_quality_gates: [
+                {
+                  name: options.localQualityGateName ?? "static-analysis",
+                  command: options.localQualityGateCommand ?? "repo-configured local quality gate",
+                  status: options.localQualityGateStatus,
+                  evidence:
+                    options.localQualityGateEvidence ??
+                    `local quality gate ${options.localQualityGateStatus} before targeted tests`
+                }
+              ],
+              verification_run: options.verificationRun
+            }
+          ],
+          deferred_families: "none"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  return runPythonJson(fixResultStateScript, [
+    "validate-review-return",
+    "--review-return-handoff",
+    reviewReturnHandoffPath,
+    "--review-handoff",
+    reviewHandoffPath
+  ]);
+}
+
+test("fixer review-return helper blocks family-closed on red touched build gate", async () => {
+  const invalid = await validateReviewReturnGateStatuses({
+    tempPrefix: "coortex-review-return-build-gate-",
+    touchedBuildGateStatus: "red",
+    localQualityGateStatus: "green",
+    verificationRun: [
+      "touched_build_gate: red before targeted tests",
+      "local_quality_gates: green before targeted tests",
+      "broader_suite_status: not-run-build-red"
+    ]
+  });
+
+  assert.equal(invalid.exitCode, 2);
+  const errors = (invalid.json as { errors: string[] }).errors;
+  assert.ok(
+    errors.some((error) =>
+      error.includes("cannot claim family-closed") && error.includes("touched_build_gate.status")
+    )
+  );
+});
+
+test("fixer review-return helper blocks family-closed on red local quality gate", async () => {
+  const invalid = await validateReviewReturnGateStatuses({
+    tempPrefix: "coortex-review-return-local-gate-",
+    touchedBuildGateStatus: "green",
+    localQualityGateName: "inspectcode",
+    localQualityGateCommand: "jb inspectcode",
+    localQualityGateStatus: "red",
+    localQualityGateEvidence: "static analysis found a compile/import error",
+    verificationRun: [
+      "touched_build_gate: green before targeted tests",
+      "local_quality_gates: inspectcode red before targeted tests",
+      "broader_suite_status: not-run-local-quality-red"
+    ]
+  });
+
+  assert.equal(invalid.exitCode, 2);
+  const errors = (invalid.json as { errors: string[] }).errors;
+  assert.ok(
+    errors.some((error) =>
+      error.includes("cannot claim family-closed") && error.includes("local_quality_gates")
+    )
+  );
 });
 
 test("fixer trace helper enforces clear gate and commit_ready before family_commit", async () => {
@@ -3256,6 +3495,20 @@ test("fixer trace helper enforces clear gate and commit_ready before family_comm
       self_deslop_evidence: ["coortex-deslop completed"],
       lane_review_evidence: ["coortex-review-lane completed"],
       seam_residue_sweep_evidence: ["stale shim and removed-symbol sweep completed"],
+      final_touched_build_gate: {
+        command: "npm run build",
+        scope: "touched package",
+        status: "green",
+        evidence: "ran before targeted tests"
+      },
+      final_local_quality_gates: [
+        {
+          name: "static-analysis",
+          command: "repo-configured static analysis",
+          status: "green",
+          evidence: "local quality gate ran before targeted tests"
+        }
+      ],
       final_targeted_verification: ["node --test targeted"],
       excluded_unrelated_edits: []
     })
@@ -3332,6 +3585,20 @@ test("fixer trace helper enforces clear gate and commit_ready before family_comm
       self_deslop_evidence: ["coortex-deslop completed"],
       lane_review_evidence: ["coortex-review-lane completed"],
       seam_residue_sweep_evidence: ["stale shim and removed-symbol sweep completed"],
+      final_touched_build_gate: {
+        command: "npm run build",
+        scope: "touched package",
+        status: "green",
+        evidence: "ran before targeted tests"
+      },
+      final_local_quality_gates: [
+        {
+          name: "static-analysis",
+          command: "repo-configured static analysis",
+          status: "green",
+          evidence: "local quality gate ran before targeted tests"
+        }
+      ],
       final_targeted_verification: ["node --test targeted"],
       excluded_unrelated_edits: []
     })

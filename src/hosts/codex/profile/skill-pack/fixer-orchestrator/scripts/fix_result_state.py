@@ -71,6 +71,8 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "searches_run": "list",
         "commands_run": "list",
         "verification_run": "list",
+        "touched_build_gate": "mapping",
+        "local_quality_gates": "list",
         "emergent_threads_followed": "list",
         "emergent_threads_deferred": "list",
         "closure_status": "string",
@@ -79,6 +81,8 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     "verification": {
         "family_id": "string",
         "verification_run": "list",
+        "touched_build_gate": "mapping",
+        "local_quality_gates": "list",
         "broader_suite_status": "string",
     },
     "return_review_loop": {
@@ -108,6 +112,8 @@ TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
         "self_deslop_evidence": "list",
         "lane_review_evidence": "list",
         "seam_residue_sweep_evidence": "list",
+        "final_touched_build_gate": "mapping",
+        "final_local_quality_gates": "list",
         "final_targeted_verification": "list",
         "excluded_unrelated_edits": "list",
     },
@@ -137,6 +143,16 @@ CLOSURE_STATUSES = {
     "verification-blocked",
     "family-closed",
 }
+
+TOUCHED_BUILD_GATE_STATUSES = {
+    "green",
+    "red",
+    "blocked",
+    "hanging",
+    "skipped-not-applicable",
+}
+
+LOCAL_QUALITY_GATE_STATUSES = TOUCHED_BUILD_GATE_STATUSES
 
 OPEN_REASON_KINDS = {
     "family-local-gap-remaining",
@@ -743,6 +759,39 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
     if phase in {"execution_plan", "family_closeout", "verification"} and "family_id" not in record:
         errors.append(f"{prefix} phase {phase!r} missing family_id")
 
+    if phase == "family_closeout":
+        closure_status = record.get("closure_status")
+        validate_touched_build_gate(
+            record.get("touched_build_gate"),
+            closure_status,
+            errors,
+            [],
+            f"{prefix} phase 'family_closeout'",
+        )
+        validate_local_quality_gates(
+            record.get("local_quality_gates"),
+            closure_status,
+            errors,
+            [],
+            f"{prefix} phase 'family_closeout'",
+        )
+
+    if phase == "verification":
+        validate_touched_build_gate(
+            record.get("touched_build_gate"),
+            record.get("closure_status"),
+            errors,
+            [],
+            f"{prefix} phase 'verification'",
+        )
+        validate_local_quality_gates(
+            record.get("local_quality_gates"),
+            record.get("closure_status"),
+            errors,
+            [],
+            f"{prefix} phase 'verification'",
+        )
+
     if phase == "closure_approved":
         family_ids = normalize_string_list(record.get("family_ids"))
         review_result = record.get("review_result")
@@ -789,8 +838,28 @@ def validate_trace_record(record: dict[str, Any]) -> list[str]:
             "self_deslop_evidence",
             "lane_review_evidence",
             "seam_residue_sweep_evidence",
+            "final_touched_build_gate",
+            "final_local_quality_gates",
             "final_targeted_verification",
         ):
+            if field == "final_touched_build_gate":
+                build_gate = record.get(field)
+                if not isinstance(build_gate, dict):
+                    errors.append(
+                        f"{prefix} phase 'commit_ready' field {field} must be a mapping"
+                    )
+                    continue
+                validate_touched_build_gate(build_gate, "family-closed", errors, [], f"{prefix} phase 'commit_ready'")
+                continue
+            if field == "final_local_quality_gates":
+                validate_local_quality_gates(
+                    record.get(field),
+                    "family-closed",
+                    errors,
+                    [],
+                    f"{prefix} phase 'commit_ready'",
+                )
+                continue
             if not as_list(record.get(field)):
                 errors.append(
                     f"{prefix} phase 'commit_ready' field {field} must not be empty"
@@ -955,6 +1024,95 @@ def validate_reviewer_next_step(
         )
 
 
+def validate_touched_build_gate(
+    gate: Any,
+    status: Any,
+    errors: list[str],
+    warnings: list[str],
+    prefix: str,
+) -> None:
+    if not isinstance(gate, dict):
+        errors.append(f"{prefix} must include touched_build_gate")
+        return
+
+    command = gate.get("command")
+    if not isinstance(command, str) or not command.strip():
+        errors.append(f"{prefix} touched_build_gate.command must be a non-empty string")
+
+    scope = gate.get("scope")
+    if not isinstance(scope, str) or not scope.strip():
+        errors.append(f"{prefix} touched_build_gate.scope must be a non-empty string")
+
+    gate_status = gate.get("status")
+    if not isinstance(gate_status, str) or gate_status not in TOUCHED_BUILD_GATE_STATUSES:
+        errors.append(
+            f"{prefix} touched_build_gate.status must be one of {sorted(TOUCHED_BUILD_GATE_STATUSES)}"
+        )
+        return
+
+    evidence = gate.get("evidence")
+    if not isinstance(evidence, str) or not evidence.strip():
+        errors.append(f"{prefix} touched_build_gate.evidence must be a non-empty string")
+
+    if status == "family-closed" and gate_status not in {"green", "skipped-not-applicable"}:
+        errors.append(
+            f"{prefix} cannot claim family-closed with touched_build_gate.status {gate_status!r}"
+        )
+    if gate_status == "skipped-not-applicable" and status == "family-closed":
+        warnings.append(
+            f"{prefix} claims family-closed with touched_build_gate "
+            "skipped-not-applicable; reviewer should verify that no touched "
+            "build/compile/typecheck gate exists"
+        )
+
+
+def validate_local_quality_gates(
+    gates: Any,
+    status: Any,
+    errors: list[str],
+    warnings: list[str],
+    prefix: str,
+) -> None:
+    if not isinstance(gates, list) or not gates:
+        errors.append(f"{prefix} must include non-empty local_quality_gates")
+        return
+
+    for index, gate in enumerate(gates, start=1):
+        gate_prefix = f"{prefix} local_quality_gates[{index}]"
+        if not isinstance(gate, dict):
+            errors.append(f"{gate_prefix} must be a mapping")
+            continue
+
+        name = gate.get("name")
+        if not isinstance(name, str) or not name.strip():
+            errors.append(f"{gate_prefix}.name must be a non-empty string")
+
+        command = gate.get("command")
+        if not isinstance(command, str) or not command.strip():
+            errors.append(f"{gate_prefix}.command must be a non-empty string")
+
+        gate_status = gate.get("status")
+        if not isinstance(gate_status, str) or gate_status not in LOCAL_QUALITY_GATE_STATUSES:
+            errors.append(
+                f"{gate_prefix}.status must be one of {sorted(LOCAL_QUALITY_GATE_STATUSES)}"
+            )
+            continue
+
+        evidence = gate.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            errors.append(f"{gate_prefix}.evidence must be a non-empty string")
+
+        if status == "family-closed" and gate_status not in {"green", "skipped-not-applicable"}:
+            errors.append(
+                f"{prefix} cannot claim family-closed with local_quality_gates[{index}].status {gate_status!r}"
+            )
+        if gate_status == "skipped-not-applicable" and status == "family-closed":
+            warnings.append(
+                f"{gate_prefix} is skipped-not-applicable; reviewer should "
+                "verify no configured local quality gate exists"
+            )
+
+
 def validate_family_entry(entry: dict[str, Any], errors: list[str], warnings: list[str]) -> None:
     family_id = str(require(entry, "original_family_id", errors, "family entry") or "")
     prefix = f"family {family_id or '<unknown>'}"
@@ -980,8 +1138,12 @@ def validate_family_entry(entry: dict[str, Any], errors: list[str], warnings: li
         "emergent_threads_deferred",
         "residual_risks",
         "verification_run",
+        "local_quality_gates",
     ):
         require(entry, field, errors, prefix)
+
+    validate_touched_build_gate(entry.get("touched_build_gate"), status, errors, warnings, prefix)
+    validate_local_quality_gates(entry.get("local_quality_gates"), status, errors, warnings, prefix)
 
     if status == "verification-blocked" and "verification_blocker" not in entry:
         errors.append(f"{prefix} uses verification-blocked without verification_blocker")

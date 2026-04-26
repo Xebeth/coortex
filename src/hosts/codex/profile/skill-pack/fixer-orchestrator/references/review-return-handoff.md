@@ -40,6 +40,16 @@ review_return_handoff:
           relationship_to_current_family: same-family
       emergent_threads_deferred: none
       residual_risks: none
+      touched_build_gate:
+        command: "normal build/compile/typecheck command for touched unit"
+        scope: "touched project/package/module"
+        status: green
+        evidence: "ran before targeted slice tests"
+      local_quality_gates:
+        - name: static-analysis
+          command: "repo-configured local quality gate, e.g. lint or InspectCode"
+          status: green
+          evidence: "ran before targeted slice tests"
       verification_run:
         - broader_suite_status: green via npm test
         - npm test -- structured-output
@@ -85,6 +95,24 @@ review_return_handoff:
   - `blocking_failure_summary`
   - `probable_seam`
   - `reason_believed_separate`
+- Every handled family entry must include `touched_build_gate` with the build,
+  compile, typecheck, or equivalent command for the touched project/package,
+  its scope, status, and evidence.
+- Every handled family entry must include `local_quality_gates` for configured
+  local repo quality checks on the touched unit, such as lint, format checks,
+  static analysis, or InspectCode when the repo uses them. When no local
+  quality gate is configured for the touched unit, include a
+  `skipped-not-applicable` entry with concrete evidence instead of omitting the
+  field.
+- `family-closed` requires `touched_build_gate.status` to be `green` or
+  `skipped-not-applicable`; `skipped-not-applicable` requires evidence that no
+  touched-unit build/compile/typecheck gate exists.
+- If the touched-unit build gate is `red`, `blocked`, or `hanging`, the lane
+  must return `verification-blocked` or another open status, not
+  `family-closed`.
+- If a configured local quality gate is `red`, `blocked`, or `hanging`, the
+  lane must return `verification-blocked` or another open status, not
+  `family-closed`.
 - When `claimed_closure_status` is `verification-blocked` and a concrete unblock action is known, `reviewer_next_step` is required.
 - `reviewer_next_step` should include:
   - `kind`
@@ -94,6 +122,11 @@ review_return_handoff:
   - `reevaluate_when`
 - `reviewer_next_step` is reviewer-facing reevaluation guidance, not implementation instructions for another fixer slice.
 - When `claimed_closure_status` is `family-closed` or `verification-blocked`, `verification_run` must make broader-suite status visible.
+- `verification_run` must show build/compile/typecheck-before-tests ordering
+  for the touched unit, or explicitly explain why no touched-unit build gate is
+  applicable.
+- `verification_run` must show local-quality-before-tests ordering for the
+  touched unit, or explicitly explain why no local quality gate is applicable.
 - Use `verification-blocked` when broader verification for the touched area is the remaining blocker but the family-local fix and targeted checks are otherwise in place.
 - `emergent_threads_followed` must capture new threads exposed during repair or verification that were incorporated into the same family or slice. Each entry should include:
   - `summary`

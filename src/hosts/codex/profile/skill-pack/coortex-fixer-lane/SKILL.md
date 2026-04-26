@@ -32,6 +32,13 @@ structured coordinated repair.
 - Preserve any current-work mini-surface packet supplied by the coordinator.
   Treat its review boundary and coverage rows as repair/review context, not
   optional prose.
+- Run the touched project/package build, compile, or typecheck gate before
+  targeted slice tests. Targeted tests do not substitute for a green build
+  gate.
+- Run configured local repo quality gates for the touched unit before handing
+  back results. Examples include lint, format checks, static analysis, or IDE
+  inspection tools such as InspectCode when the repo uses them. These are
+  lane-local gates, not repo-wide/full-suite gates.
 - Run lane-safe self-deslop and self-review before handing back results.
 - Emit `review_return_handoff` and never commit.
 
@@ -81,19 +88,33 @@ python ../fixer-orchestrator/scripts/fix_result_state.py validate-lane-continuat
 4. If a current-work packet is supplied, validate it and keep the repair inside
    its review boundary unless the coordinator explicitly expands the slice.
 5. Implement the bounded fix at the owning seam.
-6. Run targeted verification only.
-7. Run lane-local `$coortex-deslop`.
-8. Run lane-local `$coortex-review-lane`, not standalone `$coortex-review`.
+6. Identify the normal build/compile/typecheck command and configured local
+   quality gates for the touched unit from repo docs/config. Local quality
+   gates may include lint, format checks, static analysis, or IDE inspection
+   tools such as InspectCode when present.
+7. Run the normal build/compile/typecheck command for the touched project,
+   package, module, or equivalent local unit from repo docs/config before
+   targeted slice tests. If that touched-unit build gate is red, hanging, or
+   blocked, stop closure as `verification-blocked` and emit that evidence; do
+   not claim `family-closed`.
+8. Run configured local quality gates for the touched unit. If a configured
+   local quality gate is red, hanging, or blocked, stop closure as
+   `verification-blocked` or keep the family open with exact evidence.
+9. Run targeted slice tests only after the touched-unit build gate and local
+   quality gates are green or explicitly not applicable.
+10. Run lane-local `$coortex-deslop`.
+11. Run lane-local `$coortex-review-lane`, not standalone `$coortex-review`.
    Standalone `$coortex-review` correctly refuses while the parent
    fixer-orchestrator or review-orchestrator campaign owns the worktree, so it
    must not be used to satisfy worker self-review.
    If a current-work packet is in scope, pass it through and validate the
    lane-review output with
    `../coortex-review/scripts/review_state.py validate-current-work-review-output`.
-9. Rerun targeted verification only.
-10. Emit `review_return_handoff` for the coordinator, including packet-aware
+12. Rerun the touched-unit build gate and configured local quality gates first,
+    then targeted slice tests, after any cleanup or review-driven edits.
+13. Emit `review_return_handoff` for the coordinator, including packet-aware
     review evidence when a current-work packet was supplied.
-11. Stop. Do not commit.
+14. Stop. Do not commit.
 
 ## Hard rules
 
@@ -102,9 +123,24 @@ python ../fixer-orchestrator/scripts/fix_result_state.py validate-lane-continuat
 - Do not broaden into multi-family coordination.
 - Do not commit.
 - Do not run repo-wide, full-suite, or broader seam-level verification from
-  the lane by default. Lanes own targeted verification only; broader
+  the lane by default. Lanes own only touched-unit build/compile/typecheck,
+  configured local quality gates, and targeted verification; broader
   verification required for `family-closed` belongs to the coordinator's
   closure gate.
+- Do not report targeted tests as closure evidence until the touched
+  project/package build, compile, or typecheck gate has run first and is green
+  or explicitly not applicable.
+- Do not report targeted tests as closure evidence until configured local repo
+  quality gates for the touched unit have run and are green or explicitly not
+  applicable.
+- If the touched-unit build gate is red, hanging, or blocked, return
+  `verification-blocked` with the build command, scope, failure summary, and
+  why the blocker is believed separate if applicable. Do not round up to
+  `family-closed`.
+- If a configured local quality gate such as lint, static analysis, or
+  InspectCode is red, hanging, or blocked, return `verification-blocked` or
+  an open family status with exact gate evidence. Do not round up to
+  `family-closed`.
 - Do not self-certify family closure as final truth; targeted return review has
   final say.
 - Do not respawn yourself as a new lane when a valid continuation packet says

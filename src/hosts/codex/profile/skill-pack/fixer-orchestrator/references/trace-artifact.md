@@ -180,6 +180,8 @@ Include:
 - `self_deslop_evidence`
 - `lane_review_evidence`
 - `seam_residue_sweep_evidence`
+- `final_touched_build_gate`
+- `final_local_quality_gates`
 - `final_targeted_verification`
 - `excluded_unrelated_edits`
 
@@ -187,7 +189,13 @@ Rules:
 - append `commit_ready` only after the latest `pre_commit_gate_result` for the
   same family set is `clear`
 - reviewer approval, green gate reruns, `git diff --check`, narrow greps, and
-  passing targeted suites are not sufficient `readiness_basis` by themselves
+  passing targeted suites are not sufficient `readiness_basis` by themselves;
+  the touched project/package build, compile, or typecheck gate must be green
+  or explicitly not applicable before targeted-test evidence can support
+  readiness
+- configured local quality gates for the touched unit, such as lint, static
+  analysis, or InspectCode, must be green or explicitly not applicable before
+  targeted-test evidence can support readiness
 - use `excluded_unrelated_edits` to record unrelated edits produced by
   coordinator-side gates that were left uncommitted and excluded from the
   current atomic commit
@@ -234,6 +242,8 @@ Include:
 - `searches_run`
 - `commands_run`
 - `verification_run`
+- `touched_build_gate`
+- `local_quality_gates`
 - `emergent_threads_followed`
 - `emergent_threads_deferred`
 - `closure_status`
@@ -247,8 +257,19 @@ on, not every incidental read.
 Include:
 - `family_id`
 - `verification_run`
+- `touched_build_gate`
+- `local_quality_gates`
 - `broader_suite_status`
 - `verification_blocker` when applicable
+
+Rules:
+- record touched project/package build, compile, or typecheck evidence before
+  test-suite evidence
+- record local quality gate evidence before test-suite evidence
+- do not record `family-closed` when `touched_build_gate` is red, hanging, or
+  blocked
+- do not record `family-closed` when any configured local quality gate is red,
+  hanging, or blocked
 
 ## Final-fix record
 

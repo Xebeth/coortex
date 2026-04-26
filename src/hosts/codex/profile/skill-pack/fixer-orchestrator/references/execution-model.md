@@ -104,11 +104,21 @@ Every repair lane must:
 - prefer convergence on an existing owning seam over adding local helper plumbing
 - remove stale or conflicting paths when the root cause shows split-brain logic
 - update tests and docs when the closure gate requires it
+- identify the normal build/compile/typecheck command for the touched project,
+  package, module, or equivalent local unit
+- identify configured local quality gates for the touched unit, such as lint,
+  format checks, static analysis, or InspectCode when the repo uses them
+- run that touched-unit build gate before targeted slice tests
+- run configured local quality gates before targeted slice tests
 - verify the fix against the closure gate before reporting closure
 - lock the family locally with targeted verification before reporting lane output
 - do not run the repo's normal verification for the touched area from every
   lane by default; broader verification required for `family-closed` belongs to
   the coordinator closure gate
+- do not use targeted tests to override a red, hanging, blocked, or missing
+  touched-unit build gate
+- do not use targeted tests to override red, hanging, blocked, or missing local
+  quality gates
 - if broader verification is already known red or hanging from existing
   evidence, surface that as blocker context instead of rounding up the family
   locally
@@ -123,7 +133,15 @@ Each repair lane is owned by one worker and stays attached to that worker until
 the family is terminal.
 
 Rules:
-- the worker lane owns targeted verification only
+- the worker lane owns touched-unit build/compile/typecheck, configured local
+  quality gates, and targeted verification only
+- run the touched-unit build gate before targeted slice tests
+- run configured local quality gates before targeted slice tests
+- if the touched-unit build gate is red, hanging, or blocked, emit
+  `verification-blocked` evidence instead of claiming `family-closed`
+- if a configured local quality gate is red, hanging, or blocked, emit
+  `verification-blocked` or open-family evidence instead of claiming
+  `family-closed`
 - do not run repo-wide/full-suite broader verification in every lane by default
 - the fixer coordinator owns broader verification required for `family-closed`
 - after the worker implements the slice, it must run lane-local
@@ -133,7 +151,8 @@ Rules:
     and require `surface_checked` or `matrix_not_applicable` output validated
     by `.codex/skills/coortex-review/scripts/review_state.py
     validate-current-work-review-output`
-- the worker reruns targeted verification after that self-cleanup
+- the worker reruns the touched-unit build gate and configured local quality
+  gates first, then targeted verification, after that self-cleanup
 - the worker emits `review_return_handoff`
 - the worker does **not** commit
 - do not substitute standalone `$coortex-review` for that worker self-review,
@@ -141,15 +160,24 @@ Rules:
   campaign still owns the worktree
 
 The fixer coordinator then:
+- checks that the lane's `review_return_handoff` includes touched-unit
+  build-gate evidence before targeted-test evidence; if not, it sends the work
+  back to the same implementer lane instead of asking review to approve closure
+- checks that the lane's `review_return_handoff` includes configured local
+  quality-gate evidence for the touched unit; if not, it sends the work back
+  to the same implementer lane
 - invokes `$review-orchestrator` in targeted return-review mode
 - supplies the original `review_handoff`, the worker's
   `review_return_handoff`, and the actual diff
 - supplies the current-work packet context when one exists, so targeted return
   review can apply the same mini-surface boundary and row accounting
 - waits for the reviewer result before deciding the next step
-- runs the broader/normal verification gate for the touched area when closure
-  requires it, instead of pushing that full-suite responsibility into every
-  worker lane
+- after reviewer approval, runs the broader/normal verification gate for the
+  touched area when closure requires it, instead of pushing that full-suite
+  responsibility into every worker lane
+- orders coordinator quality gates so build/compile/typecheck and configured
+  local quality gates run before test suites and full-suite verification, when
+  required, runs last
 - treats red or hanging broader verification as a blocker to `family-closed`
   and uses `verification-blocked` when the family-local fix and targeted checks
   are otherwise in place
@@ -181,6 +209,10 @@ If return review approves closure:
     - when a current-work packet is in scope, include it and validate the
       review gate's `surface_checked` / `matrix_not_applicable` output with
       the `$coortex-review` helper
+  - touched-area build/compile/typecheck before any test suites
+  - touched-area local quality gates such as lint, static analysis, or
+    InspectCode when configured
+  - full-suite verification last when the branch/workflow requires it
 - append `pre_commit_gate_result` for that gate outcome
 - if the gate finds cleanup-only residue, send back one consolidated
   `commit-ready cleanup sweep` to the same implementer lane instead of
@@ -191,7 +223,8 @@ If return review approves closure:
 - append `commit_ready` only after the latest `pre_commit_gate_result` for
   that family set is clear
 - `commit_ready` must include explicit self-deslop evidence, lane-safe
-  self-review evidence, seam-residue sweep evidence, final targeted
+  self-review evidence, seam-residue sweep evidence, final touched-unit build
+  gate evidence, final local quality-gate evidence, final targeted
   verification, and any unrelated edits intentionally excluded from the atomic
   commit
 - append a `family_commit` trace record with per-family

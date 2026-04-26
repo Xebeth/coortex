@@ -349,7 +349,12 @@ test("fixer verification boundary keeps broader suites on the coordinator", asyn
 
   for (const path of laneFiles) {
     const content = await readFile(path, "utf8");
-    assert.match(content, /targeted verification only|do not run repo-wide|do not run .*full-suite|broader verification .* belongs to the coordinator/i, path);
+    assert.match(
+      content,
+      /do not run repo-wide|do not run .*full-suite|broader verification .* belongs to the coordinator/i,
+      path
+    );
+    assert.doesNotMatch(content, /lanes own targeted verification only|run targeted verification only/i, path);
   }
 
   const coordinatorFiles = [
@@ -361,6 +366,65 @@ test("fixer verification boundary keeps broader suites on the coordinator", asyn
     const content = await readFile(path, "utf8");
     assert.match(content, /broader verification[\s\S]*coordinator|normal suite[\s\S]*coordinator|do not have every lane run/i, path);
   }
+});
+
+test("fixer workflows require local gates before targeted tests", async () => {
+  const laneFiles = [
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of laneFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /build,\s+compile,?\s+or typecheck|build,\s+compile,\s+typecheck|build\/compile\/typecheck/i, path);
+    assert.match(content, /local quality|InspectCode|static analysis|lint/i, path);
+    assert.match(content, /before\s+targeted/i, path);
+    assert.match(content, /verification-blocked/i, path);
+  }
+
+  const coordinatorFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/result-contract.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/review-return-handoff.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/trace-artifact.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of coordinatorFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /touched[- ](?:unit|project|area)|touched_build_gate|final_touched_build_gate/i, path);
+    assert.match(content, /local quality|local_quality_gates|final_local_quality_gates|InspectCode/i, path);
+    assert.match(content, /build,\s+compile,?\s+or typecheck|build,\s+compile,\s+typecheck|build\/compile\/typecheck/i, path);
+    assert.match(content, /before (?:targeted|test[- ]suite|any test|tests)/i, path);
+  }
+
+  const orderingFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of orderingFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /full[- ]suite.*last|full test suite last/i, path);
+  }
+
+  const fixerHelper = await readFile(
+    resolve(
+      process.cwd(),
+      "src/hosts/codex/profile/skill-pack/fixer-orchestrator/scripts/fix_result_state.py"
+    ),
+    "utf8"
+  );
+  assert.match(fixerHelper, /TOUCHED_BUILD_GATE_STATUSES/);
+  assert.match(fixerHelper, /LOCAL_QUALITY_GATE_STATUSES/);
+  assert.match(fixerHelper, /touched_build_gate/);
+  assert.match(fixerHelper, /local_quality_gates/);
+  assert.match(fixerHelper, /final_touched_build_gate/);
+  assert.match(fixerHelper, /final_local_quality_gates/);
 });
 
 test("fixer lanes require lane-safe self-review under parent campaigns", async () => {

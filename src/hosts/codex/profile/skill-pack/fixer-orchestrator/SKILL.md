@@ -90,16 +90,24 @@ validation by hand.
    - keep one worker attached to that lane until the family reaches a terminal
      state
    - implement the fix by editing code, tests, and docs at the owning seam
-   - run targeted verification only
+   - identify and run the touched project/package build, compile, or typecheck
+     gate and configured local quality gates first, then targeted slice tests
+     only
    - run lane-local `$coortex-deslop`
    - run lane-local `$coortex-review-lane`; if a current-work packet is in
      scope, pass it through and require the lane review output to validate as
      `surface_checked` or `matrix_not_applicable`
-   - rerun targeted verification only
+   - rerun the touched-unit build gate and configured local quality gates
+     first, then targeted slice tests, after any cleanup or review-driven edits
    - emit a mandatory `review_return_handoff`
 10. The fixer coordinator must send every lane result through
     `$review-orchestrator` targeted return review using the original
     `review_handoff`, the lane's `review_return_handoff`, and the actual diff.
+    If the lane output lacks touched-unit build-gate evidence before targeted
+    tests, treat the lane output as incomplete and send it back to the same
+    implementer lane instead of asking review to approve closure.
+    If the lane output lacks configured local quality-gate evidence for the
+    touched unit, treat it the same way.
 11. If targeted return review approves the family closure, run an explicit
     coordinator-side **read-only** pre-commit gate over the final approved
     diff and append a `closure_approved` trace record for the approved family
@@ -108,6 +116,12 @@ validation by hand.
     - bounded `$coortex-review`, including the current-work packet when one
       exists and validating its `surface_checked` / `matrix_not_applicable`
       output with the review helper
+    - touched-area build/compile/typecheck plus configured local repo quality
+      gates, such as lint, static analysis, or InspectCode when configured,
+      before any test suite
+    - normal repo test command for the touched area after those gates
+    - full test suite last when the branch/workflow requires it, and only
+      after the touched-unit build gate is green
     - rerun verification only if the same implementer lane had to make follow-up
       changes after the gate handed back new work
 12. Append `pre_commit_gate_result` for that gate outcome. If the gate finds
@@ -159,7 +173,17 @@ validation by hand.
   or standalone review-orchestrator campaign in the same worktree.
 - If closure evidence is incomplete, prefer `family-partially-closed` or `verification-blocked` and explicit residual risk over overstating closure.
 - Do not claim `family-closed` while the repo's normal verification for the touched area is red or hanging.
-- Before `family-closed`, run the repo's normal test command for the touched project/package when feasible. Targeted tests alone are not enough if the broader seam-level suite is still red, hanging, or skipped unless it is truly not applicable.
+- Before `family-closed`, run the touched project/package build, compile, or
+  typecheck gate first, then the repo's normal test command for the touched
+  project/package when feasible. Targeted tests alone are not enough if the
+  touched-unit build gate or broader seam-level suite is still red, hanging,
+  or skipped unless it is truly not applicable.
+- Do not run full-suite or broader tests before the touched-unit build,
+  compile, or typecheck gate is green. Build/typecheck failures block closure;
+  they are not post-review surprises.
+- Do not treat targeted tests as enough when configured local repo quality
+  gates for the touched unit, such as lint, static analysis, or InspectCode,
+  are red, hanging, skipped without evidence, or not yet run.
 - Do not use supposedly unrelated red or hanging broader verification as an excuse to round up to `family-closed`.
 - Use `verification-blocked` when the family-level fix and targeted checks are in place but required broader verification for the touched area cannot be shown green because of a separate blocker in that broader suite.
 - When using `verification-blocked`, record the blocking suite, blocking failure summary, probable seam, and why the blocker is believed separate from the repaired family.
@@ -172,8 +196,9 @@ validation by hand.
 - Do not rely on inherited thread context for repair lanes. Pass only the scoped family/slice prompt plus the relevant `review_handoff` and closure-gate data.
 - Do not let a worker lane commit. Commits are coordinator-only after
   independent targeted return review approves closure.
-- Worker lanes own targeted verification only. Do not have every lane run the
-  repo-wide or broader seam-level suite in parallel; broader verification
+- Worker lanes own touched-unit build/compile/typecheck, configured local
+  quality gates, and targeted verification only. Do not have every lane run
+  the repo-wide or broader seam-level suite in parallel; broader verification
   required for `family-closed` is coordinator-owned.
 - Do not let the fixer coordinator self-certify closure. Independent review is
   provided by `$review-orchestrator` targeted return review.
@@ -189,10 +214,11 @@ validation by hand.
   as separate traceable states. Record them with `closure_approved`,
   `pre_commit_gate_result`, and `commit_ready` before any `family_commit`.
 - `commit_ready` must include explicit self-deslop evidence, lane-safe
-  self-review evidence, seam-residue sweep evidence, final targeted
-  verification, and any excluded unrelated edits. Reviewer approval, green gate
-  reruns, `git diff --check`, narrow greps, and passing targeted suites are not
-  sufficient by themselves.
+  self-review evidence, seam-residue sweep evidence, final touched-unit build
+  gate evidence, final local quality-gate evidence, final targeted
+  verification, and any excluded unrelated edits.
+  Reviewer approval, green gate reruns, `git diff --check`, narrow greps, and
+  passing targeted suites are not sufficient by themselves.
 - Do not append `family_commit` unless the same family set already has a clear
   `pre_commit_gate_result` and an explicit `commit_ready` record.
 - The fixer coordinator is read-only with respect to repo content. It must not
@@ -269,6 +295,10 @@ Use `references/intake-and-normalization.md`.
   genuine blocker forces the lane terminal.
 - Each worker lane must run lane-local `$coortex-deslop` and lane-local
   `$coortex-review-lane` before handing results back to the coordinator.
+- Each worker lane must run the touched project/package build, compile, or
+  typecheck gate plus configured local quality gates before its targeted
+  tests, and must rerun that same ordering after cleanup or review-driven
+  edits.
 - Worker self-review must not fall back to standalone `$coortex-review`,
   because standalone review correctly refuses while the parent fixer or review
   campaign owns the worktree.
