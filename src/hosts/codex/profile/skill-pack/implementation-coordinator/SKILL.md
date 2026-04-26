@@ -80,6 +80,34 @@ Treat helper validation as authoritative. If packet or review-output validation
 fails, stop with a protocol error for that phase and fix the artifact instead
 of reconstructing matrix checks by hand.
 
+Use the skill-local implementation helper for implementation-coordinator
+artifact paths, handoff intake, and closeout accounting. These exact commands
+are the canonical protocol for implementation-coordinator artifacts:
+
+```bash
+python .codex/skills/implementation-coordinator/scripts/implementation_state.py paths \
+  --project-root . \
+  --run-id <run-id>
+
+python .codex/skills/implementation-coordinator/scripts/implementation_state.py validate-handoff \
+  --packet-file <packet.json> \
+  --handoff-file <implementation-handoff.json>
+
+python .codex/skills/implementation-coordinator/scripts/implementation_state.py validate-closeout \
+  --closeout-file <closeout.json>
+
+python .codex/skills/implementation-coordinator/scripts/implementation_state.py write-closeout \
+  --project-root . \
+  --run-id <run-id> \
+  --input <closeout.json>
+```
+
+The implementation helper owns only current-work artifact paths and artifact
+validation under `.coortex/current-work/<run-id>/`. It is not a runtime-owned
+lane, review, proposal, or lock state system. Treat helper failures as protocol
+errors for the current phase; fix the artifact instead of replacing the helper
+check with prose.
+
 Before starting in a worktree, also use the `$coortex-review` helper to check
 for an active top-level review/fix campaign lock. Do not start a standalone
 implementation workflow over a live mutating orchestrator campaign.
@@ -97,6 +125,8 @@ implementation workflow over a live mutating orchestrator campaign.
    - If the request is actually a defect-family repair from a `review_handoff`,
      redirect to `$fixer-orchestrator`.
 3. **Draft the current-work packet**
+   - Run `implementation_state.py paths` to get the canonical packet, review,
+     handoff, closeout, and gate artifact paths for the run.
    - Include surface, review boundary, seams, invariants, coverage rows,
      reviewer focus, and known uncertainties.
    - Use baseline-compatible surface vocabulary from
@@ -129,6 +159,8 @@ implementation workflow over a live mutating orchestrator campaign.
    - Include packet path, slice id, changed files, owning seam, scope evidence,
      coverage-row evidence, gate evidence, tests, self-deslop/self-review
      result, deferred threads, and residual risks.
+   - Run `implementation_state.py validate-handoff` with the approved packet
+     before coordinator intake. Missing packet-row evidence is a protocol error.
    - Reject bare "done" or summary-only completion output for non-trivial work.
 8. **Coordinator intake gate**
    - Mechanically check the handoff before return review:
@@ -164,6 +196,9 @@ implementation workflow over a live mutating orchestrator campaign.
       edits.
 11. **Closeout accounting**
     - Use `references/closeout-report.md` before reporting completion.
+    - Validate the closeout with `implementation_state.py validate-closeout`,
+      or write it to the canonical path with `implementation_state.py
+      write-closeout`.
     - Report produced artifacts, explicit claims, evidence, continuation rounds,
       earliest ready point, residual risks, and commit/install disposition.
     - If a commit or install happens after a closeout draft, update the closeout

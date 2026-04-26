@@ -9,6 +9,19 @@ A bare completion summary such as "done" is not a valid handoff. The
 coordinator must reject summary-only or missing handoffs before return review
 and send the work back to the same implementation lane.
 
+For JSON artifacts, validate this contract with the installed skill-local
+helper before coordinator intake:
+
+```bash
+python .codex/skills/implementation-coordinator/scripts/implementation_state.py validate-handoff \
+  --packet-file <packet.json> \
+  --handoff-file <implementation-handoff.json>
+```
+
+Helper validation is authoritative for required fields and packet coverage-row
+accounting. If it fails, fix the handoff or send the slice back to the same
+implementation lane; do not ask return review to infer missing evidence.
+
 ## Required handoff fields
 
 The handoff should stay compact, but it must make readiness auditable:

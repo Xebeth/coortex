@@ -9,6 +9,24 @@ Do not close with only a verdict such as "done" or "approved". The closeout
 must make the run auditable from artifacts, evidence, and explicit remaining
 state.
 
+For JSON artifacts, validate or write this contract with the installed
+skill-local helper:
+
+```bash
+python .codex/skills/implementation-coordinator/scripts/implementation_state.py validate-closeout \
+  --closeout-file <closeout.json>
+
+python .codex/skills/implementation-coordinator/scripts/implementation_state.py write-closeout \
+  --project-root . \
+  --run-id <run-id> \
+  --input <closeout.json>
+```
+
+`write-closeout` validates first and then writes to the canonical
+`.coortex/current-work/<run-id>/closeout.json` path. Helper validation is
+authoritative; a failed closeout is a protocol error, not something to paper
+over in prose.
+
 ## Required closeout fields
 
 Keep the final report concise, but include:
@@ -32,6 +50,10 @@ Keep the final report concise, but include:
     applicable`
 - `residual_risks`
   - explicit remaining risks, deferred threads, or `none`
+
+When using JSON helper validation, represent these fields as arrays of strings:
+`produced_artifacts`, `explicit_claims`, and `evidence` must be non-empty;
+`continuation_rounds` and `residual_risks` may be empty arrays when none apply.
 
 ## Commit and no-git workflows
 

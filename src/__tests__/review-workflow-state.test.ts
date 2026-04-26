@@ -27,6 +27,10 @@ const aiSlopCleanerStateScript = resolve(
   process.cwd(),
   "src/hosts/codex/profile/skill-pack/coortex-deslop/scripts/deslop_state.py"
 );
+const implementationCoordinatorStateScript = resolve(
+  process.cwd(),
+  "src/hosts/codex/profile/skill-pack/implementation-coordinator/scripts/implementation_state.py"
+);
 
 function parseJsonOutput(raw: string | undefined): unknown {
   if (raw == null || raw.trim() === "") {
@@ -493,6 +497,255 @@ test("coortex deslop helper rejects malformed expect specs", async () => {
   assert.equal(result.exitCode, 1);
   assert.equal(result.stdout, "");
   assert.match(result.stderr, /Invalid expect code/);
+});
+
+test("implementation coordinator helper emits current-work artifact paths", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-implementation-"));
+
+  const result = await runPythonJson(implementationCoordinatorStateScript, [
+    "paths",
+    "--project-root",
+    tempDir,
+    "--run-id",
+    "implementation-trace-helper"
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  const json = result.json as {
+    run_id: string;
+    project_root: string;
+    trace_dir: string;
+    packet_path: string;
+    spec_review_path: string;
+    implementation_handoff_path: string;
+    return_review_path: string;
+    closeout_path: string;
+    gate_dir: string;
+  };
+  assert.equal(json.run_id, "implementation-trace-helper");
+  assert.equal(json.project_root, tempDir);
+  assert.equal(json.trace_dir, join(".coortex", "current-work", "implementation-trace-helper"));
+  assert.equal(json.packet_path, join(json.trace_dir, "packet.json"));
+  assert.equal(json.spec_review_path, join(json.trace_dir, "spec-review-output.json"));
+  assert.equal(json.implementation_handoff_path, join(json.trace_dir, "implementation-handoff.json"));
+  assert.equal(json.return_review_path, join(json.trace_dir, "return-review-output.json"));
+  assert.equal(json.closeout_path, join(json.trace_dir, "closeout.json"));
+  assert.equal(json.gate_dir, join(json.trace_dir, "gates"));
+});
+
+test("implementation coordinator helper validates handoff coverage against packet rows", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-implementation-"));
+  const packetPath = join(tempDir, "packet.json");
+  const handoffPath = join(tempDir, "implementation-handoff.json");
+
+  await writeFile(
+    packetPath,
+    JSON.stringify(
+      {
+        mini_surface_review_packet: {
+          packet_id: "current-work-helper-test",
+          coverage_matrix: {
+            rows: [
+              { row_id: "canonical-paths" },
+              { row_id: "handoff-validation" }
+            ]
+          }
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  await writeFile(
+    handoffPath,
+    JSON.stringify(
+      {
+        implementation_handoff: {
+          packet_path: packetPath,
+          slice_id: "current-work-helper-test",
+          status: "implemented",
+          changed_files: [
+            "src/hosts/codex/profile/skill-pack/implementation-coordinator/scripts/implementation_state.py"
+          ],
+          owning_seam: "implementation-coordinator current-work helper",
+          scope_evidence: {
+            inside_packet_scope: true,
+            out_of_scope_changes: []
+          },
+          coverage_row_evidence: [
+            { row_id: "canonical-paths", evidence: "paths command tested", gaps: "none" },
+            { row_id: "handoff-validation", evidence: "valid and invalid handoffs tested", gaps: "none" }
+          ],
+          verification: {
+            build_or_typecheck: "npm run build",
+            local_quality_gates: "git diff --check",
+            targeted_tests: "node --test dist/__tests__/review-workflow-state.test.js",
+            broader_tests_if_required: "not required"
+          },
+          self_deslop: "complete",
+          self_review: "complete",
+          deferred_threads: "none",
+          residual_risks: "none"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const valid = await runPythonJson(implementationCoordinatorStateScript, [
+    "validate-handoff",
+    "--packet-file",
+    packetPath,
+    "--handoff-file",
+    handoffPath
+  ]);
+
+  assert.equal(valid.exitCode, 0);
+  const validJson = valid.json as { valid: boolean; coverage_row_ids: string[] };
+  assert.equal(validJson.valid, true);
+  assert.deepEqual(validJson.coverage_row_ids, ["canonical-paths", "handoff-validation"]);
+
+  const invalidPath = join(tempDir, "invalid-handoff.json");
+  await writeFile(
+    invalidPath,
+    JSON.stringify(
+      {
+        implementation_handoff: {
+          packet_path: packetPath,
+          slice_id: "current-work-helper-test",
+          status: "implemented",
+          changed_files: ["src/example.ts"],
+          owning_seam: "implementation-coordinator current-work helper",
+          scope_evidence: {
+            inside_packet_scope: true,
+            out_of_scope_changes: []
+          },
+          coverage_row_evidence: [
+            { row_id: "canonical-paths", evidence: "paths command tested", gaps: "none" },
+            { row_id: "unknown-row", evidence: "unexpected evidence", gaps: "none" }
+          ],
+          verification: {
+            build_or_typecheck: "npm run build",
+            local_quality_gates: "git diff --check",
+            targeted_tests: "node --test dist/__tests__/review-workflow-state.test.js",
+            broader_tests_if_required: "not required"
+          },
+          self_deslop: "complete",
+          self_review: "complete",
+          deferred_threads: "none",
+          residual_risks: "none"
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const invalid = await runPythonJson(implementationCoordinatorStateScript, [
+    "validate-handoff",
+    "--packet-file",
+    packetPath,
+    "--handoff-file",
+    invalidPath
+  ]);
+  assert.equal(invalid.exitCode, 1);
+  const invalidJson = invalid.json as { valid: boolean; errors: string[] };
+  assert.equal(invalidJson.valid, false);
+  assert.match(invalidJson.errors.join("\n"), /missing coverage row evidence: handoff-validation/);
+  assert.match(invalidJson.errors.join("\n"), /unknown coverage row evidence: unknown-row/);
+});
+
+test("implementation coordinator helper validates and writes closeouts", async () => {
+  const tempDir = await mkdtemp(join(tmpdir(), "coortex-implementation-"));
+  const closeoutPath = join(tempDir, "closeout-input.json");
+
+  await writeFile(
+    closeoutPath,
+    JSON.stringify(
+      {
+        closeout_report: {
+          produced_artifacts: ["packet.json", "implementation-handoff.json"],
+          explicit_claims: ["Implementation helper validates current-work artifacts."],
+          evidence: ["node --test dist/__tests__/review-workflow-state.test.js"],
+          continuation_rounds: [],
+          first_ready_point: "after return-review approval",
+          commit_or_install_disposition: "not requested",
+          residual_risks: []
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const valid = await runPythonJson(implementationCoordinatorStateScript, [
+    "validate-closeout",
+    "--closeout-file",
+    closeoutPath
+  ]);
+
+  assert.equal(valid.exitCode, 0);
+  assert.deepEqual(valid.json, { errors: [], valid: true });
+
+  const written = await runPythonJson(implementationCoordinatorStateScript, [
+    "write-closeout",
+    "--project-root",
+    tempDir,
+    "--run-id",
+    "implementation-trace-helper",
+    "--input",
+    closeoutPath
+  ]);
+
+  assert.equal(written.exitCode, 0);
+  const writtenJson = written.json as { path: string; valid: boolean; written: boolean };
+  assert.equal(writtenJson.valid, true);
+  assert.equal(writtenJson.written, true);
+  assert.equal(writtenJson.path, join(".coortex", "current-work", "implementation-trace-helper", "closeout.json"));
+  const persisted = JSON.parse(await readFile(join(tempDir, writtenJson.path), "utf8")) as {
+    closeout_report: { explicit_claims: string[] };
+  };
+  assert.deepEqual(persisted.closeout_report.explicit_claims, [
+    "Implementation helper validates current-work artifacts."
+  ]);
+
+  const invalidPath = join(tempDir, "invalid-closeout.json");
+  await writeFile(
+    invalidPath,
+    JSON.stringify(
+      {
+        closeout_report: {
+          produced_artifacts: [],
+          explicit_claims: ["Incomplete closeout."],
+          evidence: [],
+          continuation_rounds: [],
+          first_ready_point: "",
+          commit_or_install_disposition: "not requested",
+          residual_risks: []
+        }
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const invalid = await runPythonJson(implementationCoordinatorStateScript, [
+    "validate-closeout",
+    "--closeout-file",
+    invalidPath
+  ]);
+  assert.equal(invalid.exitCode, 1);
+  const invalidJson = invalid.json as { valid: boolean; errors: string[] };
+  assert.equal(invalidJson.valid, false);
+  assert.match(invalidJson.errors.join("\n"), /produced_artifacts/);
+  assert.match(invalidJson.errors.join("\n"), /evidence/);
+  assert.match(invalidJson.errors.join("\n"), /first_ready_point/);
 });
 
 test("return review helper marks scope-excluded non-started families as dormant and excludes them from the refreshed handoff by default", async () => {

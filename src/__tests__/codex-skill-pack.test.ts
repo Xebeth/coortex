@@ -334,6 +334,51 @@ test("script-using managed skills treat helper steps as canonical protocol", asy
   }
 });
 
+test("implementation coordinator exposes its skill-local artifact helper", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/references/implementation-handoff.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/references/closeout-report.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /scripts\/implementation_state\.py/i, path);
+  }
+
+  const handoffFiles = [
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/references/implementation-handoff.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of handoffFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /validate-handoff/i, path);
+  }
+
+  const closeoutFiles = [
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/references/closeout-report.md"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of closeoutFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /validate-closeout/i, path);
+  }
+
+  const skill = await readFile(
+    resolve(process.cwd(), "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md"),
+    "utf8"
+  );
+  assert.match(skill, /\bpaths\b/i);
+  assert.match(skill, /write-closeout/i);
+  assert.match(skill, /current-work artifact paths/i);
+  assert.match(skill, /not a runtime-owned\s+lane, review, proposal, or lock state system/i);
+});
+
 test("fixer orchestrator explicitly requires same-worker continuation semantics", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
