@@ -16,6 +16,8 @@ Good fits:
 - one grounded family or symptom cluster that does not need coordinated lanes
 - one prompt-driven repair where the write scope and closure target are already
   reasonably bounded
+- one bounded implementation repair accompanied by a current-work mini-surface
+  packet
 
 Do not use this skill when the fix needs:
 
@@ -33,6 +35,9 @@ In those cases, use `$fixer-orchestrator`, `$coortex-review`, or
 - Repair at the owning seam, not the nearest manifestation.
 - Prefer converging on an existing owner over adding new helper glue.
 - Lock behavior with targeted verification before and after repair.
+- When a current-work mini-surface packet is supplied, validate it and treat
+  its review boundary and coverage rows as the shared implementer/reviewer
+  contract for this repair.
 - Run a bounded `$coortex-deslop` and `$coortex-review` pass on your own
   changes before you claim the slice is done.
 - Prefer explicit residual risk over pretending closure is stronger than the
@@ -43,16 +48,32 @@ In those cases, use `$fixer-orchestrator`, `$coortex-review`, or
 1. Confirm the requested fix scope is bounded enough for one agent.
 2. Read the prompt, changed files, review findings, deslop findings, tests,
    and any closure target the user supplied.
-3. If the input is actually a multi-family coordinated repair request or a full
+3. If the prompt supplies a current-work packet or packet path, validate it
+   before using it:
+
+```bash
+python .codex/skills/coortex-review/scripts/review_state.py validate-current-work-packet \
+  --packet-file <packet-path>
+```
+
+   Use `--packet-json` for embedded packets. Treat the helper result as
+   authoritative; do not reconstruct packet or matrix validation by hand.
+4. If the input is actually a multi-family coordinated repair request or a full
    `review_handoff` that should be lane-orchestrated, stop and direct the user
    to `$fixer-orchestrator`.
-4. Normalize the work into one bounded repair objective and one closure target.
-5. Implement the fix at the owning seam.
-6. Run targeted verification.
-7. Run bounded `$coortex-deslop` on the touched scope.
-8. Run bounded `$coortex-review` on the touched scope.
-9. Rerun targeted verification after any cleanup.
-10. Report the resulting state, residual risks, and any still-open adjacent
+5. Normalize the work into one bounded repair objective and one closure target.
+   If a current-work packet is present, keep the objective inside its review
+   boundary unless the user explicitly expands scope.
+6. Implement the fix at the owning seam.
+7. Run targeted verification.
+8. Run bounded `$coortex-deslop` on the touched scope.
+9. Run bounded `$coortex-review` on the touched scope. If a current-work packet
+   is in scope, pass it to `$coortex-review` and validate the returned
+   `surface_checked` or `matrix_not_applicable` object with
+   `.codex/skills/coortex-review/scripts/review_state.py
+   validate-current-work-review-output`.
+10. Rerun targeted verification after any cleanup.
+11. Report the resulting state, residual risks, and any still-open adjacent
     threads.
 
 ## Hard rules
@@ -61,6 +82,9 @@ In those cases, use `$fixer-orchestrator`, `$coortex-review`, or
 - Do not widen into coordinated lane planning.
 - Do not require a formal `review_handoff` when the prompt already gives a
   bounded fix objective.
+- Do not drop or rewrite a supplied current-work packet while handing the
+  repaired slice to `$coortex-review`; the reviewer must see the same bounded
+  surface and coverage rows the fixer used.
 - Do not treat a broad or ambiguous fix brief as if it were bounded enough; if
   the real work needs family synthesis or lane coordination, stop and redirect.
 - Before adding a helper or new path, check whether the owning abstraction

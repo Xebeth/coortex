@@ -28,6 +28,16 @@ TRACE_PHASES = {
 
 ACTIVE_CAMPAIGN_FILE = "active-review-campaign.json"
 FIXER_CAMPAIGN_TYPE = "fixer-orchestrator"
+CURRENT_WORK_PACKET_KEYS = (
+    "current_work_review_packet",
+    "mini_surface_review_packet",
+    "current_work_packet",
+)
+CURRENT_WORK_PACKET_PATH_KEYS = (
+    "current_work_packet_path",
+    "current_work_review_packet_path",
+    "review_packet_path",
+)
 
 TRACE_PHASE_REQUIRED_FIELDS: dict[str, dict[str, str]] = {
     "trace_started": {},
@@ -513,6 +523,71 @@ def plan_family_slices(families: list[dict[str, Any]], selected_family_ids: list
         },
         "lane_ids": [slice_entry["lane_id"] for slice_entry in slices],
     }
+
+
+def packet_body(packet: dict[str, Any]) -> dict[str, Any]:
+    nested = packet.get("mini_surface_review_packet")
+    if isinstance(nested, dict):
+        return nested
+    return packet
+
+
+def current_work_packet_metadata(review_handoff: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+
+    for key in CURRENT_WORK_PACKET_PATH_KEYS:
+        value = review_handoff.get(key)
+        if isinstance(value, str) and value.strip():
+            metadata["packet_path"] = value
+            metadata["source_key"] = key
+            break
+
+    for key in CURRENT_WORK_PACKET_KEYS:
+        value = review_handoff.get(key)
+        if isinstance(value, dict):
+            metadata["packet"] = value
+            metadata["source_key"] = metadata.get("source_key", key)
+            nested_path = value.get("packet_path")
+            if "packet_path" not in metadata and isinstance(nested_path, str) and nested_path.strip():
+                metadata["packet_path"] = nested_path
+            body = packet_body(value)
+            packet_id = value.get("packet_id") or body.get("packet_id")
+            if isinstance(packet_id, str) and packet_id.strip():
+                metadata["packet_id"] = packet_id
+            break
+
+    if metadata:
+        metadata["review_helper"] = ".codex/skills/coortex-review/scripts/review_state.py"
+        metadata["validate_packet_command"] = "validate-current-work-packet"
+        metadata["validate_review_output_command"] = "validate-current-work-review-output"
+    return metadata
+
+
+def current_work_packet_metadata_matches(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is right
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    compared = False
+    for key in ("packet_id", "packet_path"):
+        left_value = left.get(key)
+        right_value = right.get(key)
+        if isinstance(left_value, str) and left_value.strip() and isinstance(right_value, str) and right_value.strip():
+            compared = True
+            if left_value != right_value:
+                return False
+    return compared or left == right
+
+
+def attach_current_work_packet_metadata(plan: dict[str, Any], metadata: dict[str, Any]) -> None:
+    if not metadata:
+        return
+    plan["current_work_review_packet"] = metadata
+    slices = plan.get("slices")
+    if isinstance(slices, list):
+        for slice_entry in slices:
+            if isinstance(slice_entry, dict):
+                slice_entry["current_work_review_packet"] = metadata
 
 
 def slugify(value: str) -> str:
@@ -1021,6 +1096,7 @@ def plan_repair_slices(args: argparse.Namespace) -> int:
             "message": str(exc),
         }, indent=2, sort_keys=True))
         return 2
+    attach_current_work_packet_metadata(plan, current_work_packet_metadata(data))
     print(json.dumps({
         "status": "ok",
         **plan,
@@ -1144,6 +1220,11 @@ def build_lane_continuation(args: argparse.Namespace) -> int:
     }
     if seam_summary is not None:
         filtered_handoff["seam_summary"] = seam_summary
+    current_work_metadata = current_work_packet_metadata(review_handoff_data)
+    if not current_work_metadata and isinstance(lane.get("current_work_review_packet"), dict):
+        current_work_metadata = lane["current_work_review_packet"]
+    if current_work_metadata:
+        filtered_handoff["current_work_review_packet"] = current_work_metadata
 
     continuation = {
         "lane_continuation": {
@@ -1163,6 +1244,8 @@ def build_lane_continuation(args: argparse.Namespace) -> int:
             "review_handoff": filtered_handoff,
         }
     }
+    if current_work_metadata:
+        continuation["lane_continuation"]["current_work_review_packet"] = current_work_metadata
     print(json.dumps(continuation, indent=2, sort_keys=True))
     return 0
 
@@ -1181,6 +1264,7 @@ def validate_lane_continuation(args: argparse.Namespace) -> int:
     return_review_round = data.get("return_review_round")
     review_source = data.get("review_source")
     review_handoff = data.get("review_handoff")
+    current_work_metadata = data.get("current_work_review_packet")
 
     if not isinstance(lane_id, str) or not lane_id.strip():
         errors.append("lane_continuation.lane_id must be a non-empty string")
@@ -1227,6 +1311,19 @@ def validate_lane_continuation(args: argparse.Namespace) -> int:
             )
             if sorted(family_ids) != handoff_family_ids:
                 errors.append("lane_continuation.review_handoff families must match lane_continuation.family_ids exactly")
+        handoff_packet_metadata = review_handoff.get("current_work_review_packet")
+        if current_work_metadata is not None and not current_work_packet_metadata_matches(
+            current_work_metadata,
+            handoff_packet_metadata,
+        ):
+            errors.append(
+                "lane_continuation.current_work_review_packet must match lane_continuation.review_handoff.current_work_review_packet"
+            )
+        if current_work_metadata is None and isinstance(handoff_packet_metadata, dict):
+            current_work_metadata = handoff_packet_metadata
+
+    if current_work_metadata is not None and not isinstance(current_work_metadata, dict):
+        errors.append("lane_continuation.current_work_review_packet must be a mapping when present")
 
     if args.lane_plan_json:
         lane_plan = load_json_object(pathlib.Path(args.lane_plan_json))
@@ -1255,6 +1352,14 @@ def validate_lane_continuation(args: argparse.Namespace) -> int:
                     errors.append(
                         "lane_continuation.original_lane_family_metadata does not match the provided lane plan"
                     )
+                planned_packet_metadata = planned_lane.get("current_work_review_packet")
+                if planned_packet_metadata is not None and not current_work_packet_metadata_matches(
+                    planned_packet_metadata,
+                    current_work_metadata,
+                ):
+                    errors.append(
+                        "lane_continuation.current_work_review_packet does not match the provided lane plan"
+                    )
 
     if args.expected_lane_id and lane_id != args.expected_lane_id:
         errors.append("lane_continuation.lane_id does not match the expected lane id")
@@ -1274,6 +1379,11 @@ def validate_lane_continuation(args: argparse.Namespace) -> int:
         "return_review_round": return_review_round,
         "errors": errors,
     }
+    if isinstance(current_work_metadata, dict):
+        output["current_work_review_packet"] = current_work_metadata
+        packet_id = current_work_metadata.get("packet_id")
+        if isinstance(packet_id, str) and packet_id.strip():
+            output["current_work_packet_id"] = packet_id
     print(json.dumps(output, indent=2, sort_keys=True))
     return 0 if not errors else 2
 

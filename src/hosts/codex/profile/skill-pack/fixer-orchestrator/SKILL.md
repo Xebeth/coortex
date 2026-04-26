@@ -58,6 +58,14 @@ metadata, trace paths, and terminal lock-clearing status as authoritative. If
 any helper-owned continuation, validation, or terminal trace step fails, stop
 and surface the protocol error instead of prose-completing the run.
 
+When a `review_handoff` includes a current-work mini-surface packet or packet
+path, validate it with
+`.codex/skills/coortex-review/scripts/review_state.py validate-current-work-packet`
+before planning lanes. Preserve that packet through slice planning, worker
+lane prompts, lane continuations, targeted return review, and coordinator-side
+`$coortex-review` pre-commit gates. Do not reconstruct packet or matrix
+validation by hand.
+
 1. Load the review input.
 2. Load these references as needed:
    - `references/intake-and-normalization.md`
@@ -71,7 +79,8 @@ and surface the protocol error instead of prose-completing the run.
 4. Create or resume the run trace directory/files via the bundled helper described in `references/trace-artifact.md`, using its shared active-campaign lock handling.
 5. Normalize the input into repair families and closure gates before editing.
 6. Use the bundled helper to derive deterministic repair slices and execution
-   waves from the incoming `review_handoff`.
+   waves from the incoming `review_handoff`, preserving any current-work
+   packet metadata that belongs to the review/fix slice.
 7. Validate the likely owning seam and candidate write set for each slice.
 8. Turn every planned slice into a repair lane:
    - one repair lane when one slice cleanly covers the family set
@@ -83,7 +92,9 @@ and surface the protocol error instead of prose-completing the run.
    - implement the fix by editing code, tests, and docs at the owning seam
    - run targeted verification only
    - run lane-local `$coortex-deslop`
-   - run lane-local `$coortex-review-lane`
+   - run lane-local `$coortex-review-lane`; if a current-work packet is in
+     scope, pass it through and require the lane review output to validate as
+     `surface_checked` or `matrix_not_applicable`
    - rerun targeted verification only
    - emit a mandatory `review_return_handoff`
 10. The fixer coordinator must send every lane result through
@@ -94,7 +105,9 @@ and surface the protocol error instead of prose-completing the run.
     diff and append a `closure_approved` trace record for the approved family
     set:
     - bounded `$coortex-deslop` in advisory/read-only mode
-    - bounded `$coortex-review`
+    - bounded `$coortex-review`, including the current-work packet when one
+      exists and validating its `surface_checked` / `matrix_not_applicable`
+      output with the review helper
     - rerun verification only if the same implementer lane had to make follow-up
       changes after the gate handed back new work
 12. Append `pre_commit_gate_result` for that gate outcome. If the gate finds
@@ -168,6 +181,10 @@ and surface the protocol error instead of prose-completing the run.
   bounded `$coortex-deslop` explicitly in **read-only** mode. That gate is
   required before every commit and does not replace `$review-orchestrator` as
   closure authority.
+- When a current-work mini-surface packet exists, every fixer/reviewer handoff
+  in the loop must preserve it. Worker lanes, lane continuations, targeted
+  return review, and coordinator-side `$coortex-review` must all see the same
+  packet or an explicitly validated successor packet.
 - Treat reviewer approval, pre-commit gate outcome, and actual commit-readiness
   as separate traceable states. Record them with `closure_approved`,
   `pre_commit_gate_result`, and `commit_ready` before any `family_commit`.
@@ -226,6 +243,9 @@ and surface the protocol error instead of prose-completing the run.
 - Every structured handoff is lane-planned, even when it collapses to one family.
 - Native mode: also consume any structured per-family `next_step` and treat it as the default follow-up action when that family remains actionable.
 - Native mode: also consume any `carry_forward_context` preserved by targeted return review so the next slice keeps the prior defer/sequence rationale instead of reconstructing it from prose.
+- Native mode: also consume any current-work mini-surface packet or packet path
+  attached to the `review_handoff`. Validate it with the `$coortex-review`
+  helper and preserve it as lane context instead of treating it as prose.
 - If the user only supplies prose remediation guidance without a structured
   handoff, refuse and direct them to `$review-fixer` or back to review.
 
@@ -235,6 +255,9 @@ Use `references/intake-and-normalization.md`.
 
 - Derive slices/waves with `scripts/fix_result_state.py plan-repair-slices`
   for the entire structured handoff, even when it collapses to one family.
+  If the handoff carries current-work packet metadata, use the helper output's
+  `current_work_review_packet` on the top-level plan and each slice as the
+  authoritative packet context to pass to workers and review gates.
 - Group by owning seam and write-set overlap.
 - Parallelize only disjoint repair slices.
 - Sequence overlapping families.

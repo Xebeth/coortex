@@ -3506,9 +3506,64 @@ test("fixer final_fix errors when the active campaign lock is not cleared", asyn
   });
 });
 
+function fixerCurrentWorkPacket(): Record<string, unknown> {
+  return {
+    packet_path: ".coortex/current-work/runtime-packet.json",
+    mini_surface_review_packet: {
+      packet_version: 1,
+      packet_id: "current-work-runtime",
+      status: "handoff",
+      source: "current_implementation",
+      intent: "Review runtime repair changes.",
+      baseline_surface_refs: ["runtime-recovery"],
+      surface: {
+        id: "runtime-recovery",
+        name: "Runtime recovery",
+        purpose: "Runtime repair",
+        primary_anchors: ["src/**"],
+        supporting_anchors: ["src/__tests__/runtime.test.ts"],
+        contract_docs: ["docs/runtime-state-model.md"],
+        configured_builtin_lenses: [{ lens_id: "goal-fidelity", priority: "high" }],
+        configured_custom_lenses: [],
+        review_focus_areas: ["runtime repair preserves the current-work boundary"]
+      },
+      review_boundary: {
+        in_scope_paths: ["src/a.ts"],
+        expected_write_set: ["src/a.ts"],
+        out_of_scope: []
+      },
+      seams: [{ path: "src/a.ts", role: "owner" }],
+      invariants: ["runtime repair preserves the current-work boundary"],
+      coverage_matrix: {
+        rows: [
+          {
+            row_id: "runtime-main",
+            category: "entry_path",
+            paths: ["src/a.ts"],
+            expected_behavior: "runtime repair preserves the owning seam behavior",
+            tests: ["runtime targeted test"],
+            status: "tested",
+            notes: "packet used by fixer/reviewer integration tests"
+          }
+        ]
+      },
+      reviewer_focus: ["boundary preservation"],
+      known_uncertainties: []
+    }
+  };
+}
+
 test("fixer helper plans repair slices by seam, overlap, and blocker waves", async () => {
   const tempDir = await mkdtemp(join(tmpdir(), "coortex-fix-plan-"));
   const reviewHandoffPath = join(tempDir, "review-handoff.json");
+  const currentWorkPacket = fixerCurrentWorkPacket();
+
+  const packetValidation = await runPythonJson(coortexReviewStateScript, [
+    "validate-current-work-packet",
+    "--packet-json",
+    JSON.stringify(currentWorkPacket)
+  ]);
+  assert.equal(packetValidation.exitCode, 0);
 
   await writeFile(
     reviewHandoffPath,
@@ -3519,6 +3574,7 @@ test("fixer helper plans repair slices by seam, overlap, and blocker waves", asy
             mode: "branch",
             scope_summary: "branch delta"
           },
+          current_work_review_packet: currentWorkPacket,
           families: [
             {
               family_id: "F-A",
@@ -3592,21 +3648,33 @@ test("fixer helper plans repair slices by seam, overlap, and blocker waves", asy
     status: string;
     orchestration_mode: string;
     lane_ids: string[];
-    slices: Array<{ lane_id: string; family_ids: string[]; wave_id: string; execution_mode: string }>;
+    current_work_review_packet: { packet_id: string; packet_path: string };
+    slices: Array<{
+      lane_id: string;
+      family_ids: string[];
+      wave_id: string;
+      execution_mode: string;
+      current_work_review_packet: { packet_id: string; packet_path: string };
+    }>;
     waves: Array<{ wave_id: string; slice_ids: string[] }>;
   };
   assert.equal(json.status, "ok");
   assert.equal(json.orchestration_mode, "coordinated-sequenced");
+  assert.equal(json.current_work_review_packet.packet_id, "current-work-runtime");
+  assert.equal(json.current_work_review_packet.packet_path, ".coortex/current-work/runtime-packet.json");
   assert.deepEqual(json.lane_ids, ["L-001", "L-002", "L-003"]);
   assert.equal(json.slices[0]?.lane_id, "L-001");
+  assert.equal(json.slices[0]?.current_work_review_packet.packet_id, "current-work-runtime");
   assert.deepEqual(json.slices[0]?.family_ids, ["F-A", "F-B"]);
   assert.equal(json.slices[0]?.wave_id, "W-001");
   assert.equal(json.slices[0]?.execution_mode, "sequential-within-slice");
   assert.equal(json.slices[1]?.lane_id, "L-002");
+  assert.equal(json.slices[1]?.current_work_review_packet.packet_id, "current-work-runtime");
   assert.deepEqual(json.slices[1]?.family_ids, ["F-C"]);
   assert.equal(json.slices[1]?.wave_id, "W-001");
   assert.equal(json.slices[1]?.execution_mode, "single-family");
   assert.equal(json.slices[2]?.lane_id, "L-003");
+  assert.equal(json.slices[2]?.current_work_review_packet.packet_id, "current-work-runtime");
   assert.deepEqual(json.slices[2]?.family_ids, ["F-D"]);
   assert.equal(json.slices[2]?.wave_id, "W-002");
   assert.equal(json.slices[2]?.execution_mode, "single-family");
@@ -3621,6 +3689,7 @@ test("fixer helper builds and validates same-lane continuation packets", async (
   const reviewHandoffPath = join(tempDir, "review-handoff.json");
   const lanePlanPath = join(tempDir, "lane-plan.json");
   const continuationPath = join(tempDir, "lane-continuation.json");
+  const currentWorkPacket = fixerCurrentWorkPacket();
 
   await writeFile(
     reviewHandoffPath,
@@ -3631,6 +3700,7 @@ test("fixer helper builds and validates same-lane continuation packets", async (
             mode: "branch",
             scope_summary: "actionable family lane"
           },
+          current_work_review_packet: currentWorkPacket,
           families: [
             {
               family_id: "F-001",
@@ -3665,7 +3735,14 @@ test("fixer helper builds and validates same-lane continuation packets", async (
                 identity_token: "F-001::Actionable family::src/core/reclaim.ts"
               }
             ],
-            continuation_policy: "same-lane-until-approved"
+            continuation_policy: "same-lane-until-approved",
+            current_work_review_packet: {
+              packet_id: "current-work-runtime",
+              packet_path: ".coortex/current-work/runtime-packet.json",
+              review_helper: ".codex/skills/coortex-review/scripts/review_state.py",
+              validate_packet_command: "validate-current-work-packet",
+              validate_review_output_command: "validate-current-work-review-output"
+            }
           }
         ]
       },
@@ -3708,6 +3785,12 @@ test("fixer helper builds and validates same-lane continuation packets", async (
       }>;
       return_review_round: number;
       review_source: { skill: string; mode: string; reviewer_run_id: string };
+      current_work_review_packet: {
+        packet_id: string;
+        packet_path: string;
+        validate_packet_command: string;
+        validate_review_output_command: string;
+      };
     };
   };
   assert.equal(continuation.lane_continuation.lane_id, "L-001");
@@ -3729,6 +3812,11 @@ test("fixer helper builds and validates same-lane continuation packets", async (
     mode: "targeted-return-review",
     reviewer_run_id: "review-orchestrator-return-review-20260420T180000Z"
   });
+  assert.equal(continuation.lane_continuation.current_work_review_packet.packet_id, "current-work-runtime");
+  assert.equal(
+    continuation.lane_continuation.current_work_review_packet.validate_review_output_command,
+    "validate-current-work-review-output"
+  );
 
   const validated = await runPythonJson(fixResultStateScript, [
     "validate-lane-continuation",
@@ -3759,6 +3847,8 @@ test("fixer helper builds and validates same-lane continuation packets", async (
       identity_token: string;
     }>;
     return_review_round: number;
+    current_work_packet_id: string;
+    current_work_review_packet: { packet_id: string; packet_path: string };
   };
   assert.equal(validatedJson.status, "ok");
   assert.equal(validatedJson.lane_id, "L-001");
@@ -3775,6 +3865,8 @@ test("fixer helper builds and validates same-lane continuation packets", async (
     }
   ]);
   assert.equal(validatedJson.return_review_round, 2);
+  assert.equal(validatedJson.current_work_packet_id, "current-work-runtime");
+  assert.equal(validatedJson.current_work_review_packet.packet_path, ".coortex/current-work/runtime-packet.json");
 });
 
 test("fixer helper rejects continuation packets with mismatched lane metadata", async () => {

@@ -71,9 +71,27 @@ The helper's role is mechanical:
 The model still owns the judgment about whether a reported seam/write overlap
 really makes sense for the current family set.
 
+If the `review_handoff` carries a current-work mini-surface packet or packet
+path, validate it before lane spawning with:
+
+```bash
+python .codex/skills/coortex-review/scripts/review_state.py validate-current-work-packet \
+  --packet-file <packet-path>
+```
+
+or the equivalent `--packet-json` form. Preserve the helper-normalized packet
+metadata emitted by `plan-repair-slices` as `current_work_review_packet` on the
+overall plan and each slice. Pass that same packet context into every worker
+lane, lane continuation, targeted return review, and coordinator-side
+`$coortex-review` gate. Do not rewrite or reinterpret coverage rows by hand.
+
 ## Lane obligations
 
 Every repair lane must:
+- validate any supplied current-work mini-surface packet with the
+  `$coortex-review` helper before using it as repair/review context
+- treat the packet's review boundary and coverage rows as part of the repair
+  closure target, not as optional reviewer-only metadata
 - validate the likely owning seam before editing
 - search for sibling manifestations inside the slice before calling the family understood
 - treat issues exposed by tests, code reading, or the repair itself as threads to classify and follow
@@ -111,6 +129,10 @@ Rules:
 - after the worker implements the slice, it must run lane-local
   `$coortex-deslop`
 - after that, it must run lane-local `$coortex-review-lane`
+  - when a current-work packet is in scope, pass it to `$coortex-review-lane`
+    and require `surface_checked` or `matrix_not_applicable` output validated
+    by `.codex/skills/coortex-review/scripts/review_state.py
+    validate-current-work-review-output`
 - the worker reruns targeted verification after that self-cleanup
 - the worker emits `review_return_handoff`
 - the worker does **not** commit
@@ -122,6 +144,8 @@ The fixer coordinator then:
 - invokes `$review-orchestrator` in targeted return-review mode
 - supplies the original `review_handoff`, the worker's
   `review_return_handoff`, and the actual diff
+- supplies the current-work packet context when one exists, so targeted return
+  review can apply the same mini-surface boundary and row accounting
 - waits for the reviewer result before deciding the next step
 - runs the broader/normal verification gate for the touched area when closure
   requires it, instead of pushing that full-suite responsibility into every
@@ -140,6 +164,8 @@ If return review keeps the family actionable:
   original lane plan JSON when available so the worker can deterministically
   reject mismatched lane identity or family metadata
 - send that packet back to the **same original implementer lane**
+- preserve `current_work_review_packet` in that continuation packet when the
+  original handoff had one
 - resume the same worker thread for that lane after validation
 - preserve lane-local context instead of restarting first-pass analysis from
   scratch
@@ -152,6 +178,9 @@ If return review approves closure:
   final approved diff:
   - bounded `$coortex-deslop` in advisory/read-only mode
   - bounded `$coortex-review`
+    - when a current-work packet is in scope, include it and validate the
+      review gate's `surface_checked` / `matrix_not_applicable` output with
+      the `$coortex-review` helper
 - append `pre_commit_gate_result` for that gate outcome
 - if the gate finds cleanup-only residue, send back one consolidated
   `commit-ready cleanup sweep` to the same implementer lane instead of

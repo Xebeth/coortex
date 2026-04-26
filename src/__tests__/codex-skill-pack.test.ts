@@ -603,6 +603,37 @@ test("review skills delegate current-work packet mechanics to the helper", async
   assert.match(helper, /validate-current-work-review-output/);
 });
 
+test("fixer skills preserve current-work packets through review gates", async () => {
+  const expectedFiles = [
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/fixer-orchestrator/references/execution-model.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/coortex-fixer-lane/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/review-fixer/SKILL.md",
+    "src/hosts/codex/profile/skill-pack/review-fixer/agents/openai.yaml"
+  ].map((path) => resolve(process.cwd(), path));
+
+  for (const path of expectedFiles) {
+    const content = await readFile(path, "utf8");
+    assert.match(content, /current-work|mini-surface|current_work_review_packet/i, path);
+    assert.match(content, /validate-current-work-packet|review_state\.py/i, path);
+    assert.match(content, /validate-current-work-review-output|surface_checked|matrix_not_applicable/i, path);
+    assert.match(content, /preserve|pass (?:it|the same packet)|same packet/i, path);
+  }
+
+  const fixerHelper = await readFile(
+    resolve(
+      process.cwd(),
+      "src/hosts/codex/profile/skill-pack/fixer-orchestrator/scripts/fix_result_state.py"
+    ),
+    "utf8"
+  );
+  assert.match(fixerHelper, /current_work_review_packet/);
+  assert.match(fixerHelper, /validate-current-work-packet/);
+  assert.match(fixerHelper, /validate-current-work-review-output/);
+});
+
 async function walk(
   dir: string,
   visitFile: (path: string) => Promise<void>
