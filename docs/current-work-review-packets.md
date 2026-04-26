@@ -306,6 +306,7 @@ handoff, not a bare "done" message or prose-only summary. The handoff should
 include:
 
 - packet path and slice id
+- approved packet hash or equivalent immutable spec-review reference
 - changed files and owning seam
 - evidence that changes stayed inside the packet scope, or a justified
   out-of-scope note
@@ -313,11 +314,26 @@ include:
 - build/typecheck, local quality-gate, and targeted-test evidence
 - self-deslop and self-review evidence
 - deferred threads and residual risks, even when `none`
+- `latest_artifact_refs` for the current packet, spec review, handoff, return
+  review when available, and gate artifacts
+- `supersedes` when this handoff replaces an earlier handoff from a
+  continuation loop
 
 Coordinator intake should reject missing or summary-only handoffs before return
 review. The reviewer should not compensate for a missing implementation
 handoff; incomplete handoffs go back to the same implementation lane with the
 missing fields and required evidence.
+If the packet changed after spec-review approval, the previous approval is
+stale and implementation must return to spec review before handoff or return
+review proceeds.
+No evidence means not complete: fresh build/typecheck, gate, and test evidence
+must back completion claims when those checks apply. A stale successful command
+from before implementation, deslop, review, or continuation is not sufficient.
+
+Implementation lanes should keep the diff as small as the approved packet
+allows, reuse existing project patterns before adding helpers or abstractions,
+and report concrete blockers after bounded alternate attempts instead of
+continuing speculative edits.
 
 ## Reviewer responsibilities
 
@@ -328,6 +344,9 @@ For each material finding or approval, the reviewer should check:
 
 - whether the same implementation assumption or failure mode exists across
   sibling rows
+- whether a finding is a local row issue, a shared root-cause issue, a
+  same-family sibling manifestation, or stale artifact/docs/test/check evidence
+  that still encodes the old behavior
 - whether ownership/drop/failure paths are closed
 - whether tests cover the relevant matrix rows
 - whether out-of-scope rows are genuinely out of scope
@@ -356,6 +375,13 @@ surface_checked:
       - adjacent-out-of-scope
     rows_uncertain: []
     test_coverage_gaps: []
+  findings:
+    - id: finding-id
+      severity: medium
+      issue: "..."
+      root_cause_or_sibling_family: "local | shared-root-cause | sibling-family | stale-artifact"
+      evidence:
+        - path/to/file.ts
   verdict: approve
 ```
 
@@ -396,6 +422,8 @@ In a current-work review mode, the orchestrator should:
   `matrix_not_applicable`
 - route same-assumption or same-failure-mode sibling findings as one grouped
   issue when possible
+- include `root_cause_or_sibling_family` for material findings when the output
+  schema includes findings
 - reject approvals that do not account for relevant matrix rows
 - reject approvals that leave `open` or `uncertain` rows without a finding,
   explicit deferment, or accepted residual risk

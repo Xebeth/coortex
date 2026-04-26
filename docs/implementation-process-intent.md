@@ -51,6 +51,11 @@ return review checks proof
 closing gate records completion
 ```
 
+Canonical machine artifacts are enough for the workflow. Human-readable slice
+docs may be produced when the project needs durable documentation, but they are
+not required supplements to the canonical `.coortex/current-work/<run-id>/`
+packet, review, handoff, gate, and closeout artifacts.
+
 
 ## Fixer specialization
 
@@ -352,6 +357,12 @@ narrowing and multi-surface rules as current-work review packets.
 only when the slice repairs or closes a known review family; do not invent a
 defect-family identifier just to make a feature slice look like fixer work.
 
+After spec review approval, the approved packet is immutable for the slice. If
+the packet changes, the coordinator must treat the prior approval as stale and
+run spec review again. Persist the approved packet hash or equivalent immutable
+reference with the spec-review artifact so later handoff and closeout checks can
+prove which packet was approved.
+
 ## 5. Spec review lane
 
 Spec review is read-only and runs before implementation.
@@ -375,6 +386,9 @@ spec_review:
     - edge cases follow from lenses
     - verification is realistic
     - deferred threads are legitimate
+    - shared assumptions and sibling paths are explicit enough to review
+    - stale docs, tests, generated artifacts, or checks that may encode the old
+      behavior are either in scope, deferred, or explicitly not applicable
 ```
 
 Output:
@@ -387,8 +401,10 @@ spec_review_result:
       severity:
       issue:
       evidence:
+      root_cause_or_sibling_family:
       required_spec_change:
   approved_packet:
+  approved_packet_hash:
 ```
 
 No implementation starts until spec review approves the packet. If spec review
@@ -406,12 +422,16 @@ Rules:
 - do not commit
 - do not spawn subagents from the lane
 - stay inside the approved write scope
+- prefer the smallest viable diff that satisfies the approved packet
+- reuse existing patterns before inventing new helpers or abstractions
 - implement or repair at the owning seam instead of adding local shims around it
 - surface any out-of-scope sibling immediately instead of silently widening
 
 Required order:
 
 ```text
+inspect relevant existing patterns
+→ make a file-level implementation plan
 implement
 → build/typecheck gate
 → quality gates
@@ -426,6 +446,9 @@ implement
 
 The lane should not claim closure when required lane-owned gates are red,
 blocked, hanging, missing, or not applicable without evidence.
+If blocked, it should re-check assumptions against repo evidence, try a smaller
+or different bounded approach when safe, and then report a concrete blocker
+instead of continuing speculative edits.
 
 Output:
 
@@ -451,6 +474,12 @@ review_return_handoff:
   self_review:
   deferred_threads:
   residual_risks:
+  latest_artifact_refs:
+    packet:
+    spec_review:
+    handoff:
+    gates:
+  supersedes:
 ```
 
 `claimed_closure_status` is the implementer's claim, not the review verdict.
@@ -463,6 +492,12 @@ For family repair, expected claim values are `symptom-fixed-only`,
 non-family feature slices, the completion token is an open schema gap: do not
 invent unvalidated persisted tokens; extend the helper/schema before
 machine-consuming those handoffs.
+
+`latest_artifact_refs` points at the current packet, approval, handoff, and gate
+evidence the coordinator should use next. `supersedes` names any previous
+handoff or gate artifact made stale by a continuation loop. A lane must not
+claim completion against stale artifacts after a continuation produced newer
+evidence.
 
 ## 7. Coordinator intake gate
 
@@ -480,11 +515,15 @@ intake_gate:
   self_review_done:
   lens_evidence_complete:
   residual_risks_explicit:
+  packet_hash_matches_latest_spec_review:
+  latest_artifact_refs_current:
 ```
 
 If intake fails, build a continuation packet and send it back to the same
 implementation lane. Do not ask a reviewer to compensate for a missing handoff,
 missing gate evidence, or out-of-scope diff.
+If the packet hash no longer matches the latest approved spec-review artifact,
+return to spec review before implementation continues.
 
 ## 8. Return review lane
 
@@ -504,6 +543,9 @@ return_review:
     - lenses addressed
     - edge cases covered
     - sibling seams checked
+    - same-assumption or same-family leaks checked
+    - stale docs, tests, generated artifacts, or checks updated or explicitly
+      deferred
     - tests meaningful
     - no scope creep
 ```
@@ -517,6 +559,7 @@ return_review_result:
     - finding_id:
       severity:
       root_cause_family:
+      root_cause_or_sibling_family:
       evidence_files:
       invariant_violated:
       sibling_search:
@@ -526,6 +569,9 @@ return_review_result:
 
 Return review checks the implementer's proof. It should not have to discover the
 slice's intended contracts, lenses, or edge cases from scratch.
+When it does find work, the finding should say whether it is local row closure,
+a shared root-cause issue, a same-family sibling manifestation, or stale
+artifact/docs/test/check evidence that still encodes the old behavior.
 
 ## 9. Continuation loop
 
@@ -568,11 +614,14 @@ closing_gate:
   diff_scope_clean:
   docs_updated_if_contract_changed:
   residual_risks_recorded:
+  latest_artifact_refs_consistent:
   commit_ready_record:
 ```
 
 If the closing gate finds work, send it back to the same implementation lane.
 Do not patch coordinator-side and do not commit until the gate is complete.
+No evidence means not complete: a closing gate cannot pass on prose confidence,
+stale test output, or an assumed clean build.
 
 ## 11. Atomic commit
 
@@ -621,6 +670,8 @@ Gate:
 - integration assumptions have evidence or are carried as residual risk
 - docs changed when contracts, invariants, or operator-visible behavior changed
 - any final review need is named instead of implied
+- closeout references the latest packet, spec review, implementation handoff,
+  return review, gate artifacts, and commit or install state
 
 ## Deterministic enforcement targets
 
@@ -628,14 +679,22 @@ The process should become helper-enforced where possible:
 
 - baseline and milestone baseline validation
 - execution packet validation
+- canonical write helpers for packet, spec review, implementation handoff,
+  return review, and closeout artifacts (`write-packet`, `write-spec-review`,
+  `write-handoff`, `write-return-review`, `write-closeout`)
+- approved packet hash binding between spec review, handoff, return review, and
+  closeout
 - spec review result validation
 - implementation handoff completeness
+- latest artifact reference and `supersedes` consistency across continuation
+  loops
 - coordinator intake gate
 - return-review result shape
 - continuation packet shape
 - closing-gate record
 - commit-ready record
 - milestone closeout record
+- closeout consistency against the latest artifact set
 
 Instructions alone are not enough. If a helper can detect a missing field,
 invalid token, scope mismatch, gate-order violation, or artifact inconsistency,
