@@ -681,21 +681,36 @@ test("review skills delegate current-work packet mechanics to the helper", async
 test("implementation coordinator turns ordinary intent into reviewed current-work flow", async () => {
   const expectedFiles = [
     "src/hosts/codex/profile/skill-pack/implementation-coordinator/SKILL.md",
-    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml"
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/agents/openai.yaml",
+    "src/hosts/codex/profile/skill-pack/implementation-coordinator/references/implementation-handoff.md"
   ].map((path) => resolve(process.cwd(), path));
 
   for (const path of expectedFiles) {
     const content = await readFile(path, "utf8");
-    assert.match(content, /ordinary|normal implementation request|normal prompt|user-facing/i, path);
-    assert.match(content, /current-work|mini-surface|validate-current-work-packet/i, path);
-    assert.match(content, /spec review[\s\S]*before implementation|before implementation[\s\S]*spec review/i, path);
-    assert.match(content, /implementation handoff|handoff present|review_return_handoff/i, path);
-    assert.match(content, /return review|surface_checked|matrix_not_applicable/i, path);
+    assert.match(content, /implementation handoff|handoff present|implementation_handoff/i, path);
+    assert.match(content, /bare \"?done\"?|summary-only/i, path);
     assert.match(content, /same implementation lane|same implementer/i, path);
-    assert.match(content, /do not spawn subagents unless|delegation follows host policy/i, path);
-    assert.match(content, /Do not commit unless|commit only when allowed/i, path);
-    assert.match(content, /fixer-orchestrator|review_handoff/i, path);
   }
+
+  const coordinator = await readFile(expectedFiles[0]!, "utf8");
+  const prompt = await readFile(expectedFiles[1]!, "utf8");
+  assert.match(coordinator, /ordinary|normal implementation request|normal prompt|user-facing/i);
+  assert.match(coordinator, /current-work|mini-surface|validate-current-work-packet/i);
+  assert.match(coordinator, /spec review[\s\S]*before implementation|before implementation[\s\S]*spec review/i);
+  assert.match(coordinator, /return review|surface_checked|matrix_not_applicable/i);
+  assert.match(coordinator, /do not spawn subagents unless|delegation follows host policy/i);
+  assert.match(coordinator, /Do not commit unless|commit only when allowed/i);
+  assert.match(coordinator, /fixer-orchestrator|review_handoff/i);
+  assert.match(coordinator, /references\/implementation-handoff\.md/i);
+  assert.match(prompt, /references\/implementation-handoff\.md/i);
+
+  const currentWorkDocs = await readFile(
+    resolve(process.cwd(), "docs/current-work-review-packets.md"),
+    "utf8"
+  );
+  assert.match(currentWorkDocs, /Implementation handoff and intake/i);
+  assert.match(currentWorkDocs, /bare \"?done\"?|summary-only/i);
+  assert.match(currentWorkDocs, /same implementation lane/i);
 });
 
 test("fixer skills preserve current-work packets through review gates", async () => {

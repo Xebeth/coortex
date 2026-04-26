@@ -299,6 +299,26 @@ Before or during implementation, the implementer should:
 The implementer must not use the packet to expand scope silently. New rows that
 point outside the intended boundary should be marked deferred or escalated.
 
+## Implementation handoff and intake
+
+For non-trivial current work, implementation completion should be a structured
+handoff, not a bare "done" message or prose-only summary. The handoff should
+include:
+
+- packet path and slice id
+- changed files and owning seam
+- evidence that changes stayed inside the packet scope, or a justified
+  out-of-scope note
+- coverage-row evidence, gaps, defers, or not-applicable decisions
+- build/typecheck, local quality-gate, and targeted-test evidence
+- self-deslop and self-review evidence
+- deferred threads and residual risks, even when `none`
+
+Coordinator intake should reject missing or summary-only handoffs before return
+review. The reviewer should not compensate for a missing implementation
+handoff; incomplete handoffs go back to the same implementation lane with the
+missing fields and required evidence.
+
 ## Reviewer responsibilities
 
 The reviewer should review against the packet, not just against the nearest

@@ -45,9 +45,16 @@ Do not use this skill when:
 - Coordinator phases are implementation-read-only after implementation begins.
   If review or gates find work, route it back to the same implementation lane
   instead of patching coordinator-side.
+- Non-trivial work must produce a structured implementation handoff. A bare
+  "done" or summary-only completion is not enough evidence for return review.
 - Do not require `family_id` or formal `review_handoff` for pure feature work.
 - Do not commit unless the user explicitly asks for a commit or the surrounding
   workflow requires one.
+
+## References
+
+- `references/implementation-handoff.md` — read before asking an implementation
+  lane to claim completion or before running coordinator intake.
 
 ## Helper use
 
@@ -116,12 +123,15 @@ implementation workflow over a live mutating orchestrator campaign.
    - Run bounded `$coortex-deslop`, then bounded `$coortex-review` against the
      same packet, and rerun gates/tests after any edits.
 7. **Emit implementation handoff**
-   - Include packet path, slice id, changed files, owning seam, invariants,
+   - Use `references/implementation-handoff.md` for the compact handoff shape.
+   - Include packet path, slice id, changed files, owning seam, scope evidence,
      coverage-row evidence, gate evidence, tests, self-deslop/self-review
      result, deferred threads, and residual risks.
+   - Reject bare "done" or summary-only completion output for non-trivial work.
 8. **Coordinator intake gate**
    - Mechanically check the handoff before return review:
      - handoff present
+     - handoff is structured, not summary-only prose
      - changed files inside packet scope
      - build/typecheck before tests
      - local quality gates before tests
@@ -129,7 +139,8 @@ implementation workflow over a live mutating orchestrator campaign.
      - deslop and self-review done
      - coverage rows and residual risks accounted for
    - If intake fails, build a continuation note and send it back to the same
-     implementation lane. Do not ask a reviewer to compensate.
+     implementation lane with the missing fields and required evidence. Do not
+     ask a reviewer to compensate.
 9. **Return review**
    - Run independent `$coortex-review` against the approved packet, handoff, and
      diff.
