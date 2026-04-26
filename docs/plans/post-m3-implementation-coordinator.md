@@ -704,6 +704,59 @@ Acceptance target:
 9. Coordinator decisions must be explicit and durable when they reshape bounded
    work.
 
+## Field feedback addendum
+
+Manual current-work pilots using the proposed shape suggest the direction is
+useful, but still too dependent on coordinator prompting discipline.
+
+Observed improvements:
+
+- spec review catches real defects before implementation starts
+- return review becomes narrower when it checks an approved packet instead of a
+  broad diff
+- continuation findings are easier to route when they name exact scope, fix,
+  and verification
+- coordinator gates become more mechanical when they can check artifacts,
+  docs, contracts, and declared gates instead of reconstructing intent from
+  prose
+
+Observed weak points:
+
+- workers may still return underspecified output such as a bare "Done" unless
+  the handoff contract is explicit and validated
+- packet/spec drafting adds upfront cost; the right mitigation is templates and
+  helpers, not skipping the packet
+- live protocol or integration probes need explicit probe rows, allowed
+  commands, and stop conditions before implementation begins
+- process quality is hard to assess after the fact unless each run records
+  what it produced, what it claimed, what the trace proves, when it first looked
+  ready, and what churn followed
+
+These observations are not blockers for the minimal skill-pack MVP. They should
+feed the next runtime-owned coordinator slices, especially handoff validation,
+paired review records, continuation accounting, and operator-facing summaries.
+
+## Note and TODO follow-ups
+
+The local `.coortex/notepad.md` process-assessment prompts and
+`.coortex/todo.md` fixer workflow follow-ups add several implementation-process
+requirements that should be preserved for later slices:
+
+- Record terminal accounting for every planned lane, review, family, or wave so
+  "done" is operationally unambiguous.
+- Distinguish reviewer send-backs, post-approval cleanup hand-backs, and
+  post-approval correctness hand-backs. Store first-approval and commit-ready
+  round counts or timestamps when available.
+- Treat pre-handoff evidence as a structured gate: self-deslop, lane-safe
+  self-review, seam-residue sweep, build/typecheck, local quality gates, and
+  targeted verification should be explicit artifacts, not inferred from prose.
+- Strengthen lane-to-coordinator linkage and continuation validation so a retry
+  proves it belongs to the same original lane or records why ownership changed.
+- Keep attempt/resume envelopes coherent; avoid duplicated logical starts or
+  mixed attempts in one lane trace.
+- Delay trace-derived memory or knowledge-base features until family lineage,
+  review carry-forward, and trace schemas are stable enough not to encode drift.
+
 ## Risks
 
 ### 1. Silent M3 expansion
