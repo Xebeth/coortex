@@ -38,5 +38,6 @@ Non-reference material is kept out of the root docs surface:
 
 - `docs/research/`
   - external evaluations and adapter research
+  - swarm role concepts and Agent UI collaboration experiments
 - `docs/archive/`
   - one-off handoff notes and superseded planning material
