@@ -49,6 +49,90 @@ const capabilities: AdapterCapabilities = {
   supportsPermissionsModel: false
 };
 
+const assertRecoveredDecisionStableAfterLaterResolution = async (
+  ctx: MatrixContext,
+  once: Awaited<ReturnType<typeof reconcileActiveRuns>>,
+  twice: Awaited<ReturnType<typeof reconcileActiveRuns>>,
+  firstEventCount: number,
+  secondEventCount: number
+) => {
+  assert.equal(twice.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"), false);
+  assert.equal(secondEventCount, firstEventCount);
+
+  const firstDecision = [...once.projection.decisions.values()][0]!;
+  const resolutionTimestamp = nowIso();
+  await ctx.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: once.projection.sessionId,
+    timestamp: resolutionTimestamp,
+    type: "decision.resolved",
+    payload: {
+      decisionId: firstDecision.decisionId,
+      resolvedAt: resolutionTimestamp,
+      resolutionSummary: "Operator chose to continue after recovery."
+    }
+  });
+  await ctx.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: once.projection.sessionId,
+    timestamp: resolutionTimestamp,
+    type: "assignment.updated",
+    payload: {
+      assignmentId: ctx.assignmentId,
+      patch: {
+        state: "in_progress",
+        updatedAt: resolutionTimestamp
+      }
+    }
+  });
+  await ctx.store.appendEvent({
+    eventId: randomUUID(),
+    sessionId: once.projection.sessionId,
+    timestamp: resolutionTimestamp,
+    type: "status.updated",
+    payload: {
+      status: {
+        ...once.projection.status,
+        currentObjective: "Continue after the recovered decision was resolved.",
+        lastDurableOutputAt: resolutionTimestamp
+      }
+    }
+  });
+  const progressed = await ctx.store.syncSnapshotFromEventsWithRecovery();
+  const afterResolution = await reconcileActiveRuns(ctx.store, ctx.adapter, progressed.projection);
+  const secondDecision = [...afterResolution.projection.decisions.values()][0]!;
+  assert.equal(once.projection.decisions.size, 1);
+  assert.equal(afterResolution.projection.decisions.size, 1);
+  assert.equal(once.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
+  assert.equal(afterResolution.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
+  assert.deepEqual(once.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+  assert.deepEqual(afterResolution.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+  assert.equal(secondDecision.decisionId, firstDecision.decisionId);
+  assert.equal(secondDecision.state, "resolved");
+  assert.equal(
+    afterResolution.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"),
+    false
+  );
+  assert.equal(afterResolution.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"), false);
+  assert.equal(await countRecoveredOutcomeEvents(ctx.store, ctx.assignmentId, "decision.created"), firstEventCount);
+};
+
+async function assertSecondCompletedRecoveryDoesNotRepairAuthority(
+  ctx: MatrixContext,
+  attachmentId: string,
+  claimId: string
+): Promise<RuntimeProjection> {
+  const firstAuthorityUpdateCount = await countAuthorityUpdateEvents(ctx.store, attachmentId, claimId);
+  const secondRecovery = await loadReconciledProjectionWithDiagnostics(ctx.store, ctx.adapter);
+  const secondAuthorityUpdateCount = await countAuthorityUpdateEvents(ctx.store, attachmentId, claimId);
+
+  assert.equal(secondRecovery.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"), false);
+  assert.equal(secondAuthorityUpdateCount, firstAuthorityUpdateCount);
+  assert.equal(secondRecovery.projection.attachments.get(attachmentId)?.state, "detached_resumable");
+  assert.equal(secondRecovery.projection.claims.get(claimId)?.state, "active");
+  return secondRecovery.projection;
+}
+
 test("host-run recovery matrix matches the supported command semantics", async (t) => {
   let staleRecoverySecondAssignmentId: string | undefined;
   const conflictingObjective = "Conflicting objective before stale recovery.";
@@ -2923,68 +3007,21 @@ test("host-run recovery matrix keeps completed-run reconciliation idempotent", a
           completedDecisionRecord(ctx.assignmentId, "Need operator confirmation before proceeding.")
         );
       },
-      assertStable: async (
-        ctx: MatrixContext,
-        once: Awaited<ReturnType<typeof reconcileActiveRuns>>,
-        twice: Awaited<ReturnType<typeof reconcileActiveRuns>>,
-        firstEventCount: number,
-        secondEventCount: number
-      ) => {
-        const firstDecision = [...once.projection.decisions.values()][0]!;
-        const resolutionTimestamp = nowIso();
-        await ctx.store.appendEvent({
-          eventId: randomUUID(),
-          sessionId: once.projection.sessionId,
-          timestamp: resolutionTimestamp,
-          type: "decision.resolved",
-          payload: {
-            decisionId: firstDecision.decisionId,
-            resolvedAt: resolutionTimestamp,
-            resolutionSummary: "Operator chose to continue after recovery."
-          }
-        });
-        await ctx.store.appendEvent({
-          eventId: randomUUID(),
-          sessionId: once.projection.sessionId,
-          timestamp: resolutionTimestamp,
-          type: "assignment.updated",
-          payload: {
-            assignmentId: ctx.assignmentId,
-            patch: {
-              state: "in_progress",
-              updatedAt: resolutionTimestamp
-            }
-          }
-        });
-        await ctx.store.appendEvent({
-          eventId: randomUUID(),
-          sessionId: once.projection.sessionId,
-          timestamp: resolutionTimestamp,
-          type: "status.updated",
-          payload: {
-            status: {
-              ...once.projection.status,
-              currentObjective: "Continue after the recovered decision was resolved.",
-              lastDurableOutputAt: resolutionTimestamp
-            }
-          }
-        });
-        const progressed = await ctx.store.syncSnapshotFromEventsWithRecovery();
-        twice = await reconcileActiveRuns(ctx.store, ctx.adapter, progressed.projection);
-        const secondDecision = [...twice.projection.decisions.values()][0]!;
-        assert.equal(once.projection.decisions.size, 1);
-        assert.equal(twice.projection.decisions.size, 1);
-        assert.equal(once.projection.assignments.get(ctx.assignmentId)?.state, "blocked");
-        assert.equal(twice.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
-        assert.deepEqual(once.projection.status.activeAssignmentIds, [ctx.assignmentId]);
-        assert.deepEqual(twice.projection.status.activeAssignmentIds, [ctx.assignmentId]);
-        assert.equal(secondDecision.decisionId, firstDecision.decisionId);
-        assert.equal(secondDecision.state, "resolved");
-        assert.equal(twice.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"), false);
-        assert.equal(twice.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"), false);
-        assert.equal(firstEventCount, 1);
-        assert.equal(secondEventCount, firstEventCount);
-      }
+      assertStable: assertRecoveredDecisionStableAfterLaterResolution
+    },
+    {
+      name: "recovered terminal decisions without decision ids do not replay after later resolution",
+      eventType: "decision.created" as const,
+      seed: async (ctx: MatrixContext) => {
+        const record = completedDecisionRecord(
+          ctx.assignmentId,
+          "Need operator confirmation before proceeding without durable decision identity."
+        );
+        assert.equal(record.terminalOutcome?.kind, "decision");
+        delete record.terminalOutcome.decision.decisionId;
+        await ctx.adapter.runStore.write(record);
+      },
+      assertStable: assertRecoveredDecisionStableAfterLaterResolution
     }
   ] as const;
 
@@ -3001,7 +3038,7 @@ test("host-run recovery matrix keeps completed-run reconciliation idempotent", a
   }
 });
 
-test("host-run recovery matrix replays fallback resolved decisions when resolution metadata changes", async () => {
+test("host-run recovery matrix does not replay fallback decisions when resolution metadata changes", async () => {
   const ctx = await createMatrixContext();
   const createdAt = nowIso();
   const firstResolvedAt = new Date(Date.now() - 60_000).toISOString();
@@ -3067,15 +3104,15 @@ test("host-run recovery matrix replays fallback resolved decisions when resoluti
 
   assert.equal(firstRecovery.projection.decisions.size, 1);
   assert.equal(firstRecoveredDecision.resolutionSummary, "Operator chose to continue after the first recovery.");
-  assert.equal(secondRecovery.projection.decisions.size, 2);
-  assert.notEqual(latestRecoveredDecision.decisionId, firstRecoveredDecision.decisionId);
-  assert.equal(latestRecoveredDecision.resolvedAt, secondResolvedAt);
+  assert.equal(secondRecovery.projection.decisions.size, 1);
+  assert.equal(latestRecoveredDecision.decisionId, firstRecoveredDecision.decisionId);
+  assert.equal(latestRecoveredDecision.resolvedAt, firstResolvedAt);
   assert.equal(
     latestRecoveredDecision.resolutionSummary,
-    "Operator chose to continue after a newer recovery."
+    "Operator chose to continue after the first recovery."
   );
-  assert.ok(secondRecovery.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"));
-  assert.equal(secondRecoveredEventCount, firstRecoveredEventCount + 1);
+  assert.equal(secondRecovery.diagnostics.some((diagnostic) => diagnostic.code === "completed-run-reconciled"), false);
+  assert.equal(secondRecoveredEventCount, firstRecoveredEventCount);
 });
 
 test("host-run recovery matrix does not replay recovered results after a status-update interruption", async () => {
@@ -3289,6 +3326,8 @@ test("host-run recovery matrix detaches attached authority for recovered complet
     await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
     undefined
   );
+
+  await assertSecondCompletedRecoveryDoesNotRepairAuthority(ctx, attachmentId, claimId);
 });
 
 test("host-run recovery matrix detaches attached authority for recovered partial results", async () => {
@@ -3314,6 +3353,8 @@ test("host-run recovery matrix detaches attached authority for recovered partial
     await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
     undefined
   );
+
+  await assertSecondCompletedRecoveryDoesNotRepairAuthority(ctx, attachmentId, claimId);
 });
 
 test("host-run recovery matrix does not treat an earlier completion as proof for a later stale attempt", async () => {
@@ -3510,6 +3551,12 @@ test("host-run recovery matrix promotes provisional authority for recovered part
     await ctx.store.readTextArtifact(`adapters/matrix/runs/${ctx.assignmentId}.lease.json`, "matrix lease"),
     undefined
   );
+
+  const secondProjection = await assertSecondCompletedRecoveryDoesNotRepairAuthority(ctx, attachmentId, claimId);
+  assert.equal(
+    secondProjection.attachments.get(attachmentId)?.nativeSessionId,
+    "matrix-thread-provisional-partial"
+  );
 });
 
 test("host-run recovery matrix backfills missing native session id on detached authority for recovered partial results", async () => {
@@ -3541,6 +3588,12 @@ test("host-run recovery matrix backfills missing native session id on detached a
   );
   assert.equal(recovered.projection.claims.get(claimId)?.state, "active");
   assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "in_progress");
+
+  const secondProjection = await assertSecondCompletedRecoveryDoesNotRepairAuthority(ctx, attachmentId, claimId);
+  assert.equal(
+    secondProjection.attachments.get(attachmentId)?.nativeSessionId,
+    "matrix-thread-detached-missing-id"
+  );
 });
 
 test("host-run recovery matrix orphans authoritative attachment truth during stale-run recovery", async () => {
@@ -4809,6 +4862,19 @@ async function countRecoveredOutcomeEvents(
   }
   return events.filter(
     (event) => event.type === "decision.created" && event.payload.decision.assignmentId === assignmentId
+  ).length;
+}
+
+async function countAuthorityUpdateEvents(
+  store: RuntimeStore,
+  attachmentId: string,
+  claimId: string
+): Promise<number> {
+  const events = await store.loadEvents();
+  return events.filter(
+    (event) =>
+      (event.type === "attachment.updated" && event.payload.attachmentId === attachmentId) ||
+      (event.type === "claim.updated" && event.payload.claimId === claimId)
   ).length;
 }
 

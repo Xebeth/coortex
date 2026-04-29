@@ -284,9 +284,14 @@ function hasRecoveredCompletedStatus(
     return false;
   }
   return !(
-    record.terminalOutcome?.kind === "result" &&
+    isTerminalCompletedResult(record) &&
     projection.status.activeAssignmentIds.includes(record.assignmentId)
   );
+}
+
+function isTerminalCompletedResult(record: HostRunRecord): boolean {
+  return record.terminalOutcome?.kind === "result" &&
+    (record.terminalOutcome.result.status === "completed" || record.terminalOutcome.result.status === "failed");
 }
 
 function hasEquivalentCompletedRecoveryStatus(

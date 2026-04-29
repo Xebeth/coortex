@@ -264,6 +264,12 @@ absorbed the terminal result or decision, later commands must not
 replay it again. Later runtime progression, including resolved
 decisions and updated status text, must not regenerate a previously
 absorbed `result.submitted` or `decision.created`.
+The authority finalization side of the same recovery must also converge:
+after a decision or partial result has already detached active authority
+into a resumable claim with recovered provenance and native identity,
+later status, resume, or run commands must not emit another attachment
+or claim repair or report `completed-run-reconciled` unless new durable
+runtime work remains.
 When a recovered terminal decision is already resolved, the recovered
 decision packet must preserve its durable resolution metadata
 (`resolvedAt` and `resolutionSummary`) instead of degrading that

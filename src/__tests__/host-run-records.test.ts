@@ -84,9 +84,24 @@ test("decision identity matching prefers decision ids and falls back to stable f
       {
         ...decision,
         decisionId: "",
-        state: "resolved",
+        state: "open",
         resolvedAt: "2026-04-19T01:06:00.000Z",
         resolutionSummary: "Operator rejected the work."
+      }
+    ),
+    true
+  );
+  assert.equal(
+    matchesDecisionIdentity(
+      {
+        ...decision,
+        decisionId: "",
+        createdAt: "2026-04-19T01:00:00.000Z"
+      },
+      {
+        ...decision,
+        decisionId: "",
+        createdAt: "2026-04-19T01:01:00.000Z"
       }
     ),
     false
@@ -238,7 +253,7 @@ test("completed run matchers reuse the same decision and result identity rules",
       resolvedAt: "2026-04-19T02:31:00.000Z",
       resolutionSummary: "Operator rejected the work."
     }),
-    false
+    true
   );
   assert.equal(
     matchesCompletedRunResult(resultRecord, {

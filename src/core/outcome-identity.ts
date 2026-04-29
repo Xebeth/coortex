@@ -36,10 +36,7 @@ export function matchesDecisionIdentity(
         optionsEqual(candidate.options, expected.options) &&
         candidate.blockerSummary === expected.blockerSummary &&
         candidate.recommendedOption === expected.recommendedOption &&
-        candidate.state === expected.state &&
-        candidate.createdAt === expected.createdAt &&
-        candidate.resolvedAt === expected.resolvedAt &&
-        candidate.resolutionSummary === expected.resolutionSummary;
+        candidate.createdAt === expected.createdAt;
 }
 
 export function matchesResultIdentity(

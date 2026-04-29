@@ -47,6 +47,20 @@ function buildClaimProvenancePatch(
   };
 }
 
+function authorityProvenanceEqual(
+  left: RuntimeAuthorityProvenance | undefined,
+  right: RuntimeAuthorityProvenance
+): boolean {
+  return left?.kind === right.kind && left.source === right.source;
+}
+
+function adapterMetadataEqual(
+  left: Record<string, unknown> | undefined,
+  right: Record<string, unknown>
+): boolean {
+  return JSON.stringify(left ?? {}) === JSON.stringify(right);
+}
+
 function buildDetachedResumableAttachmentPatch(
   timestamp: string,
   repair?: {
@@ -766,18 +780,26 @@ export const AttachmentLifecycleService = {
     }
 
     if (activeBinding.attachment.state === "detached_resumable") {
-      const patch: Partial<RuntimeAttachment> = {
-        updatedAt: timestamp,
-        provenance: buildAuthorityProvenance(repair.provenanceKind)
-      };
+      const desiredProvenance = buildAuthorityProvenance(repair.provenanceKind);
+      const attachmentPatch: Partial<RuntimeAttachment> = {};
+      if (!authorityProvenanceEqual(activeBinding.attachment.provenance, desiredProvenance)) {
+        attachmentPatch.provenance = desiredProvenance;
+      }
       if (!activeBinding.attachment.nativeSessionId && repair.nativeSessionId) {
-        patch.nativeSessionId = repair.nativeSessionId;
+        attachmentPatch.nativeSessionId = repair.nativeSessionId;
       }
-      if (repair.adapterMetadata) {
-        patch.adapterMetadata = repair.adapterMetadata;
+      if (
+        repair.adapterMetadata &&
+        !adapterMetadataEqual(activeBinding.attachment.adapterMetadata, repair.adapterMetadata)
+      ) {
+        attachmentPatch.adapterMetadata = repair.adapterMetadata;
       }
+      if (Object.keys(attachmentPatch).length > 0) {
+        attachmentPatch.updatedAt = timestamp;
+      }
+
       const events: RuntimeEvent[] =
-        Object.keys(patch).length > 1
+        Object.keys(attachmentPatch).length > 0
           ? [
               {
                 eventId: randomUUID(),
@@ -786,21 +808,23 @@ export const AttachmentLifecycleService = {
                 type: "attachment.updated",
                 payload: {
                   attachmentId: activeBinding.attachment.id,
-                  patch
+                  patch: attachmentPatch
                 }
               }
             ]
           : [];
-      events.push({
-        eventId: randomUUID(),
-        sessionId: projection.sessionId,
-        timestamp,
-        type: "claim.updated",
-        payload: {
-          claimId: activeBinding.claim.id,
-          patch: buildClaimProvenancePatch(repair.provenanceKind)
-        }
-      });
+      if (!authorityProvenanceEqual(activeBinding.claim.provenance, desiredProvenance)) {
+        events.push({
+          eventId: randomUUID(),
+          sessionId: projection.sessionId,
+          timestamp,
+          type: "claim.updated",
+          payload: {
+            claimId: activeBinding.claim.id,
+            patch: buildClaimProvenancePatch(repair.provenanceKind)
+          }
+        });
+      }
       return events;
     }
 
