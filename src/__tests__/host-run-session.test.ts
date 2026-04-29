@@ -1397,6 +1397,173 @@ test("host-run resume keeps a foreign verified session id unverified on post-exi
   }
 });
 
+test("host-run session escalates fenced launch completion when terminal cleanup fails", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-launch-terminal-cleanup-failure";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000);
+  await runStore.claim(claimedRun);
+
+  const originalDeleteTextArtifactCas = store.deleteTextArtifactCas.bind(store);
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let failedDeletes = 0;
+  store.deleteTextArtifactCas = async (relativePath, expectedVersion) => {
+    if (relativePath === artifacts.runLeasePath(assignmentId) && failedDeletes < 2) {
+      failedDeletes += 1;
+      throw new Error("simulated launch lease cleanup failure");
+    }
+    return originalDeleteTextArtifactCas(relativePath, expectedVersion);
+  };
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  try {
+    const execution = await executeHostRunSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-launch-terminal-cleanup-failure",
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async () => ({
+        result: Promise.resolve({ exitCode: 0 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      }),
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      buildFailedOutcome: (failedAssignmentId, completedAt, summary) => ({
+        outcome: {
+          kind: "result",
+          capture: {
+            assignmentId: failedAssignmentId,
+            producerId: "matrix-host",
+            status: "failed",
+            summary,
+            changedFiles: [],
+            createdAt: completedAt
+          }
+        }
+      }),
+      deriveCompleted: async () => ({
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Launch completion should not hide cleanup failure.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        }
+      }),
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.equal(execution.outcome.kind, "result");
+    assert.equal(execution.outcome.capture.status, "failed");
+    assert.match(execution.outcome.capture.summary, /active lease cleanup failed/);
+    assert.match(execution.outcome.capture.summary, /simulated launch lease cleanup failure/);
+    assert.equal(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
+  } finally {
+    store.deleteTextArtifactCas = originalDeleteTextArtifactCas;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test("host-run resume escalates fenced completion when terminal cleanup fails", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.json`,
+    runLeasePath: (assignmentId) => `leases/${assignmentId}.json`,
+    lastRunPath: () => "runs/last.json"
+  };
+  const runStore = new HostRunStore(store, "matrix", artifacts);
+  const startedAt = "2026-04-11T10:00:00.000Z";
+  const assignmentId = "assignment-resume-terminal-cleanup-failure";
+  const requestedSessionId = "native-resume-terminal-cleanup-failure";
+  const claimedRun = createRunningRunRecord(assignmentId, startedAt, 30_000, requestedSessionId);
+  await runStore.claim(claimedRun);
+
+  const originalDeleteTextArtifactCas = store.deleteTextArtifactCas.bind(store);
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let failedDeletes = 0;
+  store.deleteTextArtifactCas = async (relativePath, expectedVersion) => {
+    if (relativePath === artifacts.runLeasePath(assignmentId) && failedDeletes < 2) {
+      failedDeletes += 1;
+      throw new Error("simulated resume lease cleanup failure");
+    }
+    return originalDeleteTextArtifactCas(relativePath, expectedVersion);
+  };
+  globalThis.setInterval = (() => 1 as unknown as NodeJS.Timeout) as typeof globalThis.setInterval;
+  globalThis.clearInterval = (() => undefined) as typeof globalThis.clearInterval;
+
+  try {
+    const result = await executeHostResumeSession({
+      assignmentId,
+      startedAt,
+      taskId: "session-resume-terminal-cleanup-failure",
+      requestedSessionId,
+      runStore,
+      runRecord: claimedRun,
+      leaseMs: 30_000,
+      heartbeatMs: 30_000,
+      startRun: async () => ({
+        result: Promise.resolve({ exitCode: 0 }),
+        terminate: async () => undefined,
+        waitForExit: async () => ({ code: 0 })
+      }),
+      deriveCompleted: async () => ({
+        outcome: {
+          outcome: {
+            kind: "result",
+            capture: {
+              assignmentId,
+              producerId: "matrix-host",
+              status: "completed",
+              summary: "Resume completion should not hide cleanup failure.",
+              changedFiles: [],
+              createdAt: "2026-04-11T10:01:00.000Z"
+            }
+          }
+        }
+      }),
+      getObservedSessionId: () => requestedSessionId,
+      getVerifiedSessionId: () => requestedSessionId,
+      summarizeExecutionFailure: (error) =>
+        error instanceof Error ? error.message : String(error),
+      summarizeVerificationFailure: () => undefined,
+      setActiveRun: () => undefined,
+      setActiveExecutionSettled: () => undefined
+    });
+
+    assert.equal(result.reclaimed, false);
+    assert.equal(result.reclaimState, "verified_then_failed");
+    assert.equal(result.sessionVerified, true);
+    assert.match(result.warning ?? "", /active lease cleanup failed/);
+    assert.match(result.warning ?? "", /simulated resume lease cleanup failure/);
+    assert.notEqual(await store.readTextArtifact(artifacts.runLeasePath(assignmentId)), undefined);
+  } finally {
+    store.deleteTextArtifactCas = originalDeleteTextArtifactCas;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
 test("host-run session rejects stale terminal publication after a newer live claim appears during normal completion", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {

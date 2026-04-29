@@ -1204,7 +1204,7 @@ test("host run store preserves a newer reclaim between terminal proof and lease 
   }
 });
 
-test("host run store persistWarning does not delete a newer lease that appears after terminal proof", async () => {
+test("host run store persistWarning fails closed when a newer lease appears during cleanup", async () => {
   const store = new MemoryArtifactStore();
   const artifacts: HostRunArtifactPaths = {
     runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
@@ -1274,37 +1274,38 @@ test("host run store persistWarning does not delete a newer lease that appears a
   };
 
   try {
-    const warning = await runStore.persistWarning({
-      assignmentId,
-      state: "completed",
-      startedAt: runningRecord.startedAt,
-      runInstanceId: adoptedOwnerFence,
-      completedAt: "2026-04-11T10:01:00.000Z",
-      outcomeKind: "result",
-      resultStatus: "completed",
-      summary: "Persist warning must not clear a newer reclaim lease.",
-      terminalOutcome: {
-        kind: "result",
-        result: {
-          producerId: "custom-host",
-          status: "completed",
-          summary: "Persist warning must not clear a newer reclaim lease.",
-          changedFiles: [],
-          createdAt: "2026-04-11T10:01:00.000Z"
+    await assert.rejects(
+      runStore.persistWarning({
+        assignmentId,
+        state: "completed",
+        startedAt: runningRecord.startedAt,
+        runInstanceId: adoptedOwnerFence,
+        completedAt: "2026-04-11T10:01:00.000Z",
+        outcomeKind: "result",
+        resultStatus: "completed",
+        summary: "Persist warning must not clear a newer reclaim lease.",
+        terminalOutcome: {
+          kind: "result",
+          result: {
+            producerId: "custom-host",
+            status: "completed",
+            summary: "Persist warning must not clear a newer reclaim lease.",
+            changedFiles: [],
+            createdAt: "2026-04-11T10:01:00.000Z"
+          }
+        },
+        adapterData: {
+          nativeRunId: "thread-adopt-warning-delete-race-1"
         }
-      },
-      adapterData: {
-        nativeRunId: "thread-adopt-warning-delete-race-1"
-      }
-    });
+      }),
+      /active lease cleanup failed/
+    );
 
     const inspected = await runStore.inspect(assignmentId);
     const lease = await store.readJsonArtifact<HostRunRecord>(artifacts.runLeasePath(assignmentId), "lease");
     const runRecord = await store.readJsonArtifact<HostRunRecord>(artifacts.runRecordPath(assignmentId), "record");
     const lastRun = await store.readJsonArtifact<HostRunRecord>(artifacts.lastRunPath(), "last-run");
 
-    assert.match(warning ?? "", /final run record could not be persisted/i);
-    assert.match(warning ?? "", /simulated final run-record write failure after newer lease/i);
     assert.equal(inspected?.state, "running");
     assert.equal(inspected?.runInstanceId, "run-instance-owner-3");
     assert.equal(lease?.runInstanceId, "run-instance-owner-3");
@@ -2371,6 +2372,55 @@ test("host run store escalates final persistence when lease cleanup fails", asyn
 
   assert.notEqual(
     await store.readTextArtifact(artifacts.runLeasePath("assignment-warning-cleanup"), "lease"),
+    undefined
+  );
+});
+
+test("host run store escalates fenced final persistence when lease cleanup fails", async () => {
+  const store = new MemoryArtifactStore();
+  const artifacts: HostRunArtifactPaths = {
+    runRecordPath: (assignmentId) => `records/${assignmentId}.state`,
+    runLeasePath: (assignmentId) => `locks/${assignmentId}.claim`,
+    lastRunPath: () => "pointers/current-run"
+  };
+  const runStore = new HostRunStore(store, "custom", artifacts);
+  const assignmentId = "assignment-fenced-warning-cleanup";
+  const ownerFence = "run-instance-fenced-warning-cleanup";
+  const runningRecord: HostRunRecord = {
+    assignmentId,
+    state: "running",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    runInstanceId: ownerFence,
+    heartbeatAt: "2026-04-11T10:00:00.000Z",
+    leaseExpiresAt: "2999-04-11T10:00:30.000Z"
+  };
+  const completedRecord: HostRunRecord = {
+    assignmentId,
+    state: "completed",
+    startedAt: "2026-04-11T10:00:00.000Z",
+    runInstanceId: ownerFence,
+    completedAt: "2026-04-11T10:01:00.000Z",
+    outcomeKind: "decision",
+    summary: "Need a human decision."
+  };
+
+  await runStore.claim(runningRecord);
+
+  const originalDeleteTextArtifactCas = store.deleteTextArtifactCas.bind(store);
+  store.deleteTextArtifactCas = async (relativePath, expectedVersion) => {
+    if (relativePath === artifacts.runLeasePath(assignmentId)) {
+      throw new Error("simulated fenced lease cleanup failure");
+    }
+    return originalDeleteTextArtifactCas(relativePath, expectedVersion);
+  };
+
+  await assert.rejects(
+    runStore.persistWarning(completedRecord),
+    /active lease cleanup failed/
+  );
+
+  assert.notEqual(
+    await store.readTextArtifact(artifacts.runLeasePath(assignmentId), "lease"),
     undefined
   );
 });

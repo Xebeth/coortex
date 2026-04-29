@@ -184,7 +184,6 @@ export class HostRunStore {
     } catch (error) {
       if (
         record.state !== "running" &&
-        !ownerFence &&
         !hasMintedStaleRunInstanceId(record) &&
         !isHostRunOwnershipFenceError(error)
       ) {
