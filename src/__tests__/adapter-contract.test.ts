@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { CodexAdapter } from "../hosts/codex/adapter/index.js";
+import { validateCodexStructuredOutcome } from "../hosts/codex/adapter/prompt.js";
 import type { CodexCommandRunner } from "../hosts/codex/adapter/cli.js";
 import { RuntimeStore } from "../persistence/store.js";
 import type { RuntimeConfig } from "../config/types.js";
@@ -89,6 +90,28 @@ test("codex adapter normalizes host result, decision, and telemetry captures", (
     outputTokens: 7,
     totalTokens: 18
   });
+});
+
+test("codex structured outcome validator rejects schema-forbidden decision option fields", () => {
+  assert.throws(
+    () => validateCodexStructuredOutcome({
+      outcomeType: "decision",
+      resultStatus: "",
+      resultSummary: "",
+      changedFiles: [],
+      blockerSummary: "Need an operator decision.",
+      decisionOptions: [
+        {
+          id: "wait",
+          label: "Wait",
+          summary: "Pause until guidance arrives.",
+          confidence: "high"
+        }
+      ],
+      recommendedOption: "wait"
+    }),
+    /unknown fields: confidence/
+  );
 });
 
 test("codex adapter mints stable ids for host captures when absent", () => {
@@ -938,6 +961,95 @@ test("codex adapter falls back to streamed wrapped-resume agent output when the 
   assert.equal(resumeResult.telemetry?.usage?.totalTokens, 9);
 });
 
+test("codex adapter rejects unknown fields in wrapped-resume transcript fallback", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-extra-field-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const adapter = new CodexAdapter({
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec() {
+      throw new Error("runExec should not be used in resume transcript extra-field coverage");
+    },
+    async startResume(input) {
+      return createImmediateRunningHandle((async () => {
+        await input.onEvent?.({ type: "thread.resumed", thread_id: input.sessionId });
+        return {
+          exitCode: 0,
+          stdout: [
+            JSON.stringify({
+              type: "item.completed",
+              item: {
+                id: "item-resume-extra-field",
+                type: "agent_message",
+                text: JSON.stringify({
+                  outcomeType: "result",
+                  resultStatus: "partial",
+                  resultSummary: "This payload has an unknown top-level field.",
+                  changedFiles: ["src/hosts/codex/adapter/prompt.ts"],
+                  blockerSummary: "",
+                  decisionOptions: [],
+                  recommendedOption: "",
+                  schemaDrift: true
+                })
+              }
+            }),
+            JSON.stringify({ type: "turn.completed", usage: { input_tokens: 5, output_tokens: 4 } })
+          ].join("\n"),
+          stderr: ""
+        };
+      })());
+    }
+  });
+
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const resumeResult = await adapter.resumeSession(store, projection, envelope, {
+    id: randomUUID(),
+    adapter: "codex",
+    host: "codex",
+    state: "detached_resumable",
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    detachedAt: nowIso(),
+    nativeSessionId: "thread-resume-extra-field",
+    provenance: {
+      kind: "launch",
+      source: "ctx.run"
+    }
+  });
+
+  assert.equal(resumeResult.reclaimed, true);
+  assert.equal(resumeResult.verifiedSessionId, "thread-resume-extra-field");
+  assert.equal(resumeResult.outcome.kind, "result");
+  assert.equal(resumeResult.outcome.capture.status, "failed");
+  assert.match(resumeResult.outcome.capture.summary, /invalid structured output/i);
+  assert.match(resumeResult.outcome.capture.summary, /unknown fields: schemaDrift/);
+});
+
 test("codex adapter rejects fenced wrapped-resume transcript fallback when the last-message file is unavailable", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-resume-stream-fenced-"));
   const store = RuntimeStore.forProject(projectRoot);
@@ -1195,6 +1307,77 @@ test("codex adapter does not replay stale last-message artifacts on rerun", asyn
   assert.equal(second.outcome.capture.status, "failed");
   assert.match(second.outcome.capture.summary, /invalid structured output/i);
   assert.equal(getNativeRunId(second.run), "thread-rerun-2");
+});
+
+test("codex adapter rejects unknown top-level fields in launch structured output", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-adapter-extra-field-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    workflow: "milestone-2"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const projection = await store.rebuildProjection();
+  const brief = buildRecoveryBrief(projection);
+  const runner: CodexCommandRunner = {
+    async startExec(input) {
+      return createMockRunningExec(this, input);
+    },
+    async runExec(input) {
+      await input.onEvent?.({ type: "thread.started", thread_id: "thread-extra-output" });
+      await mkdir(dirname(input.outputPath), { recursive: true });
+      await writeFile(
+        input.outputPath,
+        JSON.stringify({
+          outcomeType: "result",
+          resultStatus: "completed",
+          resultSummary: "This payload has an unknown top-level field.",
+          changedFiles: ["src/hosts/codex/adapter/prompt.ts"],
+          blockerSummary: "",
+          decisionOptions: [],
+          recommendedOption: "",
+          schemaDrift: true
+        }),
+        "utf8"
+      );
+      return {
+        exitCode: 0,
+        stdout: [
+          JSON.stringify({ type: "thread.started", thread_id: "thread-extra-output" }),
+          JSON.stringify({ type: "turn.completed", usage: { input_tokens: 9, output_tokens: 4 } })
+        ].join("\n"),
+        stderr: ""
+      };
+    }
+  };
+
+  const adapter = new CodexAdapter(runner);
+  await adapter.initialize(store, projection);
+  const envelope = await adapter.buildResumeEnvelope(store, projection, brief);
+  const execution = await adapter.executeAssignment(store, projection, envelope);
+
+  assert.equal(execution.outcome.kind, "result");
+  assert.equal(execution.outcome.capture.status, "failed");
+  assert.match(execution.outcome.capture.summary, /invalid structured output/i);
+  assert.match(execution.outcome.capture.summary, /unknown fields: schemaDrift/);
+  assert.equal(getNativeRunId(execution.run), "thread-extra-output");
 });
 
 test("codex adapter converts malformed structured output into a failed result", async () => {

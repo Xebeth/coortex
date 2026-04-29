@@ -1,5 +1,17 @@
 import type { TaskEnvelope } from "../../../adapters/contract.js";
 
+const codexStructuredOutcomeFields = [
+  "outcomeType",
+  "resultStatus",
+  "resultSummary",
+  "changedFiles",
+  "blockerSummary",
+  "decisionOptions",
+  "recommendedOption"
+] as const;
+
+const codexDecisionOptionFields = ["id", "label", "summary"] as const;
+
 export interface CodexStructuredOutcome {
   outcomeType: "result" | "decision";
   resultStatus: "partial" | "completed" | "failed" | "";
@@ -61,15 +73,7 @@ export function codexExecutionOutputSchema(): Record<string, unknown> {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     type: "object",
     additionalProperties: false,
-    required: [
-      "outcomeType",
-      "resultStatus",
-      "resultSummary",
-      "changedFiles",
-      "blockerSummary",
-      "decisionOptions",
-      "recommendedOption"
-    ],
+    required: [...codexStructuredOutcomeFields],
     properties: {
       outcomeType: {
         type: "string",
@@ -96,7 +100,7 @@ export function codexExecutionOutputSchema(): Record<string, unknown> {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["id", "label", "summary"],
+          required: [...codexDecisionOptionFields],
           properties: {
             id: { type: "string" },
             label: { type: "string" },
@@ -117,6 +121,7 @@ export function validateCodexStructuredOutcome(value: unknown): CodexStructuredO
   }
 
   const record = value as Record<string, unknown>;
+  assertOnlyKnownFields(record, "Codex structured output", codexStructuredOutcomeFields);
   const outcomeType = readEnum(record, "outcomeType", ["result", "decision"]);
   const resultStatus = readEnum(record, "resultStatus", ["partial", "completed", "failed", ""]);
   const resultSummary = readString(record, "resultSummary");
@@ -145,12 +150,24 @@ function readDecisionOptions(value: unknown): CodexStructuredOutcome["decisionOp
       throw new Error(`Codex decision option ${index} must be an object.`);
     }
     const record = entry as Record<string, unknown>;
+    assertOnlyKnownFields(record, `Codex decision option ${index}`, codexDecisionOptionFields);
     return {
       id: readString(record, "id"),
       label: readString(record, "label"),
       summary: readString(record, "summary")
     };
   });
+}
+
+function assertOnlyKnownFields(
+  record: Record<string, unknown>,
+  context: string,
+  allowedFields: readonly string[]
+): void {
+  const unknownFields = Object.keys(record).filter((key) => !allowedFields.includes(key));
+  if (unknownFields.length > 0) {
+    throw new Error(`${context} must not include unknown fields: ${unknownFields.join(", ")}.`);
+  }
 }
 
 function readStringArray(record: Record<string, unknown>, key: string): string[] {
