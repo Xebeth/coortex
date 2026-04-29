@@ -1490,6 +1490,106 @@ test("projection persistence handle snapshot fallback preserves later real event
   assert.equal([...recovered.projection.decisions.values()].at(-1)?.blockerSummary, "Later durable decision survived the snapshot-fallback write.");
 });
 
+test("snapshot fallback persistEvents ignores a partially invalid suffix", async () => {
+  const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-invalid-fallback-write-"));
+  const store = RuntimeStore.forProject(projectRoot);
+  const sessionId = randomUUID();
+  const config: RuntimeConfig = {
+    version: 1,
+    sessionId,
+    adapter: "codex",
+    host: "codex",
+    rootPath: projectRoot,
+    createdAt: nowIso()
+  };
+
+  await store.initialize(config);
+  const bootstrap = createBootstrapRuntime({
+    rootPath: projectRoot,
+    sessionId,
+    adapter: "codex",
+    host: "codex"
+  });
+  for (const event of bootstrap.events) {
+    await store.appendEvent(event);
+  }
+
+  const assignmentId = bootstrap.initialAssignmentId;
+  const snapshot = toSnapshot(await store.rebuildProjection());
+  await store.writeSnapshot(snapshot);
+
+  await store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp: nowIso(),
+      type: "decision.resolved",
+      payload: {
+        decisionId: randomUUID(),
+        resolvedAt: nowIso(),
+        resolutionSummary: "Invalid suffix decision resolution."
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp: nowIso(),
+      type: "result.submitted",
+      payload: {
+        result: {
+          resultId: randomUUID(),
+          assignmentId,
+          producerId: "worker-1",
+          status: "partial",
+          summary: "Partially applied invalid suffix result.",
+          changedFiles: ["src/persistence/projection-recovery.ts"],
+          createdAt: nowIso()
+        }
+      }
+    }
+  ]);
+  await writeFile(
+    store.eventsPath,
+    `${await readFile(store.eventsPath, "utf8")}{"broken":\n`,
+    "utf8"
+  );
+  const eventsBefore = await readFile(store.eventsPath, "utf8");
+
+  const recovered = await store.loadProjectionWithRecovery();
+  const persisted = await recovered.persistence.persistEvents([
+    {
+      eventId: randomUUID(),
+      sessionId,
+      timestamp: nowIso(),
+      type: "assignment.updated",
+      payload: {
+        assignmentId,
+        patch: {
+          state: "queued",
+          updatedAt: nowIso()
+        }
+      }
+    }
+  ]);
+  const repairedSnapshot = await store.loadSnapshot();
+
+  assert.match(recovered.warning ?? "", /could not rebuild runtime state; fell back to .*snapshot\.json/i);
+  assert.match(persisted.warning ?? "", /Event replay skipped malformed line/i);
+  assert.equal(
+    [...persisted.projection.results.values()].some(
+      (result) => result.summary === "Partially applied invalid suffix result."
+    ),
+    false
+  );
+  assert.equal(
+    repairedSnapshot?.results.some(
+      (result) => result.summary === "Partially applied invalid suffix result."
+    ),
+    false
+  );
+  assert.equal(await readFile(store.eventsPath, "utf8"), eventsBefore);
+});
+
 test("runtime store rebuilds from snapshot plus a structurally valid salvaged suffix", async () => {
   const projectRoot = await mkdtemp(join(tmpdir(), "coortex-persistence-snapshot-fallback-"));
   const store = RuntimeStore.forProject(projectRoot);

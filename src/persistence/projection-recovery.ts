@@ -191,23 +191,20 @@ export class ProjectionRecoveryService {
       };
     }
 
-    let hydratedProjection = projection;
-    let hydrated = false;
-    for (const event of hydrationEvents) {
-      try {
-        hydratedProjection = applyRuntimeEventsToProjection(hydratedProjection, [event]);
-        hydrated = true;
-      } catch (error) {
-        if (isRuntimeAuthorityIntegrityError(error)) {
-          throw error;
-        }
-        continue;
+    try {
+      return {
+        projection: applyRuntimeEventsToProjection(projection, hydrationEvents),
+        hydrated: true
+      };
+    } catch (error) {
+      if (isRuntimeAuthorityIntegrityError(error)) {
+        throw error;
       }
+      return {
+        projection,
+        hydrated: false
+      };
     }
-    return {
-      projection: hydrated ? hydratedProjection : projection,
-      hydrated
-    };
   }
 
   hydrateMissingAssignmentFromReplayableEvents(
@@ -223,13 +220,16 @@ export class ProjectionRecoveryService {
       };
     }
 
-    const assignmentEvent = snapshotBoundaryEventId
-      ? selectReplayableSuffixEvents(replayableEvents, snapshotBoundaryEventId)?.find(
-          (event): event is Extract<RuntimeEvent, { type: "assignment.created" }> =>
-            event.type === "assignment.created" && event.payload.assignment.id === assignmentId
-        )
+    const suffixEvents = snapshotBoundaryEventId
+      ? selectReplayableSuffixEvents(replayableEvents, snapshotBoundaryEventId)
       : undefined;
-    if (!assignmentEvent) {
+    if (
+      !suffixEvents ||
+      !suffixEvents.some(
+        (event): event is Extract<RuntimeEvent, { type: "assignment.created" }> =>
+          event.type === "assignment.created" && event.payload.assignment.id === assignmentId
+      )
+    ) {
       return {
         projection,
         hydrated: false
@@ -238,7 +238,7 @@ export class ProjectionRecoveryService {
 
     try {
       return {
-        projection: applyRuntimeEventsToProjection(projection, [assignmentEvent]),
+        projection: applyRuntimeEventsToProjection(projection, suffixEvents),
         hydrated: true
       };
     } catch (error) {
@@ -497,10 +497,28 @@ export class ProjectionRecoveryService {
               projection,
               hydrated: false
             },
-      loadCompletedRecoveryProofEvents: async () =>
-        strategy === "snapshot-fallback"
-          ? selectReplayableSuffixEvents(replayableEvents, snapshotBoundaryEventId ?? "")
-          : replayableEvents,
+      loadCompletedRecoveryProofEvents: async () => {
+        if (strategy !== "snapshot-fallback") {
+          return replayableEvents;
+        }
+        const latestSnapshot = await this.store.loadSnapshot();
+        if (!latestSnapshot) {
+          return undefined;
+        }
+        const suffixEvents = selectReplayableSuffixEvents(
+          replayableEvents,
+          snapshotBoundaryEventId ?? ""
+        );
+        if (!suffixEvents || suffixEvents.length === 0) {
+          return suffixEvents;
+        }
+        const hydrated = this.hydrateProjectionFromReplayableEvents(
+          fromSnapshot(latestSnapshot),
+          replayableEvents,
+          latestSnapshot.lastEventId
+        );
+        return hydrated.hydrated ? suffixEvents : undefined;
+      },
       reportsCompletedRecoveryWithoutEvents: () => strategy === "snapshot-fallback",
       shouldEmitAlreadyReconciledStaleRunSuccess: (cleanupSource) =>
         strategy === "event-log" && isStaleRunCleanupRecord(cleanupSource)

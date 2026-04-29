@@ -3692,6 +3692,63 @@ test("host-run recovery matrix retries snapshot-fallback completed-run repair wi
   assert.equal(await readFile(ctx.store.eventsPath, "utf8"), brokenEventsContent);
 });
 
+test("host-run recovery matrix completed snapshot fallback ignores semantically invalid suffix hydration", async () => {
+  const ctx = await createMatrixContext();
+  await ctx.store.syncSnapshotFromEvents();
+  const completedRecord = completedResultRecord(
+    ctx.assignmentId,
+    "completed",
+    "Snapshot-owned completed result."
+  );
+  const completedAt = completedRecord.completedAt!;
+  assert.equal(completedRecord.terminalOutcome?.kind, "result");
+  await ctx.store.writeJsonArtifact(`adapters/matrix/runs/${ctx.assignmentId}.json`, completedRecord);
+  await ctx.store.writeJsonArtifact("adapters/matrix/last-run.json", completedRecord);
+
+  const snapshot = await ctx.store.loadSnapshot();
+  assert.ok(snapshot, "expected a snapshot before forcing fallback");
+  snapshot.results = [
+    {
+      ...completedRecord.terminalOutcome.result,
+      resultId: completedRecord.terminalOutcome.result.resultId ?? randomUUID(),
+      assignmentId: ctx.assignmentId
+    }
+  ];
+  snapshot.assignments = snapshot.assignments.map((assignment) =>
+    assignment.id === ctx.assignmentId
+      ? { ...assignment, state: "completed", updatedAt: completedAt }
+      : assignment
+  );
+  snapshot.status = {
+    ...snapshot.status,
+    activeMode: "idle",
+    currentObjective: "Await the next assignment.",
+    activeAssignmentIds: [],
+    lastDurableOutputAt: completedAt,
+    resumeReady: true
+  };
+  await ctx.store.writeSnapshot(snapshot);
+  await appendInvalidStatusSuffix(
+    ctx,
+    [ctx.assignmentId],
+    "Invalid suffix tried to reactivate completed work."
+  );
+
+  const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
+  const repairedSnapshot = await ctx.store.loadSnapshot();
+
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "completed");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, []);
+  assert.equal(recovered.projection.status.currentObjective, "Await the next assignment.");
+  assert.equal(
+    repairedSnapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state,
+    "completed"
+  );
+  assert.deepEqual(repairedSnapshot?.status.activeAssignmentIds, []);
+  assert.equal(repairedSnapshot?.status.currentObjective, "Await the next assignment.");
+});
+
 test("host-run recovery matrix preserves orphaned attachment truth across snapshot-only reclaim failure", async () => {
   const adapter = new ReclaimFailureMatrixAdapter();
   const ctx = await createMatrixContext(adapter);
@@ -3925,6 +3982,58 @@ test("host-run recovery matrix repairs stale snapshot before cleanup on retry wh
   assert.deepEqual(recovered.projection.status.activeAssignmentIds, [ctx.assignmentId]);
   assert.equal(snapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state, "queued");
   assert.deepEqual(snapshot?.status.activeAssignmentIds, [ctx.assignmentId]);
+});
+
+test("host-run recovery matrix stale snapshot fallback ignores semantically invalid suffix hydration", async () => {
+  const ctx = await createMatrixContext();
+  await ctx.store.syncSnapshotFromEvents();
+  await ctx.adapter.runStore.write({
+    assignmentId: ctx.assignmentId,
+    state: "completed",
+    startedAt: nowIso(),
+    completedAt: nowIso(),
+    staleAt: nowIso(),
+    staleReasonCode: "expired_lease",
+    staleReason: "Run lease expired at 2000-01-01T00:00:00.000Z."
+  });
+
+  const snapshot = await ctx.store.loadSnapshot();
+  assert.ok(snapshot, "expected a snapshot before forcing fallback");
+  const retryObjective = `Retry assignment ${ctx.assignmentId}: ${
+    ctx.projection.assignments.get(ctx.assignmentId)?.objective
+  }`;
+  snapshot.assignments = snapshot.assignments.map((assignment) =>
+    assignment.id === ctx.assignmentId
+      ? { ...assignment, state: "queued", updatedAt: nowIso() }
+      : assignment
+  );
+  snapshot.status = {
+    ...snapshot.status,
+    activeAssignmentIds: [ctx.assignmentId],
+    currentObjective: retryObjective,
+    lastDurableOutputAt: nowIso(),
+    resumeReady: true
+  };
+  await ctx.store.writeSnapshot(snapshot);
+  await appendInvalidStatusSuffix(
+    ctx,
+    [],
+    "Invalid suffix tried to clear stale retry status."
+  );
+
+  const loaded = await loadOperatorProjectionWithDiagnostics(ctx.store);
+  const recovered = await reconcileActiveRuns(ctx.store, ctx.adapter, loaded.projection);
+  const repairedSnapshot = await ctx.store.loadSnapshot();
+
+  assert.equal(recovered.projection.assignments.get(ctx.assignmentId)?.state, "queued");
+  assert.deepEqual(recovered.projection.status.activeAssignmentIds, [ctx.assignmentId]);
+  assert.equal(recovered.projection.status.currentObjective, retryObjective);
+  assert.equal(
+    repairedSnapshot?.assignments.find((assignment) => assignment.id === ctx.assignmentId)?.state,
+    "queued"
+  );
+  assert.deepEqual(repairedSnapshot?.status.activeAssignmentIds, [ctx.assignmentId]);
+  assert.equal(repairedSnapshot?.status.currentObjective, retryObjective);
 });
 
 test("host-run recovery matrix retries malformed lease cleanup without duplicating queued transitions", async () => {
@@ -4424,6 +4533,41 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs = 2_000): Promis
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Condition was not met within ${timeoutMs}ms.`);
+}
+
+async function appendInvalidStatusSuffix(
+  ctx: MatrixContext,
+  activeAssignmentIds: string[],
+  currentObjective: string
+): Promise<void> {
+  const timestamp = nowIso();
+  await ctx.store.appendEvents([
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp,
+      type: "decision.resolved",
+      payload: {
+        decisionId: randomUUID(),
+        resolvedAt: timestamp,
+        resolutionSummary: "Invalid suffix decision resolution."
+      }
+    },
+    {
+      eventId: randomUUID(),
+      sessionId: ctx.projection.sessionId,
+      timestamp,
+      type: "status.updated",
+      payload: {
+        status: {
+          ...ctx.projection.status,
+          activeAssignmentIds,
+          currentObjective,
+          lastDurableOutputAt: timestamp
+        }
+      }
+    }
+  ]);
 }
 
 async function appendActiveAssignment(ctx: MatrixContext): Promise<string> {
