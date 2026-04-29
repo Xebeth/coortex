@@ -371,12 +371,16 @@ async function reconcileProvisionalAttachmentClaims(
       changed = true;
       continue;
     }
+    if (hasLiveLease) {
+      // The launch window between lease claim and durable native identity is still live
+      // execution authority. Leave the provisional claim and lease intact so duplicate
+      // commands fail closed instead of clearing and reissuing the assignment.
+      continue;
+    }
 
     const startedHostRun = !!record;
     const shouldRequeue = assignment?.state === "in_progress";
-    const cleanupReason = hasLiveLease
-      ? "Wrapped launch left only unverifiable provisional session state."
-      : "Wrapped launch ended before native session identity could be finalized.";
+    const cleanupReason = "Wrapped launch ended before native session identity could be finalized.";
     if (startedHostRun || shouldRequeue) {
       const clearedProvisional = await AttachmentLifecycleService.cleanupHostRunArtifactsAndOrphanClaim(
         context.store,

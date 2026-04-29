@@ -182,9 +182,12 @@ rules:
   operator-facing envelope from final projection truth, including top-
   level recent-results and trim metadata, rather than patching a
   pre-transition envelope.
-- Provisional-authority cleanup may clear provisional attachment truth
-  before host cleanup finishes, but it must not surface queued retry
-  truth unless lease cleanup has been proved.
+- Provisional-authority cleanup must preserve a non-expired live host
+  lease as the current launch authority, even when native session
+  identity has not been persisted yet. Cleanup may clear abandoned
+  provisional attachment truth only after the lease is stale or missing,
+  or a terminal host record proves the launch ended, and it must not
+  surface queued retry truth unless lease cleanup has been proved.
 
 ---
 
@@ -255,6 +258,10 @@ If the active binding is still `provisional` but the completed host run
 contains a durable native session id, reconciliation must promote that
 binding into `detached_resumable` authority before provisional cleanup
 can treat it as abandoned launch state.
+If the active binding is still `provisional` and the host run is still
+covered by a non-expired live lease, reconciliation must leave the
+binding and lease intact so concurrent commands fail closed instead of
+reissuing the assignment.
 If the active binding is already `detached_resumable` but missing a
 stored native session id, completed-run reconciliation must backfill
 that id from durable host metadata before leaving the claim resumable.

@@ -165,6 +165,11 @@ For Milestone 2 reclaim semantics:
   available
 - `provisional` is not authoritative resumable truth until runtime
   reconciliation can promote it
+- a valid live host-run lease paired with provisional launch authority
+  remains the execution authority even before native session identity is
+  durable; reconciliation must not orphan that provisional authority or
+  clear the lease until the lease is stale, missing, or a terminal host
+  record proves the launch ended
 - authoritative attachment truth may exist without wrapped-reclaim
   eligibility; wrapped reclaim requires a stored native session id
 - host-session identity only becomes runtime-significant after the

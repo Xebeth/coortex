@@ -737,10 +737,10 @@ test("milestone-2 integration: reclaim cleanup failure does not surface queued r
   );
 });
 
-test("milestone-2 integration: provisional cleanup failure does not surface queued retry truth while the lease blocker remains", serial, async () => {
+test("milestone-2 integration: live provisional lease without identity remains a blocker", serial, async () => {
   const setup = await createSmokeSetupWithRunner({
     runExec: async () => {
-      throw new Error("runExec should not be used in provisional cleanup failure coverage");
+      throw new Error("runExec should not be used while live provisional lease blocks");
     }
   });
 
@@ -817,38 +817,46 @@ test("milestone-2 integration: provisional cleanup failure does not surface queu
   await setup.store.writeJsonArtifact("adapters/codex/last-run.json", runningRecord);
 
   const originalReconcileStaleRun = setup.adapter.reconcileStaleRun.bind(setup.adapter);
+  let cleanupAttempts = 0;
   setup.adapter.reconcileStaleRun = async () => {
-    throw new Error("simulated provisional cleanup failure");
+    cleanupAttempts += 1;
+    throw new Error("live provisional lease should not be cleaned up");
   };
 
-  await assert.rejects(
-    loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter),
-    /Host run cleanup failed to clear the active lease for assignment/
+  let reconciled!: Awaited<ReturnType<typeof loadReconciledProjectionWithDiagnostics>>;
+  try {
+    reconciled = await loadReconciledProjectionWithDiagnostics(setup.store, setup.adapter);
+  } finally {
+    setup.adapter.reconcileStaleRun = originalReconcileStaleRun;
+  }
+
+  const attachment = reconciled.projection.attachments.get(attachmentId);
+  const claim = reconciled.projection.claims.get(claimId);
+
+  assert.equal(cleanupAttempts, 0);
+  assert.deepEqual(reconciled.activeLeases, [setup.assignmentId]);
+  assert.ok(
+    reconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present")
   );
-
-  setup.adapter.reconcileStaleRun = originalReconcileStaleRun;
-
-  const projectionAfter = await loadOperatorProjection(setup.store);
-  const attachment = projectionAfter.attachments.get(attachmentId);
-  const claim = projectionAfter.claims.get(claimId);
-
-  assert.equal(attachment?.state, "orphaned");
-  assert.equal(claim?.state, "orphaned");
-  assert.equal(projectionAfter.assignments.get(setup.assignmentId)?.state, "in_progress");
-  assert.ok(!projectionAfter.status.currentObjective.startsWith(`Retry assignment ${setup.assignmentId}:`));
+  assert.equal(attachment?.state, "provisional");
+  assert.equal(claim?.state, "active");
+  assert.equal(reconciled.projection.assignments.get(setup.assignmentId)?.state, "in_progress");
+  assert.ok(
+    !reconciled.projection.status.currentObjective.startsWith(`Retry assignment ${setup.assignmentId}:`)
+  );
   await assert.rejects(
     runRuntime(setup.store, setup.adapter),
     /already has an active host run lease/
   );
 });
 
-test("milestone-2 integration: provisional cleanup removes the lease before reconciled status surfaces blocker truth", async () => {
+test("milestone-2 integration: stale provisional cleanup removes the lease before surfacing retry truth", async () => {
   const setup = await createSmokeSetup(async () => {
-    throw new Error("runner should not be used in successful provisional cleanup coverage");
+    throw new Error("runner should not be used in stale provisional cleanup coverage");
   });
 
   const projection = await loadOperatorProjection(setup.store);
-  const timestamp = nowIso();
+  const timestamp = new Date(Date.now() - 60_000).toISOString();
   const attachmentId = randomUUID();
   const claimId = randomUUID();
   await setup.store.appendEvents([
@@ -900,7 +908,7 @@ test("milestone-2 integration: provisional cleanup removes the lease before reco
     state: "running",
     startedAt: timestamp,
     heartbeatAt: timestamp,
-    leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    leaseExpiresAt: new Date(Date.now() - 1_000).toISOString()
   };
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.json`, runningRecord);
   await setup.store.writeJsonArtifact(`adapters/codex/runs/${setup.assignmentId}.lease.json`, runningRecord);
@@ -916,6 +924,7 @@ test("milestone-2 integration: provisional cleanup removes the lease before reco
     reconciled.diagnostics.some((diagnostic) => diagnostic.code === "active-run-present"),
     false
   );
+  assert.ok(reconciled.diagnostics.some((diagnostic) => diagnostic.code === "stale-run-reconciled"));
   assert.equal(repairedAttachment?.state, "orphaned");
   assert.equal(repairedClaim?.state, "orphaned");
   assert.equal(reconciled.projection.assignments.get(setup.assignmentId)?.state, "queued");

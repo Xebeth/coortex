@@ -62,6 +62,9 @@ The current repository now guarantees:
 - foreign reclaim of an attached assignment is rejected
 - duplicate assignment issuance is blocked while an authoritative
   attachment or valid active lease still owns the work
+- the launch window between lease claim and durable native session
+  identity is still protected by that active lease; provisional cleanup
+  must not clear it while the lease is live
 
 - attachment answers which Coortex-managed host session is authoritative
   for the work and whether it is attached, detached-but-resumable,
@@ -115,6 +118,9 @@ It acquires the host-run lease, creates provisional launch authority,
 promotes that authority only after durable native session identity is
 captured, and persists result or decision outcomes through the normal
 runtime-owned outcome path.
+Until that identity is durable, the active lease remains the fail-closed
+launch authority and concurrent commands must not clear provisional
+state or issue a replacement run.
 
 If the thread-start metadata write itself degrades, the host outcome may
 still finish successfully, but the native session id is intentionally
